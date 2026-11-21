@@ -1,0 +1,52 @@
+## Interface: 120100, 120105
+## Title: LumaUI
+## Notes: A modular interface for World of Warcraft Retail.
+## Notes-zhCN: 独立设计的正式服模块化界面。
+## Author: LumaUI Contributors
+## Version: 0.15.0
+## SavedVariables: LumaUIDB
+## IconTexture: Interface\Icons\INV_Misc_Gem_Pearl_02
+
+Core\Bootstrap.lua
+Locales\Strings.lua
+Core\Capabilities.lua
+Core\Store.lua
+Core\Runtime.lua
+UI\Pixel.lua
+UI\Theme.lua
+UI\Transitions.lua
+UI\Layout.lua
+UI\Controls.lua
+UI\Items.lua
+UI\MemberInfo.lua
+UI\PrivateAuras.lua
+UI\Settings.lua
+Modules\Launcher.lua
+Modules\Minimap.lua
+Modules\QuestTracker.lua
+Modules\QuestList.lua
+Modules\Reports.lua
+Modules\DataStrip.lua
+Modules\Experience.lua
+Modules\Chat.lua
+Modules\ChatTabs.lua
+Modules\Tooltip.lua
+Modules\Inventory.lua
+Modules\UnitParts.lua
+Modules\UnitFrames.lua
+Modules\UnitGroup.lua
+Modules\CharacterWindow.lua
+# ==== TRACK-P2: UNIT GROUPS — insert new files above this line ====
+Modules\Bank.lua
+# ==== TRACK-P2: BANK — insert new files above this line ====
+Modules\SystemWindows.lua
+# ==== TRACK-P2: SYSTEM WINDOWS — insert new files above this line ====
+Modules\RaidFrames.lua
+# ==== TRACK-P3: RAID — insert new files above this line ====
+Modules\CombatText.lua
+# ==== TRACK-P3: MISC — insert new files above this line ====
+Modules\Nameplates.lua
+Modules\ActionPanel.lua
+Modules\ActionButtons.lua
+Modules\ClickCast.lua
+Core\Startup.lua

@@ -1,0 +1,12 @@
+# 统一 LF：Windows 侧 core.autocrlf=true，否则检出会把 Lua/TOC 改写成 CRLF，
+# 与 macOS 工作副本来回比对时产生整文件差异。
+* text=auto eol=lf
+
+# 二进制素材不做行尾转换，也不做文本差异
+*.tga binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary

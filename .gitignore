@@ -1,0 +1,19 @@
+# 本地评审、计划与迭代记录：不进入仓库，也不进入发布包
+/agent_flow/
+
+# 本地构建输出（发布 zip、解包预览目录）
+/dist/
+
+# 开发依赖（luaparse / fengari 等，仅本地校验使用）
+/node_modules/
+
+# 日志
+*.log
+
+# 操作系统与编辑器噪音
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+/.idea/
+/.vscode/
