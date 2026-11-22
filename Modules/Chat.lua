@@ -132,8 +132,9 @@ local function style(entry)
                 }
             end
         end
-        if not current or current.file ~= font.file or current.height ~= font.height then
-            if not style.boxFont and current and current.file and current.height then style.boxFont = current end
+        if current and current.file and current.height
+            and (current.file ~= font.file or current.height ~= font.height or current.flags ~= font.flags) then
+            if not style.boxFont then style.boxFont = current end
             pcall(box.SetFont, box, font.file, font.height, font.flags)
         end
     end
@@ -141,9 +142,9 @@ local function style(entry)
         local ok, spacing = pcall(frame.GetSpacing, frame)
         spacing = ok and app.Capabilities.Plain(spacing, "number") or nil
         if spacing then
-            -- A sixth of the font height is one pixel at the default size and
-            -- stays proportional at larger client font sizes.
-            local target = font.height + math.max(1, math.floor(font.height / 6))
+            -- The native scrolling frame places each line after the preceding
+            -- line's bounds, then adds this spacing. It is an extra gap.
+            local target = math.max(1, math.floor(font.height / 6))
             if spacing ~= target then
                 if not style.spacing then style.spacing = spacing end
                 pcall(frame.SetSpacing, frame, target)
@@ -179,7 +180,11 @@ local function fadeEdit(entry, to)
         end
     end
     if to > 0 then background:Show() end
-    local task = app.Transitions:Fade(entry, background, to, FADE, done, "focus")
+    local task = app.Transitions:Animate(entry, "focus", {
+        from = background:GetAlpha(), to = to, duration = FADE,
+        apply = function(value) background:SetAlpha(value) end,
+        onDone = done,
+    })
     entry.editFading = task ~= nil
 end
 
@@ -206,8 +211,8 @@ local function setFocus(entry, active)
         -- task outlives the frame it decorates.
         app.Transitions:Cancel(entry, "focus")
         entry.editFading = false
-        background:SetAlpha(entry.focused and 1 or 0)
-        background:SetShown(entry.focused)
+        background:SetAlpha(0)
+        background:Hide()
         return
     end
     fadeEdit(entry, entry.focused and 1 or 0)
@@ -254,7 +259,7 @@ local function paint(entry)
         background:SetPoint("TOPLEFT", frame, "TOPLEFT", -2, 3)
         background:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 2, -6)
     end
-    app.Theme:PaintSurface(background, "chat")
+    app.Surface:Plate(background, "chat")
     background:SetShown(frame:IsVisible())
 
     local box = entry.editBox
@@ -266,7 +271,7 @@ local function paint(entry)
         -- itself stays with ChatEdit_UpdateHeader, which owns the channel header.
         editBackground:SetPoint("TOPLEFT", box, "TOPLEFT", -6, 6)
         editBackground:SetPoint("BOTTOMRIGHT", box, "BOTTOMRIGHT", 6, -6)
-        app.Theme:PaintSurface(editBackground, "chatActive")
+        app.Surface:Plate(editBackground, "chatActive")
         syncEdit(entry)
     end
 end
@@ -275,9 +280,10 @@ local function hook(entry, box)
     local frame = entry.frame
     if not entry.windowHooked then
         frame:HookScript("OnShow", function()
-            if module.running then app:Call("chat/window-show", refreshEntry, entry) end
+            if module.running and entry.attached then app:Call("chat/window-show", refreshEntry, entry) end
         end)
         frame:HookScript("OnHide", function()
+            if not entry.attached then return end
             if entry.background then entry.background:Hide() end
             if entry.editBackground then
                 app.Transitions:Cancel(entry, "focus")
@@ -288,16 +294,21 @@ local function hook(entry, box)
         end)
         entry.windowHooked = true
     end
-    if box and not entry.editHooked then
+    entry.editHooked = entry.editHooked or {}
+    if box and not entry.editHooked[box] then
         -- Focus, not visibility: with the "im" chat style the box stays on
         -- screen while deactivated, and only focus proves the player is typing.
         box:HookScript("OnEditFocusGained", function()
-            if module.running then app:Call("chat/focus", setFocus, entry, true) end
+            if module.running and entry.attached and entry.editBox == box then
+                app:Call("chat/focus", setFocus, entry, true)
+            end
         end)
         box:HookScript("OnEditFocusLost", function()
-            if module.running then app:Call("chat/blur", setFocus, entry, false) end
+            if module.running and entry.attached and entry.editBox == box then
+                app:Call("chat/blur", setFocus, entry, false)
+            end
         end)
-        entry.editHooked = true
+        entry.editHooked[box] = true
     end
 end
 
@@ -308,6 +319,7 @@ end
 
 local function detachEntry(entry)
     if not entry then return end
+    entry.attached = false
     app.Transitions:Cancel(entry, "focus")
     entry.editFading = nil
     entry.focused = nil
@@ -336,7 +348,18 @@ local function attach(self)
                 entry = { frame = frame }
                 self.windows[index] = entry
             end
-            entry.editBox = editBoxFor(frame)
+            local box = editBoxFor(frame)
+            if entry.editBox ~= box then
+                app.Transitions:Cancel(entry, "focus")
+                entry.editFading, entry.focused = nil, nil
+                if entry.editBackground then
+                    entry.editBackground:SetAlpha(0)
+                    entry.editBackground:Hide()
+                end
+                restoreStyle(entry)
+                entry.editBox = box
+            end
+            entry.attached = true
             refreshEntry(entry)
             live[index] = true
         end

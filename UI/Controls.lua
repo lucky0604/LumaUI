@@ -13,6 +13,27 @@ local function accent()
     return app.Theme:Accent()
 end
 
+-- A hairline that exists only while a control has a state to announce. Idle
+-- controls have no edge at all: the border belongs to the interaction, not to the
+-- material, and that is the difference between a designed control and a grey box.
+-- It is a child frame rather than the control's own backdrop so switching it on and
+-- off never rebuilds the fill.
+local function newRing(frame)
+    if type(CreateFrame) ~= "function" then return nil end
+    local ring = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    if not ring or type(ring.SetBackdrop) ~= "function" then return nil end
+    ring:SetAllPoints(frame)
+    ring:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1) })
+    ring:SetBackdropColor(0, 0, 0, 0)
+    ring:SetBackdropBorderColor(0, 0, 0, 0)
+    return ring
+end
+
+local function setRing(control, color, alpha)
+    if not control.ring then return end
+    control.ring:SetBackdropBorderColor(color[1], color[2], color[3], alpha or 0)
+end
+
 local function hoverTo(control, target)
     local overlay = control.hoverOverlay
     if not overlay then return end
@@ -28,10 +49,13 @@ local function apply(control)
     local theme = app.Theme
     local line = theme.colors.line
     local color = accent()
+    local ringOn = false
     if state.disabled then
         -- A disabled control loses its edge and hover wash; it never looks like
-        -- a target the player can press.
+        -- a target the player can press. A flat row stays transparent even when
+        -- disabled: only its text dims, so the list keeps its rhythm.
         theme:PaintSurface(control, "embedded")
+        if control.flat then control:SetBackdropColor(0, 0, 0, 0) end
         if control.text then
             local muted = theme.colors.muted
             control.text:SetTextColor(muted[1], muted[2], muted[3], 1)
@@ -39,18 +63,20 @@ local function apply(control)
         if control.hoverOverlay then control.hoverOverlay:SetAlpha(0) end
     else
         theme:PaintSurface(control, "button")
+        if control.flat then
+            -- A list row is text on the page, not a button-shaped slab: it keeps
+            -- its fill only while it is being touched. Stacking one raised patch
+            -- per row is exactly what turned a settings page into a grid of boxes.
+            if not (state.hover or state.pressed or state.selected) then
+                control:SetBackdropColor(0, 0, 0, 0)
+            end
+        end
         if state.pressed then
             local raised = theme.colors.raised
             control:SetBackdropColor(raised[1] * 1.6, raised[2] * 1.6, raised[3] * 1.6,
                 theme:Opacity("windowOpacity"))
         end
-        local r, g, b = line[1], line[2], line[3]
-        if state.selected or state.hover or state.focus then
-            r, g, b = color[1], color[2], color[3]
-        elseif control.kind == "primary" then
-            r, g, b = color[1], color[2], color[3]
-        end
-        control:SetBackdropBorderColor(r, g, b, 1)
+        ringOn = (state.selected or state.hover or state.focus or control.kind == "primary") == true
         if control.text then
             local text = theme.colors.text
             if state.selected or control.kind == "primary" then
@@ -61,6 +87,7 @@ local function apply(control)
             control.text:SetTextColor(text[1], text[2], text[3], 1)
         end
     end
+    setRing(control, ringOn and color or line, ringOn and 1 or 0)
     if control.selectedMark then
         if state.selected and not state.disabled then control.selectedMark:Show() else control.selectedMark:Hide() end
     end
@@ -103,6 +130,7 @@ local function decorate(control, options)
     focusMark:SetColorTexture(color[1], color[2], color[3], 1)
     focusMark:Hide()
     control.focusMark = focusMark
+    control.ring = newRing(control)
     return options
 end
 
@@ -174,6 +202,7 @@ function Controls:Button(parent, text, width, callback, options)
     button:SetSize(width or 120, options.height or 30)
     button.state = newState()
     button.kind = options.kind or "secondary"
+    button.flat = options.flat == true
     button.mutedWhenIdle = options.mutedWhenIdle == true
     button.callback = callback
     button.text = app.Theme:Text(button, options.size or 12)
@@ -191,9 +220,12 @@ function Controls:Button(parent, text, width, callback, options)
 end
 
 -- Navigation entry: selected keeps an accent edge, accent text and a small
--- accent bar on the left, independent of hover.
+-- accent bar on the left, independent of hover. The row itself is flat — on an
+-- inset navigation well a stack of raised slabs is exactly the box look the
+-- navigation was supposed to replace, so the accent bar carries the state instead.
 function Controls:Navigation(parent, text, width, callback, options)
     options = options or {}
+    options.flat = true
     local button = self:Button(parent, text, width or 176, callback, options)
     button.kind = "navigation"
     button.text:ClearAllPoints()
@@ -235,7 +267,7 @@ function Controls:Toggle(parent, text, y, getter, setter, options)
         if not setter then return end
         app:Call("controls/toggle", setter, not getter())
         row:Update(options.component)
-    end, { height = 32 })
+    end, { height = 32, flat = true })
     row.kind = "switch"
     row:SetPoint("TOPLEFT", 0, y)
     row.text:ClearAllPoints()
@@ -245,6 +277,14 @@ function Controls:Toggle(parent, text, y, getter, setter, options)
     row.valueText:SetPoint("RIGHT", -56, 0)
     row.statusText = app.Theme:Text(row, 11, true)
     row.statusText:SetPoint("RIGHT", -128, 0)
+    row.statusText:SetWidth(65)
+    row.statusText:SetJustifyH("RIGHT")
+    row.statusText:SetWordWrap(false)
+    row.valueText:SetWidth(55)
+    row.valueText:SetJustifyH("RIGHT")
+    row.valueText:SetWordWrap(false)
+    row.text:SetPoint("RIGHT", row.statusText, "LEFT", -8, 0)
+    row.text:SetWordWrap(false)
     local track = CreateFrame("Frame", nil, row, "BackdropTemplate")
     track:SetSize(34, 16)
     track:SetPoint("RIGHT", -12, 0)
@@ -309,17 +349,20 @@ function Controls:Input(parent, width, options)
     input:SetFont(GameFontNormal:GetFont(), options.size or 12, "")
     if type(input.SetTextInsets) == "function" then input:SetTextInsets(8, 8, 0, 0) end
     input.state = newState()
+    input.ring = newRing(input)
     local function paintInput()
         app.Theme:PaintSurface(input, "button")
         local focusColor = accent()
         local warning = app.Theme.colors.ember
         local line = app.Theme.colors.line
+        -- An input is the one control that keeps a resting boundary: a field with
+        -- no edge at all reads as empty space rather than as somewhere to type.
         if input.state.focus then
-            input:SetBackdropBorderColor(focusColor[1], focusColor[2], focusColor[3], 1)
+            setRing(input, focusColor, 1)
         elseif input.valid == false then
-            input:SetBackdropBorderColor(warning[1], warning[2], warning[3], 1)
+            setRing(input, warning, 1)
         else
-            input:SetBackdropBorderColor(line[1], line[2], line[3], 1)
+            setRing(input, line, 0.6)
         end
     end
     function input:Refresh()
@@ -370,9 +413,11 @@ end
 -- Horizontal value row. The label follows the drag; the profile is committed
 -- once on release or wheel step, so dragging never reconciles the whole UI per
 -- pixel.
-function Controls:Range(parent, title, y, low, high, step, getter, setter)
+function Controls:Range(parent, title, y, low, high, step, getter, setter, options)
+    options = options or {}
+    local width = options.width or 490
     local row = CreateFrame("Frame", nil, parent)
-    row:SetSize(490, 58)
+    row:SetSize(width, 58)
     row:SetPoint("TOPLEFT", 0, y)
     local label = app.Theme:TextRole(row, "label")
     label:SetPoint("TOPLEFT")
@@ -380,9 +425,13 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter)
     row.title = label
     local value = app.Theme:Text(row, 12, true)
     value:SetPoint("TOPRIGHT")
+    value:SetWidth(55)
+    value:SetJustifyH("RIGHT")
+    label:SetPoint("TOPRIGHT", value, "TOPLEFT", -8, 0)
+    label:SetWordWrap(false)
     local slider = CreateFrame("Slider", nil, row, "BackdropTemplate")
     slider:SetPoint("TOPLEFT", 0, -30)
-    slider:SetSize(490, 8)
+    slider:SetSize(width, 8)
     slider:SetOrientation("HORIZONTAL")
     slider:SetMinMaxValues(low, high)
     slider:SetValueStep(step)
@@ -464,7 +513,7 @@ function Controls:FoldHeader(parent, text, width, onToggle)
     local header = self:Button(parent, text, width or 400, function(self)
         self:SetFolded(not self.folded)
         if onToggle then app:Call("controls/fold", onToggle, self.folded) end
-    end, { height = 24 })
+    end, { height = 24, flat = true })
     header.text:ClearAllPoints()
     header.text:SetPoint("LEFT", 10, 0)
     local mark = app.Theme:Text(header, 11, true)
@@ -487,6 +536,9 @@ end
 function Controls:Scroll(parent, width, height)
     local scroll = CreateFrame("ScrollFrame", nil, parent)
     scroll:SetSize(width or 464, height or 150)
+    -- Retail only dispatches wheel input to the scroll frame when it is also
+    -- a mouse target; wheel enablement alone leaves long pages inaccessible.
+    scroll:EnableMouse(true)
     scroll:EnableMouseWheel(true)
     local bar = CreateFrame("Slider", nil, parent, "BackdropTemplate")
     bar:SetOrientation("VERTICAL")
@@ -528,12 +580,15 @@ function Controls:Scroll(parent, width, height)
         local view = self:GetHeight()
         local maxScroll = math.max(0, content - view)
         self.rangeMin, self.rangeMax = 0, maxScroll
+        local current = self:GetVerticalScroll() or 0
+        local target = math.max(0, math.min(current, maxScroll))
         updating = true
         bar:SetMinMaxValues(0, math.max(maxScroll, 1))
-        bar:SetValue(math.min(self:GetVerticalScroll() or 0, maxScroll))
+        bar:SetValue(target)
         updating = false
-        local ratio = content > 0 and view / content or 1
-        thumb:SetHeight(math.max(16, math.floor((view - 2) * ratio)))
+        if current ~= target then self:SetVerticalScroll(target) end
+        local ratio = content > 0 and math.min(1, view / content) or 1
+        thumb:SetHeight(math.min(view, math.max(16, math.floor((view - 2) * ratio))))
     end
     return scroll
 end

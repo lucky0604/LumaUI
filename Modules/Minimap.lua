@@ -44,12 +44,11 @@ end
 local function style(self)
     if not Minimap then return end
     local accent = app.Theme:Accent()
-    for _, texture in ipairs(self.accents or {}) do
-        texture:SetColorTexture(accent[1], accent[2], accent[3], 1)
+    if self.panel then app.Surface:Plate(self.panel, "hud") end
+    if self.rule then
+        self.rule:SetColorTexture(accent[1], accent[2], accent[3], 0.75)
+        self.rule:SetHeight(app.Pixel:Pixels(1, self.panel))
     end
-    -- Backing plate without its own edge: the single accent line on the map
-    -- boundary is the only outline, so borders do not nest.
-    if self.panel then app.Theme:Surface(self.panel) end
 
     -- The round native compass ring and the top header plate are the nested
     -- Blizzard art. Hide them; the zone label, tracking menu and every map
@@ -79,7 +78,9 @@ local function style(self)
         zoneText:SetTextColor(text[1], text[2], text[3])
     end
     if self.edge then
-        self.edge:SetBackdropBorderColor(accent[1], accent[2], accent[3], 1)
+        self.edge:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, self.edge) })
+        local line = app.Theme.colors.line
+        self.edge:SetBackdropBorderColor(line[1], line[2], line[3], 0.85)
     end
     setShown(self, Minimap:IsVisible())
 end
@@ -133,38 +134,27 @@ local function build(self)
     local panel = CreateFrame("Frame", "LumaUIMinimapPanel", UIParent, "BackdropTemplate")
     panel:SetFrameStrata("BACKGROUND")
     panel:EnableMouse(false)
-    panel:SetPoint("TOPLEFT", Minimap, "TOPLEFT", -14, 14)
-    panel:SetPoint("BOTTOMRIGHT", Minimap, "BOTTOMRIGHT", 14, -24)
-    app.Theme:Surface(panel)
-    self.panel, self.accents = panel, {}
-    local function bracket(point, width, height)
-        local texture = panel:CreateTexture(nil, "ARTWORK")
-        texture:SetSize(width, height)
-        texture:SetPoint(point, panel, point, 0, 0)
-        self.accents[#self.accents + 1] = texture
-    end
-    bracket("TOPLEFT", 16, 2)
-    bracket("TOPLEFT", 2, 16)
-    bracket("TOPRIGHT", 16, 2)
-    bracket("TOPRIGHT", 2, 16)
-    bracket("BOTTOMLEFT", 16, 2)
-    bracket("BOTTOMLEFT", 2, 16)
-    bracket("BOTTOMRIGHT", 16, 2)
-    bracket("BOTTOMRIGHT", 2, 16)
+    panel:SetPoint("TOPLEFT", Minimap, "TOPLEFT", -6, 6)
+    panel:SetPoint("BOTTOMRIGHT", Minimap, "BOTTOMRIGHT", 6, -22)
+    self.panel = panel
+    app.Surface:Plate(panel, "hud")
+    self.rule = panel:CreateTexture(nil, "ARTWORK")
+    self.rule:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 6, 3)
+    self.rule:SetWidth(24)
 
     local edge = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
     edge:SetFrameStrata("MEDIUM")
     edge:EnableMouse(false)
     edge:SetPoint("TOPLEFT", Minimap, "TOPLEFT", 0, 0)
     edge:SetPoint("BOTTOMRIGHT", Minimap, "BOTTOMRIGHT", 0, 0)
-    edge:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = 1 })
+    edge:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, edge) })
     edge:Hide()
     self.edge = edge
 
-    self.clock = app.Theme:Text(panel, 11, true)
-    self.clock:SetPoint("BOTTOMLEFT", 6, 4)
-    self.coords = app.Theme:Text(panel, 11, true)
-    self.coords:SetPoint("BOTTOM", panel, "BOTTOM", 0, 4)
+    self.clock = app.Type:Text(panel, "micro")
+    self.clock:SetPoint("BOTTOMLEFT", 6, 6)
+    self.coords = app.Type:Text(panel, "micro")
+    self.coords:SetPoint("BOTTOMRIGHT", -6, 6)
     self.useCoords = type(C_Map) == "table"
         and type(C_Map.GetBestMapForUnit) == "function"
         and type(C_Map.GetPlayerMapPosition) == "function"

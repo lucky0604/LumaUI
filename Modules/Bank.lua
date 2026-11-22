@@ -23,7 +23,7 @@ local function probe(fn, kind)
     if type(C_Bank) ~= "table" or type(C_Bank[fn]) ~= "function" then return nil end
     local ok, value = pcall(C_Bank[fn], kind)
     if not ok then return nil end
-    return value == true
+    return Plain(value, "boolean")
 end
 
 local function canView(kind) return probe("CanViewBank", kind) end
@@ -144,7 +144,7 @@ local function build(self)
     frame:EnableMouse(true)
     frame:SetClampedToScreen(true)
     UISpecialFrames[#UISpecialFrames + 1] = "LumaUIBank"
-    local title = app.Theme:Text(frame, 21)
+    local title = app.Type:Text(frame, "display")
     title:SetPoint("TOPLEFT", 20, -18)
     title:SetText(L.bankTitle)
     local close = app.Controls:Button(frame, "×", 28, function() frame:Hide() end)
@@ -219,7 +219,7 @@ module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnable
         end
     end,
     Refresh = function(self)
-        app.Theme:Panel(self.frame)
+        app.Surface:Plate(self.frame, "card")
         Items.PaintFilters(self)
         sourceChips(self)
         refresh(self)

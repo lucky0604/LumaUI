@@ -126,7 +126,7 @@ test("settings pages, profiles, inventory and commands work", function()
     eq(inventory.buttons[1].item.bag, 0)
     eq(inventory.buttons[6].item.bag, 5)
     inventory.search:SetText("not-found")
-    inventory.search.scripts.OnTextChanged()
+    inventory.search.scripts.OnTextChanged(inventory.search)
     eq(inventory.empty:IsShown(), true)
     eq(inventory.buttons[1]:IsShown(), false)
     SlashCmdList.LUMAUI("status")
@@ -173,9 +173,9 @@ test("hooks stay single across enable cycles and restore visibility", function()
     eq(ChatFrame2EditBox.hookCount, 2)
     eq(ChatFrame1Tab.hookCount, 3)
     GameTooltip:Show()
-    eq(app.components.tooltip.decor.GameTooltip.bg:IsShown(), true)
+    eq(app.components.tooltip.decor.GameTooltip.plate:IsShown(), true)
     GameTooltip:Hide()
-    eq(app.components.tooltip.decor.GameTooltip.bg:IsShown(), false)
+    eq(app.components.tooltip.decor.GameTooltip.plate:IsShown(), false)
     local entry = app.components.chat.windows[1]
     ChatFrame1:Hide()
     eq(entry.background:IsShown(), false)
@@ -356,7 +356,7 @@ test("inventory browser uses native pickup, use, link and sort semantics", funct
     inventory.sort.scripts.OnClick(inventory.sort)
     eq(H.calls.sort, true)
     inventory.search:SetText("test item 3")
-    inventory.search.scripts.OnTextChanged()
+    inventory.search.scripts.OnTextChanged(inventory.search)
     eq(inventory.buttons[1].item.bag, 3)
     eq(#app.errors, 0)
 end)
@@ -378,46 +378,48 @@ test("inventory still browses when item actions are unavailable", function()
     eq(#app.errors, 0)
 end)
 
-test("tooltip replaces native border with a single accent outline", function()
+test("tooltip draws one card and one quality rule instead of a four-sided frame", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local tooltip = app.components.tooltip
     for _, name in ipairs({ "GameTooltip", "ItemRefTooltip", "ShoppingTooltip1", "ShoppingTooltip2" }) do
         local decor = tooltip.decor[name]
         eq(decor ~= nil, true)
-        eq(decor.bg:IsShown(), false)
-        eq(#decor.lines, 4)
+        eq(decor.plate:IsShown(), false)
+        -- Four hand-placed 1px strips are exactly what the card replaced.
+        eq(#decor.lines, 0)
+        eq(decor.quality ~= nil, true)
         eq(_G[name].NineSlice:IsShown(), false)
     end
     GameTooltip.itemLink = "|Hitem:999|h[Quality item]|h"
     GameTooltip:Show()
     local decor = tooltip.decor.GameTooltip
-    eq(decor.bg:IsShown(), true)
-    eq(decor.lines[1]:IsShown(), true)
-    eq(decor.bg.drawLayer, "BACKGROUND")
-    eq(decor.lines[1].drawLayer, "BORDER")
-    eq(decor.lines[1].color[3], 0.87)
+    eq(decor.plate:IsShown(), true)
+    eq(decor.quality:IsShown(), true)
+    eq(decor.plate.drawLayer, "BACKGROUND")
+    eq(decor.quality.drawLayer, "BORDER")
+    eq(decor.quality.color[3], 0.87)
     ItemRefTooltip.itemLink = "|Hitem:999|h[Quality item]|h"
     ItemRefTooltip:Show()
-    eq(tooltip.decor.ItemRefTooltip.bg:IsShown(), true)
+    eq(tooltip.decor.ItemRefTooltip.plate:IsShown(), true)
     ItemRefTooltip:Hide()
-    eq(tooltip.decor.ItemRefTooltip.bg:IsShown(), false)
+    eq(tooltip.decor.ItemRefTooltip.plate:IsShown(), false)
     GameTooltip:Hide()
     GameTooltip.itemLink = nil
     GameTooltip:Show()
     local accent = app.Theme:Accent()
-    eq(decor.lines[1].color[1], accent[1])
+    eq(decor.quality.color[1], accent[1])
     app.Store:Set("appearance", "tooltipQuality", false)
     GameTooltip:Hide()
     GameTooltip.itemLink = "|Hitem:999|h[Quality item]|h"
     GameTooltip:Show()
-    eq(decor.lines[1].color[1], accent[1])
+    eq(decor.quality.color[1], accent[1])
     GameTooltip.forbidden = true
     GameTooltip:Hide()
     GameTooltip:Show()
-    eq(decor.bg:IsShown(), false)
+    eq(decor.plate:IsShown(), false)
     GameTooltip.forbidden = false
     app.Store:Set("modules", "tooltip", false)
-    eq(decor.bg:IsShown(), false)
+    eq(decor.plate:IsShown(), false)
     eq(GameTooltip.NineSlice:IsShown(), true)
     eq(ItemRefTooltip.NineSlice:IsShown(), true)
     app.Store:Set("modules", "tooltip", true)
@@ -442,10 +444,10 @@ test("minimap frame follows native visibility and quest titles use level colors"
     local minimap = app.components.minimap
     eq(minimap.running, true)
     eq(minimap.panel:IsShown(), true)
-    -- The plate carries only a background; its single outline comes from the
-    -- separate accent edge, so no second border is stacked on the panel.
-    eq(minimap.panel.backdrop.edgeFile, nil)
-    eq(minimap.panel.borderColor, nil)
+    -- The map has a quiet HUD plate and one separate boundary line.
+    eq(minimap.panel.lumaSurfaceRole, "hud")
+    eq(minimap.panel.backdrop, nil)
+    eq(minimap.edge.backdrop.edgeSize, 1)
     eq(minimap.clock:GetText(), "12:34")
     eq(minimap.coords:GetText(), "50, 25")
     eq(MinimapCompassTexture.desaturated, true)
@@ -519,6 +521,31 @@ test("minimap frame follows native visibility and quest titles use level colors"
     eq(#app.errors, 0)
 end)
 
+test("minimap card follows the HUD theme and screen scale without rebuilding", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local minimap = app.components.minimap
+    local plate, edge, rule = minimap.panel.lumaPlate, minimap.edge, minimap.rule
+    eq(plate.vertexColor[4], 0.62)
+    eq(minimap.clock.lumaTypeRole, "micro")
+    eq(minimap.coords.lumaTypeRole, "micro")
+    eq(minimap.clock.point[1], "BOTTOMLEFT")
+    eq(minimap.coords.point[1], "BOTTOMRIGHT")
+    app.Store:Set("appearance", "hudOpacity", 0.4)
+    app.Store:Set("appearance", "accent", "ember")
+    eq(minimap.panel.lumaPlate, plate)
+    eq(minimap.edge, edge)
+    eq(minimap.rule, rule)
+    eq(plate.vertexColor[4], 0.4)
+    eq(rule.color[1], app.Theme.colors.ember[1])
+    UIParent:SetScale(2)
+    H.Fire("UI_SCALE_CHANGED")
+    eq(edge.backdrop.edgeSize, 0.5)
+    eq(rule:GetHeight(), 0.5)
+    UIParent:SetScale(1)
+    H.Fire("UI_SCALE_CHANGED")
+    eq(#app.errors, 0)
+end)
+
 test("layout page lists movable panels and opens native edit mode", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Settings:Toggle("layout")
@@ -545,7 +572,7 @@ test("layout page lists movable panels and opens native edit mode", function()
     eq(#app.errors, 0)
 end)
 
-test("quest list replaces the native tracker with folds, tracking and icons", function()
+test("quest list preserves the native tracker while offering folds, tracking and icons", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
     eq(list.running, true)
@@ -556,20 +583,19 @@ test("quest list replaces the native tracker with folds, tracking and icons", fu
     eq(app.Layout.entries.questList ~= nil, true)
     eq(app.Layout.entries.questList.label, app.L.questList)
     eq(list.frame.backdrop, nil)
-    -- Enabling the panel takes over the quest modules only; the tracker frame
-    -- and the scenario/dungeon/achievement modules stay with the client.
+    -- Every native objective module remains with the client.
     eq(ObjectiveTrackerFrame:IsShown(), true)
-    eq(QuestObjectiveTracker:IsShown(), false)
-    eq(CampaignQuestObjectiveTracker:IsShown(), false)
-    eq(WorldQuestObjectiveTracker:IsShown(), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(CampaignQuestObjectiveTracker:IsShown(), true)
+    eq(WorldQuestObjectiveTracker:IsShown(), true)
     eq(ScenarioObjectiveTracker:IsShown(), true)
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
     eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
     eq(app.components.questTracker.running, true)
     -- The client may show a quest module again on its own updates.
     QuestObjectiveTracker:Show()
-    eq(QuestObjectiveTracker:IsShown(), false)
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
 
     local function findRow(text)
         for _, current in ipairs(list.rows) do
@@ -746,7 +772,7 @@ test("quest list filters persist and restore the native tracker on disable", fun
     local restored = reloaded.components.questList
     eq(restored.filter, "tracked")
     eq(restored.title:GetText(), reloaded.L.questListTitle .. "  1")
-    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
     eq(ScenarioObjectiveTracker:IsShown(), true)
 
     reloaded.Store:Set("modules", "questList", false)
@@ -760,7 +786,7 @@ test("quest list filters persist and restore the native tracker on disable", fun
     reloaded.Store:Set("modules", "questList", true)
     eq(restored.running, true)
     eq(restored.frame:IsShown(), true)
-    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
     eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
     eq(#reloaded.errors, 0)
 end)
@@ -1210,30 +1236,235 @@ test("a restyled quest row keeps its secure slot without touching geometry in co
     eq(#app.errors, 0)
 end)
 
-test("the panel replaces only the quest modules of the native tracker", function()
+test("quest timer and secure item occupy separate title slots", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.questLog.entries[3] = { title = "Timed item quest", questID = 102, level = 80, isTask = true }
+    H.taskInfo[102] = 45 * 60
+    H.questLog.itemIndex[102] = 2
+    H.questLog.items[2] = { link = "|Hitem:456|h[Quest item]|h" }
+    H.Fire("QUEST_LOG_UPDATE")
+    local row
+    for _, current in ipairs(app.components.questList.rows) do
+        if current.label:GetText() == "Timed item quest" then row = current end
+    end
+    eq(row ~= nil, true)
+    eq(row.right:GetText(), string.format(app.L.taskTimeMinutes, 45))
+    eq(row.itemButton:IsShown(), true)
+    eq(row.right.point[2], -38)
+    eq(row.right:GetWidth(), 56)
+    eq(row.itemButton.point[2], -14)
+    eq(row.label:GetWidth(), 124)
+    eq(row.label.font, app.Type:Face())
+    eq(#app.errors, 0)
+end)
+
+test("quest rows keep their item identity until combat reflow", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
-    eq(list.nativeHidden, true)
-    eq(QuestObjectiveTracker:IsShown(), false)
-    eq(CampaignQuestObjectiveTracker:IsShown(), false)
-    eq(WorldQuestObjectiveTracker:IsShown(), false)
+    H.questLog.itemIndex[101] = 1
+    H.questLog.items[1] = { link = "|Hitem:123|h[Quest item]|h" }
+    H.Fire("QUEST_LOG_UPDATE")
+    local row
+    for _, current in ipairs(list.rows) do
+        if current.label:GetText() == "First quest" then row = current end
+    end
+    eq(row.itemButton:GetAttribute("item"), "|Hitem:123|h[Quest item]|h")
+    H.Combat(true)
+    H.questLog.entries = {
+        { title = "Campaign", isHeader = true },
+        { title = "Second quest", questID = 102, level = 80 },
+    }
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(row.label:GetText(), "First quest")
+    eq(row.frame.entry.quest.id, 101)
+    eq(row.itemButton:GetAttribute("item"), "|Hitem:123|h[Quest item]|h")
+    H.Combat(false)
+    eq(row.label:GetText(), "Second quest")
+    eq(row.itemButton:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("quest item changes remain paired with their original row during combat", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local list = app.components.questList
+    H.questLog.itemIndex[101] = 1
+    H.questLog.items[1] = { link = "|Hitem:123|h[Old item]|h" }
+    H.Fire("QUEST_LOG_UPDATE")
+    local row
+    for _, current in ipairs(list.rows) do
+        if current.label:GetText() == "First quest" then row = current end
+    end
+    H.Combat(true)
+    H.questLog.entries[2].title = "Changed quest"
+    H.questLog.items[1] = { link = "|Hitem:456|h[New item]|h" }
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(row.label:GetText(), "First quest")
+    eq(row.itemButton:GetAttribute("item"), "|Hitem:123|h[Old item]|h")
+    H.Combat(false)
+    eq(row.label:GetText(), "Changed quest")
+    eq(row.itemButton:GetAttribute("item"), "|Hitem:456|h[New item]|h")
+    eq(#app.errors, 0)
+end)
+
+test("the quest panel keeps native modules until validated", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local list = app.components.questList
+    eq(list.nativeHidden, nil)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(CampaignQuestObjectiveTracker:IsShown(), true)
+    eq(WorldQuestObjectiveTracker:IsShown(), true)
     -- Scenario goals are not covered by this panel and stay native.
     eq(ScenarioObjectiveTracker:IsShown(), true)
     eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
     local line = list:Describe()
-    eq(line:find(app.L.nativeTaken, 1, true) ~= nil, true)
-    eq(line:find(app.L.nativeQuestsOnly, 1, true) ~= nil, true)
-    -- Without the container's module list the fallback hides the whole frame
-    -- and says so instead of pretending.
-    ObjectiveTrackerFrame.RemoveModule = nil
+    eq(line:find(app.L.nativeKept, 1, true) ~= nil, true)
+    eq(line:find(app.L.nativeAwaitingValidation, 1, true) ~= nil, true)
+    -- Without the container's module list all native objectives stay visible.
     app.Store:Set("modules", "questList", false)
     eq(QuestObjectiveTracker:IsShown(), true)
+    ObjectiveTrackerFrame.RemoveModule = nil
     app.Store:Set("modules", "questList", true)
-    eq(ObjectiveTrackerFrame:IsShown(), false)
-    eq(list.wholeShown ~= nil, true)
-    eq(list:Describe():find(app.L.nativeWhole, 1, true) ~= nil, true)
+    eq(ObjectiveTrackerFrame:IsShown(), true)
+    eq(ScenarioObjectiveTracker:IsShown(), true)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(list:Describe():find(app.L.nativeKept, 1, true) ~= nil, true)
     app.Store:Set("modules", "questList", false)
     eq(ObjectiveTrackerFrame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("quest preview leaves absent native modules absent", function()
+    local app = H.Load()
+    ObjectiveTrackerFrame:RemoveModule(WorldQuestObjectiveTracker)
+    WorldQuestObjectiveTracker:Hide()
+    H.Fire("PLAYER_LOGIN")
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    app.Store:Set("modules", "questList", false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(ObjectiveTrackerFrame:HasModule(WorldQuestObjectiveTracker), false)
+    eq(WorldQuestObjectiveTracker:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("quest preview never removes native tracker modules", function()
+    local app = H.Load()
+    local calls = 0
+    ObjectiveTrackerFrame.RemoveModule = function(self, module)
+        calls = calls + 1
+        error("preview must not remove native modules")
+    end
+    H.Fire("PLAYER_LOGIN")
+    local list = app.components.questList
+    eq(list.nativeHidden, nil)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(CampaignQuestObjectiveTracker:IsShown(), true)
+    eq(ScenarioObjectiveTracker:IsShown(), true)
+    eq(calls, 0)
+    eq(#app.errors, 0)
+end)
+
+test("quest preview leaves a client-registered module alone", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    ObjectiveTrackerFrame:AddModule(QuestObjectiveTracker)
+    QuestObjectiveTracker:Show()
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    app.Store:Set("modules", "questList", false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(#app.errors, 0)
+end)
+
+test("overlapping quest preview yields to the native tracker and remains movable", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local list, native = app.components.questList, ObjectiveTrackerFrame
+    local x = 300
+    list.frame.GetRect = function() return x, 50, 100, 100 end
+    native.GetRect = function() return 50, 20, 200, 200 end
+    native.GetEffectiveScale = function() return 2 end
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(list.overlapHidden, true)
+    eq(list.frame:IsShown(), false)
+    eq(native:IsShown(), true)
+    eq(native:HasModule(QuestObjectiveTracker), true)
+    eq(list:Describe():find(app.L.questOverlapStatus, 1, true) ~= nil, true)
+    -- Hidden previews remain represented in the layout editor, even if a
+    -- hidden frame cannot report a centre on this client.
+    list.frame.GetCenter = function() return nil end
+    app.Layout:SetEditing(true)
+    eq(app.Layout.entries.questList.overlay:IsShown(), true)
+    x = 600
+    app.Layout:Apply("questList")
+    eq(list.overlapHidden, nil)
+    eq(list.frame:IsShown(), true)
+    app.Layout:SetEditing(false)
+    eq(#app.errors, 0)
+end)
+
+test("quest overlap decisions defer in combat and ignore secret geometry", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local list, native = app.components.questList, ObjectiveTrackerFrame
+    local x = 500
+    list.frame.GetRect = function() return x, 100, 100, 100 end
+    native.GetRect = function() return 100, 100, 200, 200 end
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(list.frame:IsShown(), true)
+    list.frame.protected = true
+    H.Combat(true)
+    x = 150
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(list.frame:IsShown(), true)
+    H.Combat(false)
+    eq(list.frame:IsShown(), false)
+    native.GetRect = function() return H.Secret(100), 100, 200, 200 end
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(list.frame:IsShown(), false)
+    native:Hide()
+    eq(list.frame:IsShown(), true)
+    eq(list.overlapHidden, nil)
+    eq(#app.errors, 0)
+end)
+
+test("quest overlap check waits for layout and cancels when disabled", function()
+    local app = H.Load()
+    C_Timer.NewTimer = C_Timer.After
+    H.Fire("PLAYER_LOGIN")
+    local list, native = app.components.questList, ObjectiveTrackerFrame
+    local x = 150
+    list.frame.GetRect = function() return x, 100, 100, 100 end
+    native.GetRect = function() return 100, 100, 200, 200 end
+    eq(list.overlapTimer ~= nil, true)
+    eq(list.frame:IsShown(), true)
+    H.Advance(0.06)
+    eq(list.frame:IsShown(), false)
+    x = 500
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    local pending = list.overlapTimer
+    eq(pending ~= nil, true)
+    app.Store:Set("modules", "questList", false)
+    eq(pending.cancelled, true)
+    H.Advance(0.1)
+    eq(list.frame:IsShown(), false)
+    eq(app.Layout.entries.questList.allowHiddenMove, nil)
+    eq(native:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("quest preview preserves a native module hidden by the client", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local list = app.components.questList
+    ObjectiveTrackerFrame:RemoveModule(QuestObjectiveTracker)
+    QuestObjectiveTracker:Hide()
+    app.Store:Set("modules", "questList", false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), true)
+    app.Store:Set("modules", "questList", true)
+    eq(list.nativeHidden, nil)
+    app.Store:Set("modules", "questList", false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(list.nativeRemoved, nil)
     eq(#app.errors, 0)
 end)
 
@@ -1589,6 +1820,37 @@ test("unit frame height follows parts and disable releases everything", function
 end)
 
 -- ==== TRACK: UNIT FRAMES —append new tests above this line ====
+test("unit bars keep names and values above compact health and power", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    for _, unit in ipairs({ "player", "target" }) do
+        local frame = app.components.unitFrames.frames[unit]
+        eq(frame.name.point[1], "TOPLEFT")
+        eq(frame.name.point[3], -9)
+        eq(frame.value.point[1], "TOPRIGHT")
+        eq(frame.value.point[3], -9)
+        eq(frame.health:GetHeight(), 9)
+        eq(frame.power:GetHeight(), 3)
+        eq(frame.powerValue.point[1], "TOPRIGHT")
+        eq(frame.powerValue.point[3], -45)
+    end
+    eq(#app.errors, 0)
+end)
+
+test("party bars leave a row beneath them for the native private auras", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "partyFrames", true)
+    local frame = app.components.partyFrames.frames.party1
+    eq(frame.health:GetHeight(), 8)
+    eq(frame.power:GetHeight(), 3)
+    local id = frame.lumaPrivateAnchors[1]
+    local anchor = H.privateAnchors.live[id].iconInfo.iconAnchor
+    eq(anchor.offsetY, 3)
+    -- The power bar ends at -30 from the top, and the aura starts at -31.
+    eq(-frame:GetHeight() + anchor.offsetY + 12 < -30, true)
+    eq(#app.errors, 0)
+end)
+
 test("unit bars paint class, reaction and power gradient pairs", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "unitFrames", true)
@@ -1644,35 +1906,114 @@ test("bar gradients fall back to a flat middle without the gradient API", functi
 end)
 
 
-test("unit frames hide the native frames and restore them on disable", function()
+test("unit frame preview preserves native frames and cast bars", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     eq(PlayerFrame:IsShown(), true)
     eq(TargetFrame:IsShown(), false)
     app.Store:Set("modules", "unitFrames", true)
     local units = app.components.unitFrames
-    eq(PlayerFrame:IsShown(), false)
-    eq(PetFrame:IsShown(), false)
+    eq(PlayerFrame:IsShown(), true)
+    eq(PetFrame:IsShown(), true)
     eq(TargetFrame:IsShown(), false)
-    eq(PlayerCastingBarFrame:IsShown(), false)
-    eq(PetCastingBarFrame:IsShown(), false)
+    eq(PlayerCastingBarFrame:IsShown(), true)
+    eq(PetCastingBarFrame:IsShown(), true)
+    eq(units.takeover.units, false)
+    eq(units.takeover.cast, false)
+    eq(units:Describe():find(app.L.nativeAwaitingValidation, 1, true) ~= nil, true)
     -- The secure frame height moves through the queued job and is applied.
     eq(units.frames.player:GetHeight(), 106)
-    -- A client re-show (edit mode, vehicle, targeting) is suppressed again.
+    -- The preview never suppresses a client re-show.
     PlayerFrame:Show()
-    eq(PlayerFrame:IsShown(), false)
-    -- Disable restores each native frame to the state it had before.
+    eq(PlayerFrame:IsShown(), true)
     app.Store:Set("modules", "unitFrames", false)
     eq(PlayerFrame:IsShown(), true)
     eq(TargetFrame:IsShown(), false)
     eq(PlayerCastingBarFrame:IsShown(), true)
-    -- While in combat the restore waits; nothing touches protected frames.
+    -- Disabling during combat leaves native frames intact until the queued
+    -- component shutdown is allowed to run.
     app.Store:Set("modules", "unitFrames", true)
-    eq(PlayerFrame:IsShown(), false)
+    eq(PlayerFrame:IsShown(), true)
     H.Combat(true)
     app.Store:Set("modules", "unitFrames", false)
-    eq(PlayerFrame:IsShown(), false)
+    eq(PlayerFrame:IsShown(), true)
     H.Combat(false)
     eq(PlayerFrame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the takeover switch hides native unit frames and gives them back", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    -- The switch is off by default: native frames stay on screen.
+    eq(app.Store:Profile().ui.takeoverUnitFrames, false)
+    eq(PlayerFrame:IsShown(), true)
+    -- Turning it on hides the native frames the preview replaces and reports
+    -- the takeover; the client keeps the native cast bars unhidden only when
+    -- the switch is on too, so they leave as well here.
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    app:Reconcile()
+    local units = app.components.unitFrames
+    eq(units.takeover.units, true)
+    eq(units.takeover.cast, true)
+    eq(PlayerFrame:IsShown(), false)
+    eq(PetFrame:IsShown(), false)
+    eq(units.nativeSuppressed, true)
+    -- A client re-show is suppressed again on the next refresh.
+    PlayerFrame:Show()
+    units:Refresh()
+    eq(PlayerFrame:IsShown(), false)
+    -- Turning it off restores every frame it recorded as shown.
+    app.Store:Set("ui", "takeoverUnitFrames", false)
+    app:Reconcile()
+    eq(units.takeover.units, false)
+    eq(PlayerFrame:IsShown(), true)
+    eq(PetFrame:IsShown(), true)
+    eq(units.nativeSuppressed, nil)
+    -- Disabling the component while taken over still gives the frames back.
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    app:Reconcile()
+    eq(PlayerFrame:IsShown(), false)
+    app.Store:Set("modules", "unitFrames", false)
+    eq(PlayerFrame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the takeover switch backs off when a replacement part is missing", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    -- The cast API is what the harness probe removes; without it the missing
+    -- part wins over the switch and every native frame stays.
+    local saved = _G.UnitCastingInfo
+    _G.UnitCastingInfo = nil
+    app:Reconcile()
+    local units = app.components.unitFrames
+    eq(units.takeover.units, false)
+    eq(units.takeover.cast, false)
+    eq(PlayerFrame:IsShown(), true)
+    _G.UnitCastingInfo = saved
+    app:Reconcile()
+    eq(units.takeover.units, true)
+    eq(PlayerFrame:IsShown(), false)
+    app.Store:Set("ui", "takeoverUnitFrames", false)
+    app:Reconcile()
+    eq(PlayerFrame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("/luma takeover toggles the switch through the queue", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    H.messages = {}
+    SlashCmdList.LUMAUI("takeover")
+    local text = table.concat(H.messages, "\n")
+    eq(app.Store:Profile().ui.takeoverUnitFrames, true)
+    eq(text:find(app.L.takeoverOn, 1, true) ~= nil, true)
+    H.messages = {}
+    SlashCmdList.LUMAUI("takeover")
+    text = table.concat(H.messages, "\n")
+    eq(app.Store:Profile().ui.takeoverUnitFrames, false)
+    eq(text:find(app.L.takeoverOff, 1, true) ~= nil, true)
     eq(#app.errors, 0)
 end)
 
@@ -1788,7 +2129,7 @@ test("public unit values abbreviate through the client formatter, secrets keep t
     eq(#app.errors, 0)
 end)
 
-test("party frames watch party units and take over the native frame", function()
+test("party frames watch units while preserving the native frame", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     eq(app.components.partyFrames.status, "disabled")
     eq(PartyFrame:IsShown(), true)
@@ -1802,24 +2143,23 @@ test("party frames watch party units and take over the native frame", function()
     eq(first:GetAttribute("*type2"), "togglemenu")
     eq(first.watched, true)
     eq(first:IsShown(), true)
-    -- With a party member present the native frame goes away, and a client
-    -- re-show is pressed back down.
-    eq(PartyFrame:IsShown(), false)
+    -- Native visibility stays under the client's control.
+    eq(PartyFrame:IsShown(), true)
     PartyFrame:Show()
-    eq(PartyFrame:IsShown(), false)
+    eq(PartyFrame:IsShown(), true)
     -- A unit event redraws that member's bar with its reaction pair.
     H.unitInfo.party1 = { isPlayer = false, reaction = 5 }
     H.Fire("UNIT_HEALTH", "party1")
     eq(first.health:GetStatusBarTexture().gradient.lo[1], app.Theme.colors.friendly[1] * 0.45)
     eq(first.name:GetText() ~= "", true)
-    -- Leaving the group hands the native frame back.
+    -- Roster changes leave native visibility alone.
     local originalExists = UnitExists
     _G.UnitExists = function() return false end
     H.Fire("GROUP_ROSTER_UPDATE")
     eq(PartyFrame:IsShown(), true)
     _G.UnitExists = originalExists
     H.Fire("GROUP_ROSTER_UPDATE")
-    eq(PartyFrame:IsShown(), false)
+    eq(PartyFrame:IsShown(), true)
     -- Disabling releases the watches, hides the buttons and restores the
     -- native frame.
     app.Store:Set("modules", "partyFrames", false)
@@ -1840,7 +2180,7 @@ test("party frames defer building in combat and tolerate a missing native frame"
     H.Combat(false)
     eq(party.running, true)
     eq(party.frames.party1 ~= nil, true)
-    eq(PartyFrame:IsShown(), false)
+    eq(PartyFrame:IsShown(), true)
     -- A client without the centralized party frame keeps working.
     local bare = H.Load()
     _G.PartyFrame = nil
@@ -1868,7 +2208,7 @@ test("inventory filter chips group items by item class", function()
         return { hyperlink = "|Hitem:" .. id .. "|h[Item " .. bag .. "]|h", itemName = "Item " .. bag,
             itemID = id, stackCount = 2, iconFileID = 134400, quality = 2, isLocked = false }
     end
-    inventory.search.scripts.OnTextChanged()
+    inventory.search.scripts.OnTextChanged(inventory.search)
     local function shownBags()
         local bags = {}
         for _, button in ipairs(inventory.buttons) do
@@ -1917,6 +2257,9 @@ test("ctrl click splits stacks and defers the protected action in combat", funct
     H.ctrlDown = false
     eq(inventory.split ~= nil, true)
     eq(inventory.split.frame:IsShown(), true)
+    eq(inventory.split.frame.point[1], "CENTER")
+    eq(inventory.split.frame.point[2], inventory.frame)
+    eq(inventory.split.frame.lumaSurfaceRole, "card")
     eq(inventory.split.item.bag, 0)
     eq(inventory.split.item.slot, 1)
     -- Non-numeric input is rejected and keeps the dialog open.
@@ -2040,11 +2383,11 @@ test("bank browser searches bank items and fails alone without containers", func
     local bank = app.components.bank
     eq(bank.running, true)
     bank.search:SetText("no match")
-    bank.search.scripts.OnTextChanged()
+    bank.search.scripts.OnTextChanged(bank.search)
     eq(bank.empty:IsShown(), true)
     eq(bank.buttons[1]:IsShown(), false)
     bank.search:SetText("")
-    bank.search.scripts.OnTextChanged()
+    bank.search.scripts.OnTextChanged(bank.search)
     eq(bank.buttons[1]:IsShown(), true)
     eq(bank.buttons[1].item.name, "Bank item")
     -- Missing container support marks only this component unsupported; the
@@ -2552,7 +2895,7 @@ test("reputation standing falls back to the localised string and empty groups st
     eq(#app.errors, 0)
 end)
 
-test("raid frames build watched buttons for existing members and take over native frames", function()
+test("raid frames build watched buttons while preserving native frames", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     eq(app.components.raidFrames.status, "disabled")
     eq(CompactRaidFrameContainer:IsShown(), true)
@@ -2585,13 +2928,11 @@ test("raid frames build watched buttons for existing members and take over nativ
     eq(raid.frames[9] ~= nil, true)
     eq(raid.frames[9].point[4], 96)
     eq(raid.frames[9].point[5], 0)
-    -- With members present the native frame container is hidden and a client
-    -- re-show is pressed back down by the suppression hook. The manager tab is
-    -- kept: it is the native entry to raid options and the ready check.
-    eq(CompactRaidFrameContainer:IsShown(), false)
+    -- Both the native raid container and its manager stay available.
+    eq(CompactRaidFrameContainer:IsShown(), true)
     eq(CompactRaidFrameManager:IsShown(), true)
     CompactRaidFrameContainer:Show()
-    eq(CompactRaidFrameContainer:IsShown(), false)
+    eq(CompactRaidFrameContainer:IsShown(), true)
     -- A unit event redraws that member's bar with its class pair.
     H.unitInfo.raid1 = { isPlayer = true, class = "WARRIOR" }
     H.Fire("UNIT_HEALTH", "raid1")
@@ -2605,7 +2946,7 @@ test("raid frames build watched buttons for existing members and take over nativ
     local text = table.concat(H.messages, "\n")
     eq(text:find("raidFrames: status=running", 1, true) ~= nil, true)
     eq(text:find("raid1: exists=yes button=yes watched=yes shown=yes", 1, true) ~= nil, true)
-    eq(text:find("native CompactRaidFrameContainer: exists=yes shown=no taken=yes", 1, true) ~= nil, true)
+    eq(text:find("native CompactRaidFrameContainer: exists=yes shown=yes taken=no", 1, true) ~= nil, true)
     _G.UnitExists = savedExists
     H.inRaid = false
     eq(#app.errors, 0)
@@ -2620,9 +2961,8 @@ test("raid frames give the native frames back when the raid ends and reuse butto
     app.Store:Set("modules", "raidFrames", true)
     local raid = app.components.raidFrames
     local first, second = raid.frames[1], raid.frames[2]
-    eq(CompactRaidFrameContainer:IsShown(), false)
-    -- The raid disbands: the native frames come back and our buttons hide, but
-    -- they are kept for the next roster instead of being destroyed.
+    eq(CompactRaidFrameContainer:IsShown(), true)
+    -- The raid disbands: preview buttons hide and are kept for the next roster.
     present = {}
     H.inRaid = false
     H.Fire("GROUP_ROSTER_UPDATE")
@@ -2631,8 +2971,7 @@ test("raid frames give the native frames back when the raid ends and reuse butto
     eq(first:IsShown(), false)
     eq(first.watched, false)
     eq(raid.frames[1], first)
-    -- A later roster reuses the same frame and takes the natives over again;
-    -- the member that left stays hidden.
+    -- A later roster reuses the same frame; the member that left stays hidden.
     present = { raid1 = true, raid5 = true }
     H.inRaid = true
     H.Fire("GROUP_ROSTER_UPDATE")
@@ -2642,7 +2981,7 @@ test("raid frames give the native frames back when the raid ends and reuse butto
     eq(first.watched, true)
     eq(first:IsShown(), true)
     eq(second:IsShown(), false)
-    eq(CompactRaidFrameContainer:IsShown(), false)
+    eq(CompactRaidFrameContainer:IsShown(), true)
     _G.UnitExists = savedExists
     H.inRaid = false
     eq(#app.errors, 0)
@@ -2667,7 +3006,7 @@ test("raid frames defer in combat and release watches, events and natives on dis
     eq(first ~= nil, true)
     eq(raid.frames[3] ~= nil, true)
     eq(first.watched, true)
-    eq(CompactRaidFrameContainer:IsShown(), false)
+    eq(CompactRaidFrameContainer:IsShown(), true)
     -- A roster change in combat only queues the rebuild; drawing still runs.
     H.Combat(true)
     H.Fire("GROUP_ROSTER_UPDATE")
@@ -2710,6 +3049,119 @@ test("action panel draws behind the native bars and hides on disable", function(
     app.Store:Set("modules", "actionPanel", false)
     eq(panel:IsShown(), false)
     eq(#app.errors, 0)
+end)
+
+test("action panel follows the native bar's strata through a queued refresh", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar = MainActionBar
+    bar.strata = "MEDIUM"
+    bar.level = 50
+    bar.GetFrameStrata = function(self) return self.strata end
+    bar.UpdateFrameStrata = function(self, strata) self.strata = strata end
+    app.Store:Set("modules", "actionPanel", true)
+    local panel = app.components.actionPanel.panels[bar]
+    panel.SetFrameStrata = function(self, strata) self.strata = strata end
+    bar:UpdateFrameStrata("HIGH")
+    eq(panel.strata, "HIGH")
+    eq(panel.level, 49)
+    H.Combat(true)
+    bar:UpdateFrameStrata("TOOLTIP")
+    eq(panel.strata, "HIGH")
+    H.Combat(false)
+    eq(panel.strata, "TOOLTIP")
+    eq(#app.errors, 0)
+end)
+
+test("action panel hides until its native bar has a safe lower layer", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar = MainActionBar
+    bar:SetFrameLevel(0)
+    app.Store:Set("modules", "actionPanel", true)
+    local component = app.components.actionPanel
+    local panel = component.panels[bar]
+    eq(panel:IsShown(), false)
+    eq(panel.lumaLayerSafe, false)
+    eq(component:Describe():find(app.L.actionPanelLayerUnavailable, 1, true) ~= nil, true)
+    bar:Hide(); bar:Show()
+    eq(panel:IsShown(), false)
+    bar:SetFrameLevel(8)
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(panel:IsShown(), true)
+    eq(panel.level, 7)
+    eq(component:Describe(), nil)
+    -- A bar may change level while hidden without firing an Edit Mode event.
+    bar:Hide()
+    bar:SetFrameLevel(0)
+    bar:Show()
+    eq(panel:IsShown(), false)
+    eq(panel.lumaLayerSafe, false)
+    bar:Hide()
+    bar:SetFrameLevel(8)
+    H.Combat(true)
+    bar:Show()
+    eq(panel:IsShown(), false)
+    H.Combat(false)
+    eq(panel:IsShown(), true)
+    bar.GetFrameStrata = function() return H.Secret("HIGH") end
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(panel:IsShown(), false)
+    eq(panel.lumaLayerSafe, false)
+    eq(#app.errors, 0)
+end)
+
+test("an old action bar cannot reshow its panel after replacement", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionPanel", true)
+    local old = MainActionBar
+    local oldPanel = app.components.actionPanel.panels[old]
+    local replacement = H.NewFrame("MainActionBar", UIParent)
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    local newPanel = app.components.actionPanel.panels[replacement]
+    eq(oldPanel:IsShown(), false)
+    eq(newPanel:IsShown(), true)
+    old:Hide()
+    old:Show()
+    eq(oldPanel:IsShown(), false)
+    app.Store:Set("modules", "actionPanel", false)
+    eq(newPanel:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("action panel does not show while the native bar's parent is hidden", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local parent = H.NewFrame(nil, UIParent)
+    MainActionBar:SetParent(parent)
+    parent:Hide()
+    app.Store:Set("modules", "actionPanel", true)
+    local panel = app.components.actionPanel.panels[MainActionBar]
+    eq(MainActionBar:IsShown(), true)
+    eq(panel:IsShown(), false)
+    parent:Show()
+    MainActionBar.scripts.OnShow(MainActionBar)
+    eq(panel:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("a failed action bar panel does not interrupt another bar", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local previous = _G.MultiBarBottomLeft
+    local bad = H.NewFrame("MultiBarBottomLeft", UIParent)
+    local hook = bad.HookScript
+    bad.HookScript = function() error("bar refused hooks") end
+    app.Store:Set("modules", "actionPanel", true)
+    local component = app.components.actionPanel
+    eq(component.panels[MainActionBar]:IsShown(), true)
+    eq(component.panels[bad], nil)
+    eq(component.failedBars[bad], true)
+    eq(#app.errors, 1)
+    app.Store:Set("modules", "actionPanel", false)
+    bad.HookScript = hook
+    app.Store:Set("modules", "actionPanel", true)
+    eq(component.panels[bad]:IsShown(), true)
+    eq(component.failedBars[bad], nil)
+    eq(component.panels[MainActionBar]:IsShown(), true)
+    eq(#app.errors, 1)
+    _G.MultiBarBottomLeft = previous
 end)
 
 test("click casting binds secure spell attributes on our unit buttons", function()
@@ -3549,11 +4001,10 @@ test("native unit frames stay when a replacement part is missing", function()
     eq(units.parts.auras.available, false)
     eq(units.takeover.units, false)
     eq(table.concat(units.takeover.missing, ","), "auras")
-    -- The cast part still runs, so the native cast bars are the replaced ones;
-    -- the unit frames themselves stay because their aura display cannot.
+    -- Even available parts are not sufficient to establish native parity.
     eq(PlayerFrame:IsShown(), true)
     eq(PetFrame:IsShown(), true)
-    eq(PlayerCastingBarFrame:IsShown(), false)
+    eq(PlayerCastingBarFrame:IsShown(), true)
     -- The preview itself keeps drawing the parts it does have.
     eq(units.frames.target.watched, true)
     -- A client without the cast API keeps both its frames and its cast bars.
@@ -3565,15 +4016,15 @@ test("native unit frames stay when a replacement part is missing", function()
     eq(bare.components.unitFrames.takeover.units, false)
     eq(PlayerFrame:IsShown(), true)
     eq(PlayerCastingBarFrame:IsShown(), true)
-    -- Losing the aura API mid-session hands the native frames back.
+    -- Losing the aura API mid-session leaves the native frames intact.
     local full = H.Load(); H.Fire("PLAYER_LOGIN")
     full.Store:Set("modules", "unitFrames", true)
-    eq(PlayerFrame:IsShown(), false)
+    eq(PlayerFrame:IsShown(), true)
     C_UnitAuras = nil
     full:Reconcile()
     eq(full.components.unitFrames.takeover.units, false)
     eq(PlayerFrame:IsShown(), true)
-    eq(PlayerCastingBarFrame:IsShown(), false)
+    eq(PlayerCastingBarFrame:IsShown(), true)
     eq(#full.errors, 0)
 end)
 
@@ -3601,42 +4052,41 @@ test("group takeovers need our own visible buttons", function()
     eq(#app.errors, 0)
 end)
 
-test("native takeover hooks are installed once across enable cycles", function()
+test("preview enable cycles do not install native suppression hooks", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
-    -- QuestTracker hooks the tracker frame for its level colors; the quest
-    -- panel hooks each replaced module once. Counts are recorded after login
-    -- and must not grow when the panel is cycled.
+    -- QuestTracker hooks the tracker for its text colors; the preview must not
+    -- add suppression hooks when cycled.
     local baseline = ObjectiveTrackerFrame.hookCount
-    local moduleBaseline = QuestObjectiveTracker.hookCount
+    local moduleBaseline = QuestObjectiveTracker.hookCount or 0
     eq(baseline >= 1, true)
-    eq(moduleBaseline >= 1, true)
+    eq(moduleBaseline, 0)
     for _ = 1, 20 do
         app.Store:Set("modules", "unitFrames", true)
         app.Store:Set("modules", "unitFrames", false)
     end
-    eq(PlayerFrame.hookCount, 1)
-    eq(TargetFrame.hookCount, 1)
-    eq(PlayerCastingBarFrame.hookCount, 1)
+    eq(PlayerFrame.hookCount or 0, 0)
+    eq(TargetFrame.hookCount or 0, 0)
+    eq(PlayerCastingBarFrame.hookCount or 0, 0)
     for _ = 1, 20 do
         app.Store:Set("modules", "questList", false)
         app.Store:Set("modules", "questList", true)
     end
     eq(ObjectiveTrackerFrame.hookCount, baseline)
-    eq(QuestObjectiveTracker.hookCount, moduleBaseline)
-    eq(CampaignQuestObjectiveTracker.hookCount, 1)
-    eq(WorldQuestObjectiveTracker.hookCount, 1)
+    eq(QuestObjectiveTracker.hookCount or 0, moduleBaseline)
+    eq(CampaignQuestObjectiveTracker.hookCount or 0, 0)
+    eq(WorldQuestObjectiveTracker.hookCount or 0, 0)
     for _ = 1, 20 do
         app.Store:Set("modules", "partyFrames", true)
         app.Store:Set("modules", "partyFrames", false)
     end
-    eq(PartyFrame.hookCount, 1)
-    -- The hook still suppresses a client re-show after all those cycles.
+    eq(PartyFrame.hookCount or 0, 0)
+    -- The unit preview leaves client visibility alone after repeated cycles.
     app.Store:Set("modules", "unitFrames", true)
-    eq(PlayerFrame:IsShown(), false)
+    eq(PlayerFrame:IsShown(), true)
     PlayerFrame:Show()
-    eq(PlayerFrame:IsShown(), false)
+    eq(PlayerFrame:IsShown(), true)
     QuestObjectiveTracker:Show()
-    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
     eq(#app.errors, 0)
 end)
 
@@ -3644,9 +4094,8 @@ test("quest panel returns the native tracker when it has nothing to show", funct
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
     eq(ObjectiveTrackerFrame:IsShown(), true)
-    eq(QuestObjectiveTracker:IsShown(), false)
-    -- Nothing to replace: the client's own quest modules come back, and the
-    -- scenario module (not covered by this panel) never leaves.
+    eq(QuestObjectiveTracker:IsShown(), true)
+    -- Native modules remain available even when the preview is empty.
     eq(ScenarioObjectiveTracker:IsShown(), true)
     H.questLog.entries = {}
     H.questLog.watch = {}
@@ -3656,15 +4105,15 @@ test("quest panel returns the native tracker when it has nothing to show", funct
     eq(CampaignQuestObjectiveTracker:IsShown(), true)
     eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
     eq(list.frame:IsShown(), true)
-    -- Content brings the takeover back.
+    -- Content continues to leave the native modules alone.
     H.questLog.entries = { { title = "New quest", questID = 201, level = 10 } }
     H.Fire("QUEST_LOG_UPDATE")
     eq(list.hasContent, true)
-    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
     eq(ScenarioObjectiveTracker:IsShown(), true)
-    -- A re-show from the client is still suppressed while content exists.
+    -- A re-show from the client is left alone.
     QuestObjectiveTracker:Show()
-    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(QuestObjectiveTracker:IsShown(), true)
     eq(#app.errors, 0)
 end)
 
@@ -3706,26 +4155,29 @@ test("nameplate styling restores the previous plate and skips forbidden bars", f
     eq(#app.errors, 0)
 end)
 
-test("character window keeps the native toggle and its game-window entry", function()
+test("character preview keeps the native toggle and game-window entry independent", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "characterWindow", true)
+    app.Store:Set("appearance", "motion", false)
     local window = app.components.characterWindow.window
     eq(window.nativeEntry ~= nil, true)
     eq(UISpecialFrames[#UISpecialFrames], "LumaUICharacterWindow")
-    -- The game's toggle opens the LumaUI window and hides the native one.
-    CharacterFrame:Show()
+    -- The native toggle never opens the preview.
+    CharacterFrame:Hide()
+    ToggleCharacter("PaperDollFrame")
+    eq(window:IsShown(), false)
+    eq(CharacterFrame:IsShown(), true)
+    SlashCmdList.LUMAUI("char")
+    eq(window:IsShown(), true)
+    eq(CharacterFrame:IsShown(), true)
+    -- The native binding continues to toggle the native frame alone.
     ToggleCharacter("PaperDollFrame")
     eq(window:IsShown(), true)
     eq(CharacterFrame:IsShown(), false)
-    -- The next press closes it again, like the native toggle.
-    ToggleCharacter("PaperDollFrame")
-    eq(window:IsShown(), false)
-    -- The header entry opens the game's own window and leaves it alone.
-    CharacterFrame:Show()
+    -- The header entry opens the game's window and closes the preview.
     H.Click(window.nativeEntry)
     eq(window:IsShown(), false)
     eq(CharacterFrame:IsShown(), true)
-    eq(app.components.characterWindow.nativeOpen, nil)
     eq(#app.errors, 0)
 end)
 
@@ -3735,8 +4187,8 @@ test("diagnostics describe the native takeover of every replacement", function()
     local page = app.Settings.pages.diagnostics
     eq(page.headers.native.text:GetText(), app.L.diagNative)
     local native = page.bodies.native:GetText()
-    -- The quest panel runs by default and reports the tracker it replaced.
-    eq(native:find("questList: " .. app.L.nativeTaken, 1, true) ~= nil, true)
+    -- The quest panel runs by default and reports that the tracker is kept.
+    eq(native:find("questList: " .. app.L.nativeKept, 1, true) ~= nil, true)
     -- A disabled replacement contributes no takeover line.
     eq(native:find("unitFrames:", 1, true), nil)
     app.Store:Set("modules", "unitFrames", true)
@@ -3744,6 +4196,43 @@ test("diagnostics describe the native takeover of every replacement", function()
     native = page.bodies.native:GetText()
     eq(native:find("unitFrames: ", 1, true) ~= nil, true)
     eq(native:find(app.L.nativeUnits, 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("diagnostics list the other addons sharing the session", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("diagnostics")
+    local page = app.Settings.pages.diagnostics
+    -- A lone session is said plainly instead of an empty list.
+    eq(page.bodies.coexistence:GetText(), app.L.diagCoexistenceNone)
+    H.addons = {
+        { name = "LumaUI", title = "LumaUI", loaded = true },
+        { name = "GoldWQ", title = "Gold World Quests", loaded = true },
+        -- Installed but not loaded: still named, sorted after the live ones.
+        { name = "HyperframePlus", title = "Hyperframe+", loaded = false },
+    }
+    app.Settings:Update()
+    local text = page.bodies.coexistence:GetText()
+    eq(text:find("GoldWQ (Gold World Quests) · " .. app.L.diagCoexistenceLoaded, 1, true) ~= nil, true)
+    -- An absent addon is named without a title lookup of its own: the fallback
+    -- keeps the folder name readable either way.
+    eq(text:find("HyperframePlus (Hyperframe+) · " .. app.L.diagCoexistenceAbsent, 1, true) ~= nil, true)
+    -- The census names only other addons: LumaUI itself never appears.
+    eq(text:find("LumaUI (", 1, true), nil)
+    -- Loaded entries sort ahead of absent ones regardless of name order.
+    eq(text:find("GoldWQ", 1, true) < text:find("HyperframePlus", 1, true), true)
+    eq(#app.errors, 0)
+end)
+
+test("a coexistence census works without the addon APIs", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local page = app.Settings.pages.diagnostics
+    local saved = _G.C_AddOns
+    _G.C_AddOns = { GetAddOnMetadata = function() return "0.4.0" end }
+    app.Settings:Toggle("diagnostics")
+    app.Settings:Update()
+    eq(app.Settings.pages.diagnostics.bodies.coexistence:GetText(), app.L.diagCoexistenceNone)
+    _G.C_AddOns = saved
     eq(#app.errors, 0)
 end)
 
@@ -3824,7 +4313,9 @@ test("theme surface roles keep window, embedded, button, HUD and chat apart", fu
     eq(embedded.backgroundColor[1], theme.colors.embedded[1] * 2.1)
     local button = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(button, "button")
-    eq(button.backdrop.edgeFile, theme.white)
+    -- An idle control is a flat patch. The hairline belongs to the interaction, so
+    -- the button surface carries no edge of its own; Controls draws the ring.
+    eq(button.backdrop.edgeFile, nil)
     eq(button.backgroundColor[1], theme.colors.raised[1] * 2.1)
     local hud = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(hud, "hud")
@@ -3906,32 +4397,40 @@ end)
 test("settings window, HUD strips, chat and roles repaint from their tokens", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Settings:Toggle()
-    -- Window and its embedded navigation region.
-    eq(app.Settings.frame.lumaSurfaceRole, "window")
-    eq(app.Settings.frame.backgroundColor[4], 0.96)
-    eq(app.Settings.navPanel.lumaSurfaceRole, "embedded")
+    -- The window is a card now: a plate with a shadow and no backdrop edge at all.
+    -- A hairline around the whole window is what made it read as a flat page.
+    eq(app.Settings.frame.lumaSurfaceRole, "card")
+    eq(app.Settings.frame.backdrop, nil)
+    eq(app.Settings.frame.lumaPlate ~= nil, true)
+    eq(app.Settings.frame.lumaPlate.vertexColor[4], app.Theme:Opacity("windowOpacity"))
+    eq(app.Settings.navPanel.lumaSurfaceRole, "inset")
     eq(app.Settings.navigation.modules.lumaSurfaceRole, "button")
     -- HUD supports use the HUD role instead of the window opacity.
     eq(app.components.dataStrip.frame.lumaSurfaceRole, "hud")
-    eq(app.components.dataStrip.frame.backgroundColor[4], 0.62)
+    eq(app.components.dataStrip.frame.lumaPlate.vertexColor[4], 0.62)
+    eq(app.components.dataStrip.zone.lumaTypeRole, "body")
     eq(app.components.experience.frame.lumaSurfaceRole, "hud")
     -- Chat: quiet support while reading, stronger backdrop while typing.
     local chat = app.components.chat.windows[1]
     eq(chat.background.lumaSurfaceRole, "chat")
-    eq(chat.background.backgroundColor[4], 0.25)
+    eq(chat.background.lumaPlate.vertexColor[4], 0.25)
     ChatFrame1EditBox:Show()
     eq(chat.editBackground.lumaSurfaceRole, "chatActive")
-    eq(chat.editBackground.backgroundColor[4], 0.75)
+    eq(chat.editBackground.lumaPlate.vertexColor[4], 0.75)
     ChatFrame1EditBox:Hide()
     -- Profile changes repaint the cached surfaces from their own token.
     app.Store:Set("appearance", "windowOpacity", 0.8)
     app.Store:Set("appearance", "chatOpacity", 0.4)
+    app.Store:Set("appearance", "hudOpacity", 0.5)
     app.Settings:Update()
-    eq(app.Settings.frame.backgroundColor[4], 0.8)
+    -- A plate carries its opacity in the texture's vertex colour, so the profile
+    -- token reaches the window through the plate rather than through a backdrop.
+    eq(app.Settings.frame.lumaPlate.vertexColor[4], 0.8)
     eq(app.Theme:Opacity("windowOpacity"), 0.8)
     -- An unknown token falls back to the legacy opacity instead of nil.
     eq(app.Theme:Opacity("window"), app.Store:Profile().appearance.opacity)
-    eq(chat.background.backgroundColor[4], 0.4)
+    eq(chat.background.lumaPlate.vertexColor[4], 0.4)
+    eq(app.components.dataStrip.frame.lumaPlate.vertexColor[4], 0.5)
     -- The character window gradient follows the window token as well.
     app.Store:Set("modules", "characterWindow", true)
     eq(app.Theme:Opacity("windowOpacity"), 0.8)
@@ -3941,14 +4440,16 @@ end)
 test("a UI scale change re-snaps hairlines through the layout pass", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Settings:Toggle()
-    eq(app.Settings.frame.backdrop.edgeSize, 1)
+    local parent = H.NewFrame(nil, UIParent)
+    -- A rule is one physical pixel, so its size in UI units follows the scale.
+    eq(app.Surface:HLine(parent):GetHeight(), app.Pixel:Pixels(1))
     UIParent:SetScale(2)
     H.Fire("UI_SCALE_CHANGED")
-    eq(app.Settings.frame.backdrop.edgeSize, 0.5)
-    eq(app.Settings.navPanel.lumaSurfaceRole, "embedded")
+    eq(app.Surface:HLine(parent):GetHeight(), 0.5)
+    eq(app.Settings.navPanel.lumaSurfaceRole, "inset")
     UIParent:SetScale(1)
     H.Fire("UI_SCALE_CHANGED")
-    eq(app.Settings.frame.backdrop.edgeSize, 1)
+    eq(app.Surface:HLine(parent):GetHeight(), 1)
     eq(#app.errors, 0)
 end)
 
@@ -3966,11 +4467,13 @@ test("transitions fade in and out and reverse from the current alpha", function(
     eq(mid > 0 and mid < 1, true)
     -- Closing continues from the visible value instead of jumping to zero.
     app.Settings:Close()
+    eq(frame:GetAlpha(), mid)
     H.Advance(0.02)
     local lower = frame:GetAlpha()
     eq(lower < mid, true)
     -- Reopening mid-close reverses again; the replaced close never hides it.
     app.Settings:Open()
+    eq(frame:GetAlpha(), lower)
     H.Advance(1)
     eq(frame:GetAlpha(), 1)
     eq(frame:IsShown(), true)
@@ -4180,6 +4683,22 @@ test("a native hide cancels the open task and resets alpha for the next open", f
     eq(#app.errors, 0)
 end)
 
+test("hiding during a page fade leaves the page visible on the next open", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Open()
+    H.Advance(0.3)
+    app.Settings:Select("modules")
+    app.Settings.frame:Hide()
+    eq(app.Transitions:Count(), 0)
+    app.Settings:Open()
+    H.Advance(0.3)
+    eq(app.Settings.pages.modules:IsShown(), true)
+    eq(app.Settings.pages.modules:GetAlpha(), 1)
+    app.Settings:Select("modules")
+    eq(app.Transitions:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
 test("two channels on one owner settle independently", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local tr = app.Transitions
@@ -4246,21 +4765,23 @@ test("selected navigation keeps its accent after the mouse leaves", function()
     local accent = app.Theme:Accent()
     eq(modules.state.selected, true)
     eq(modules.selectedMark:IsShown(), true)
-    eq(modules.borderColor[1], accent[1])
+    eq(modules.ring.borderColor[1], accent[1])
     modules.scripts.OnEnter(modules)
     H.Advance(0.2)
-    eq(modules.borderColor[1], accent[1])
+    eq(modules.ring.borderColor[1], accent[1])
     modules.scripts.OnLeave(modules)
     eq(modules.state.hover, false)
     -- R03: leaving hover never clears the selected accent.
-    eq(modules.borderColor[1], accent[1])
+    eq(modules.ring.borderColor[1], accent[1])
     eq(modules.selectedMark:IsShown(), true)
     app.Settings:Select("general")
     eq(modules.state.selected, false)
-    eq(modules.borderColor[1], app.Theme.colors.line[1])
+    -- An idle control carries no hairline at all: the accent ring is a state, and
+    -- an unselected entry must not keep a permanent box around it.
+    eq(modules.ring.borderColor[4], 0)
     eq(modules.selectedMark:IsShown(), false)
     eq(general.state.selected, true)
-    eq(general.borderColor[1], accent[1])
+    eq(general.ring.borderColor[1], accent[1])
     eq(#app.errors, 0)
 end)
 
@@ -4348,7 +4869,7 @@ test("profile input validates and gates the create actions", function()
     input.scripts.OnTextChanged(input)
     eq(input:IsValid(), false)
     eq(create.state.disabled, true)
-    eq(input.borderColor[1], app.Theme.colors.ember[1])
+    eq(input.ring.borderColor[1], app.Theme.colors.ember[1])
     -- Chinese names survive the edit box and are accepted by the store.
     input:SetText("团队方案")
     input.scripts.OnTextChanged(input)
@@ -4360,7 +4881,7 @@ test("profile input validates and gates the create actions", function()
     input.scripts.OnEditFocusGained(input)
     eq(app.Controls.focused, input)
     eq(input.state.focus, true)
-    eq(input.borderColor[1], app.Theme:Accent()[1])
+    eq(input.ring.borderColor[1], app.Theme:Accent()[1])
     input.scripts.OnEscapePressed(input)
     eq(app.Controls.focused, nil)
     eq(input.state.focus, false)
@@ -4462,10 +4983,13 @@ test("scroll areas derive their range and clamp scrolling", function()
     for _ = 1, 20 do scroll.scripts.OnMouseWheel(scroll, 5) end
     eq(scroll:GetVerticalScroll(), 0)
     -- Short content collapses the range instead of leaving a dead scrollbar.
+    scroll:ScrollBy(300)
     body:SetHeight(50)
     scroll:UpdateRange()
     eq(scroll.rangeMax, 0)
     eq(scroll.bar.maximum, 1)
+    eq(scroll:GetVerticalScroll(), 0)
+    eq(scroll.thumb:GetHeight() <= scroll:GetHeight(), true)
     eq(#app.errors, 0)
 end)
 
@@ -4552,6 +5076,88 @@ test("settings header is compact and the general page scrolls", function()
         eq(app.Settings.pages[key] ~= nil, true)
         eq(app.Settings.navigation[key].state.selected, key == "general")
     end
+    eq(#app.errors, 0)
+end)
+
+test("shared settings scroll areas accept wheel input", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("layout")
+    for _, key in ipairs({ "general", "layout", "modules", "diagnostics" }) do
+        local scroll = app.Settings.pages[key].scroll
+        eq(scroll:IsMouseEnabled(), true)
+        eq(scroll:IsMouseWheelEnabled(), true)
+    end
+    local scroll = app.Settings.pages.layout.scroll
+    -- The harness does not calculate the client's dynamic layout height.
+    scroll.rangeMax = 100
+    eq(scroll:GetVerticalScroll(), 0)
+    scroll.scripts.OnMouseWheel(scroll, -1)
+    eq(scroll:GetVerticalScroll() > 0, true)
+    eq(#app.errors, 0)
+end)
+
+test("settings controls fit their scroll content without clipping the values", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("general")
+    local page = app.Settings.pages.general
+    for _, control in ipairs(page.settings) do
+        if control.slider then
+            eq(control:GetWidth(), 462)
+            eq(control.slider:GetWidth(), 462)
+        elseif control.kind == "switch" then
+            eq(control:GetWidth(), 462)
+            eq(control.text.point[1], "RIGHT")
+            eq(control.text.point[2], control.statusText)
+        end
+    end
+    eq(#app.errors, 0)
+end)
+
+test("settings general page reserves height for long translated descriptions", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.L.generalHint = string.rep("长说明文字", 60)
+    app.L.clockOwner = string.rep("时钟选择说明", 25)
+    app.L.instructions = string.rep("布局说明", 40)
+    app.L.compatibilityHint = string.rep("透明度说明", 40)
+    app.Settings:Toggle("general")
+    local page = app.Settings.pages.general
+    local clock
+    for _, control in ipairs(page.settings) do
+        if control.text and control.text:GetText() == app.L.clockStrip then clock = control end
+    end
+    eq(clock ~= nil, true)
+    eq(clock.point[3] <= page.clockLabel.point[3] - page.clockLabel:GetStringHeight(), true)
+    local body = page.scroll:GetScrollChild()
+    eq(body:GetHeight() >= -page.compatibilityHint.point[3] + page.compatibilityHint:GetStringHeight(), true)
+    eq(#app.errors, 0)
+end)
+
+test("layout page flows long notes, warnings and every movable row within one scroll", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.L.layoutHint = string.rep("布局说明", 70)
+    app.L.nativeLayoutHint = string.rep("原生界面说明", 45)
+    app.L.presetHint = string.rep("预设说明", 50)
+    app.L.presetOverlapHint = string.rep("重叠警告", 50)
+    app.Settings:Toggle("layout")
+    local page, settings = app.Settings.pages.layout, app.Settings
+    eq(page.scroll, settings.layoutScroll)
+    eq(page.layoutMove.point[3] <= page.layoutHint.point[3] - page.layoutHint:GetStringHeight(), true)
+    eq(settings.presetChoices.combat.point[3] <= page.presetHint.point[3] - page.presetHint:GetStringHeight(), true)
+    local firstY = settings.layoutRows[1].point[3]
+    app.Layout.previewWarnings = { questList = true }
+    settings:Update()
+    eq(settings.layoutRows[1].point[3] < firstY, true)
+    eq(settings.layoutRows[1].point[3] <= settings.layoutCount.point[3] - settings.layoutCount:GetStringHeight(), true)
+    local rows = settings.layoutRows
+    local last = rows[#app.Layout:IDs()]
+    local body = page.scroll:GetScrollChild()
+    eq(body:GetHeight() >= -last.point[3] + last:GetHeight(), true)
+    eq(page.scroll.rangeMax > 0, true)
+    page.scroll:ScrollBy(page.scroll.rangeMax)
+    local offset = page.scroll:GetVerticalScroll()
+    settings:Select("general")
+    settings:Select("layout")
+    eq(page.scroll:GetVerticalScroll(), offset)
     eq(#app.errors, 0)
 end)
 
@@ -4661,6 +5267,24 @@ test("closing the settings window clears keyboard focus", function()
     eq(input.state.focus, false)
     H.Advance(0.3)
     eq(app.Settings.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("changing pages or closing through the client releases the profile input", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("profiles")
+    local input = app.Settings.profileInput
+    input.focused = true
+    input.scripts.OnEditFocusGained(input)
+    app.Settings:Select("general")
+    eq(input.focused, false)
+    eq(app.Controls.focused, nil)
+    app.Settings:Select("profiles")
+    input.focused = true
+    input.scripts.OnEditFocusGained(input)
+    app.Settings.frame:Hide()
+    eq(input.focused, false)
+    eq(app.Controls.focused, nil)
     eq(#app.errors, 0)
 end)
 
@@ -4795,6 +5419,163 @@ test("disabling the action button sample restores the native button", function()
     eq(button.lumaActionSkin.border:IsShown(), false)
     eq(app.Transitions:Count(), 0)
     eq(#app.errors, 0)
+end)
+
+test("action button edges follow the bar's effective scale on refresh", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = _G.ActionButton1
+    button:SetScale(2)
+    app.Store:Set("modules", "actionButtons", true)
+    eq(button.lumaActionSkin.border.backdrop.edgeSize, 0.5)
+    button:SetScale(1)
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(button.lumaActionSkin.border.backdrop.edgeSize, 1)
+    eq(#app.errors, 0)
+end)
+
+test("action button refresh restores a button removed from the bar", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local old = _G.ActionButton1
+    app.Store:Set("modules", "actionButtons", true)
+    local replacement = H.NewFrame(nil, _G.MainActionBar)
+    replacement.icon = H.NewFrame(nil, replacement)
+    _G.MainActionBar.actionButtons = { replacement }
+    app.components.actionButtons:Refresh()
+    eq(old.icon.texCoord[1], 0)
+    eq(old.NormalTexture:GetAlpha(), 1)
+    eq(old.lumaActionSkin.border:IsShown(), false)
+    old.scripts.OnEnter(old)
+    eq(app.Transitions:Count(), 0)
+    eq(replacement.lumaActionSkin.border:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("action button refresh restores replaced regions and skins their replacements", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = _G.ActionButton1
+    local originalIcon, originalHotkey = button.icon, button.HotKey
+    app.Store:Set("modules", "actionButtons", true)
+    button.icon = H.NewFrame(nil, button)
+    button.HotKey = H.NewFrame(nil, button)
+    app.components.actionButtons:Refresh()
+    eq(originalIcon.texCoord[1], 0)
+    eq(originalHotkey.fontSize, 13)
+    eq(button.icon.texCoord[1], 0.08)
+    eq(button.HotKey.fontSize, 10)
+    app.Store:Set("modules", "actionButtons", false)
+    eq(button.icon.texCoord[1], 0)
+    eq(button.HotKey.fontSize, 13)
+    eq(#app.errors, 0)
+end)
+
+test("action button refresh restores replaced static art before styling the new member", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = ActionButton1
+    local old = button.SlotArt
+    old:SetAlpha(0.4)
+    app.Store:Set("modules", "actionButtons", true)
+    eq(old:GetAlpha(), 0)
+    local replacement = H.NewFrame(nil, button)
+    replacement:SetAlpha(0.7)
+    button.SlotArt = replacement
+    app.components.actionButtons:Refresh()
+    eq(old:GetAlpha(), 0.4)
+    eq(replacement:GetAlpha(), 0)
+    app.Store:Set("modules", "actionButtons", false)
+    eq(replacement:GetAlpha(), 0.7)
+    eq(#app.errors, 0)
+end)
+
+test("action button refresh hides its skin when a decorated icon becomes forbidden", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = ActionButton1
+    app.Store:Set("modules", "actionButtons", true)
+    button.icon.forbidden = true
+    app.components.actionButtons:Refresh()
+    eq(app.components.actionButtons.failed, true)
+    eq(button.lumaActionSkin.border:IsShown(), false)
+    eq(button.lumaActionSkin.bg:IsShown(), false)
+    eq(button.NormalTexture:GetAlpha(), 1)
+    eq(app.components.actionButtons.originals[button] ~= nil, true)
+    button.icon.forbidden = false
+    app.Store:Set("modules", "actionButtons", false)
+    eq(button.icon.texCoord[1], 0)
+    eq(app.components.actionButtons.originals[button], nil)
+end)
+
+test("action button refresh rolls back if a tracked member becomes restricted", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = ActionButton1
+    local original = button.SlotArt
+    app.Store:Set("modules", "actionButtons", true)
+    button.SlotArt = H.Secret("restricted")
+    app.components.actionButtons:Refresh()
+    eq(app.components.actionButtons.failed, true)
+    eq(original:GetAlpha(), 1)
+    eq(button.lumaActionSkin.border:IsShown(), false)
+    eq(app.components.actionButtons.originals[button], nil)
+    eq(#app.errors > 0, true)
+    button.SlotArt = original
+    app.Store:Set("modules", "actionButtons", false)
+end)
+
+test("action button sample leaves an unreadable icon and forbidden member alone", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = _G.ActionButton1
+    local forbidden = button.HotKey
+    forbidden.forbidden = true
+    local icon = button.icon
+    local original = icon.GetTexCoord
+    icon.GetTexCoord = function() return H.Secret(0), 0, 0, 0, 1, 1, 1, 1 end
+    app.Store:Set("modules", "actionButtons", true)
+    eq(button.lumaActionSkin, nil)
+    eq(button.NormalTexture:GetAlpha(), 1)
+    icon.GetTexCoord = original
+    app.components.actionButtons:Refresh()
+    eq(forbidden.fontSize, nil)
+    eq(button.lumaActionSkin.border:IsShown(), true)
+    app.Store:Set("modules", "actionButtons", false)
+    eq(forbidden.fontSize, nil)
+    eq(#app.errors, 0)
+end)
+
+test("action button apply failure restores changed members and reports the failure", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = _G.ActionButton1
+    local art = button.SlotArt
+    local setter = art.SetAlpha
+    local failed = false
+    art.SetAlpha = function(self, value)
+        if value == 0 and not failed then failed = true; error("test failure") end
+        setter(self, value)
+    end
+    app.Store:Set("modules", "actionButtons", true)
+    eq(button.icon.texCoord[1], 0)
+    eq(button.HotKey.fontSize, 13)
+    eq(button.NormalTexture:GetAlpha(), 1)
+    eq(button.SlotBackground:GetAlpha(), 1)
+    eq(button.lumaActionSkin.border:IsShown(), false)
+    eq(app.components.actionButtons.failed, true)
+    eq(#app.errors > 0, true)
+    button.scripts.OnEnter(button)
+    eq(app.Transitions:Count(), 0)
+    app.Store:Set("modules", "actionButtons", false)
+    eq(app.components.actionButtons.failed, nil)
+end)
+
+test("action button restoration keeps its snapshot when a region becomes forbidden", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = _G.ActionButton1
+    app.Store:Set("modules", "actionButtons", true)
+    button.icon.forbidden = true
+    app.Store:Set("modules", "actionButtons", false)
+    eq(button.lumaActionSkin.border:IsShown(), false)
+    eq(app.components.actionButtons.originals[button] ~= nil, true)
+    button.icon.forbidden = false
+    app.Store:Set("modules", "actionButtons", true)
+    app.Store:Set("modules", "actionButtons", false)
+    eq(button.icon.texCoord[1], 0)
+    eq(app.components.actionButtons.originals[button], nil)
 end)
 
 test("repeated action button cycles keep one skin and one hook set", function()
@@ -4950,6 +5731,69 @@ test("diagnostics report how many sample buttons were skinned", function()
     eq(#app.errors, 0)
 end)
 
+test("the bar ownership report reads the client without touching anything", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local panel = app.components.actionPanel
+    H.messages = {}
+    SlashCmdList.LUMAUI("bars")
+    local text = table.concat(H.messages, "\n")
+    -- The report names every tracked bar even when the client never built it.
+    eq(text:find(app.L.barsReportHeader, 1, true) ~= nil, true)
+    eq(text:find("MainActionBar", 1, true) ~= nil, true)
+    eq(text:find("MultiBarBottomLeft", 1, true) ~= nil, true)
+    eq(text:find("MultiBar7", 1, true) ~= nil, true)
+    eq(text:find("PetActionBar", 1, true) ~= nil, true)
+    -- A bar that exists reports visibility and button count; without a rect
+    -- from the client it says so instead of inventing coordinates.
+    local mainLine = text:match("MainActionBar%s+shown=%S+.*")
+    eq(mainLine ~= nil, true)
+    eq(mainLine:find("shown=yes", 1, true) ~= nil, true)
+    eq(mainLine:find("buttons=", 1, true) ~= nil, true)
+    -- The report is read-only: no panel was created and no bar state changed.
+    eq(panel.panels == nil or next(panel.panels) == nil, true)
+    eq(_G.MainActionBar:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the bar ownership report works while the panel component is off", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.components.actionPanel.status, "disabled")
+    H.messages = {}
+    SlashCmdList.LUMAUI("bars")
+    local text = table.concat(H.messages, "\n")
+    eq(text:find(app.L.barsReportHeader, 1, true) ~= nil, true)
+    eq(text:find("status=disabled", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the bar ownership report flags two visible bars on the same spot", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- The harness MainActionBar and MultiBarBottomLeft both exist and are shown;
+    -- give them one top-left corner and different corners from every other bar.
+    _G.MultiBarBottomLeft = H.NewFrame("MultiBarBottomLeft", UIParent)
+    _G.MultiBarBottomLeft.rect = { left = 890, bottom = 60, width = 524, height = 45 }
+    _G.MultiBarBottomLeft.actionButtons = {}
+    local main = _G.MainActionBar
+    main.rect = { left = 890, bottom = 60, width = 524, height = 45 }
+    main.actionButtons = {}
+    H.messages = {}
+    SlashCmdList.LUMAUI("bars")
+    local text = table.concat(H.messages, "\n")
+    -- Each stacked bar names the other instead of both reading as normal rows.
+    local mainLine = text:match("MainActionBar%s+shown=%S+.*")
+    local leftLine = text:match("MultiBarBottomLeft%s+shown=%S+.*")
+    eq(mainLine:find(app.L.barsOverlapAt, 1, true) ~= nil, true)
+    eq(leftLine:find(app.L.barsOverlapAt, 1, true) ~= nil, true)
+    -- Separating the bars clears the flag on the next report.
+    main.rect = { left = 890, bottom = 60, width = 524, height = 45 }
+    _G.MultiBarBottomLeft.rect = { left = 890, bottom = 10, width = 524, height = 45 }
+    H.messages = {}
+    SlashCmdList.LUMAUI("bars")
+    text = table.concat(H.messages, "\n")
+    eq(text:find(app.L.barsOverlapAt, 1, true), nil)
+    eq(#app.errors, 0)
+end)
+
 -- ==== TRACK: VIS-10 layout groups and presets — append new tests above this line ====
 test("party frames are one layout group item", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
@@ -5095,6 +5939,112 @@ test("applying a preset writes positions and undo restores the snapshot", functi
     eq(app.Store:Profile().positions.questList.x, 11)
     eq(app.Store:Profile().positions.questList.y, 12)
     eq(app.Store:Profile().positions.topInfo, nil)
+    eq(#app.errors, 0)
+end)
+
+test("preset undo preserves unrelated positions edited after applying", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:SetPosition("questList", 11, 12)
+    app.Store:SetPosition("otherPanel", 20, 30)
+    app.Layout:ApplyPreset("combat")
+    app.Store:SetPosition("otherPanel", 40, 50)
+    app.Store:SetPosition("newPanel", 60, 70)
+    app.Layout:UndoPreset()
+    local positions = app.Store:Profile().positions
+    eq(positions.questList.x, 11)
+    eq(positions.questList.y, 12)
+    eq(positions.otherPanel.x, 40)
+    eq(positions.otherPanel.y, 50)
+    eq(positions.newPanel.x, 60)
+    eq(positions.newPanel.y, 70)
+    eq(positions.topInfo, nil)
+    eq(#app.errors, 0)
+end)
+
+test("combat layout is selected and previewed without moving the native action bar", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("layout")
+    local bar = _G.MainActionBar
+    local point = bar.point
+    H.Click(app.Settings.presetChoices.combat)
+    H.Click(app.Settings.presetButtons.preview)
+    eq(app.Layout.previewName, "combat")
+    local guide = app.Layout.presetOverlays.nativeActionArea
+    eq(guide:IsShown(), true)
+    eq(#guide.slots, 24)
+    eq(guide.slots[1]:GetWidth(), 40)
+    eq(guide.slots[1].point[4], 0)
+    eq(guide.slots[12].point[4], 484)
+    eq(guide.slots[13].point[5], -52)
+    local firstSlot = guide.slots[1]
+    app.Layout:PreviewPreset("combat")
+    eq(guide.slots[1], firstSlot)
+    eq(#guide.slots, 24)
+    eq(bar.point, point)
+    H.Click(app.Settings.presetButtons.apply)
+    eq(app.Layout.presetOverlays.nativeActionArea:IsShown(), false)
+    eq(app.Layout.presetSnapshot.name, "combat")
+    eq(bar.point, point)
+    eq(#app.errors, 0)
+end)
+
+test("combat preset keeps unit frames close to the action area on wide screens", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    UIParent:SetSize(1920, 1080)
+    app.Layout:PreviewPreset("combat")
+    local playerOverlay = app.Layout.presetOverlays.unit_player
+    local targetOverlay = app.Layout.presetOverlays.unit_target
+    local firstX = playerOverlay.point[4]
+    eq(firstX, -409)
+    eq(targetOverlay.point[4], 409)
+    UIParent:SetSize(3440, 1440)
+    H.Fire("DISPLAY_SIZE_CHANGED")
+    eq(playerOverlay.point[4], firstX)
+    eq(targetOverlay.point[4], -firstX)
+    eq(app.Layout.previewName, "combat")
+    app.Layout:ApplyPreset("combat")
+    eq(app.components.unitFrames.frames.player.point[4], firstX)
+    eq(app.components.unitFrames.frames.target.point[4], -firstX)
+    eq(#app.errors, 0)
+end)
+
+test("preset preview and application agree on screen-edge clamping", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("appearance", "scale", 1.5)
+    UIParent:SetSize(800, 600)
+    app.Layout:PreviewPreset("combat")
+    local player = app.components.unitFrames.frames.player
+    local overlay = app.Layout.presetOverlays.unit_player
+    local previewX, previewY = overlay.point[4], overlay.point[5]
+    app.Layout:ApplyPreset("combat")
+    eq(math.abs(player.point[4] * 1.5 - previewX) < 0.001, true)
+    eq(math.abs(player.point[5] * 1.5 - previewY) < 0.001, true)
+    eq(#app.errors, 0)
+end)
+
+test("combat preview flags cramped and off-screen outlines without moving frames", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("appearance", "scale", 1.5)
+    UIParent:SetSize(800, 600)
+    local player = app.components.unitFrames.frames.player
+    local originalPoint = player.point
+    app.Layout:PreviewPreset("combat")
+    eq(player.point, originalPoint)
+    eq(app.Layout.previewWarnings.unit_player, true)
+    eq(app.Layout.previewWarnings.nativeActionArea, true)
+    eq(app.Layout.presetOverlays.unit_player.label:GetText():find(app.L.presetOverlapShort, 1, true) ~= nil, true)
+    app.Settings:Toggle("layout")
+    eq(app.Settings.layoutCount:GetText():find(app.L.presetOverlapHint, 1, true) ~= nil, true)
+    UIParent:SetSize(480, 600)
+    app.Layout:PreviewPreset("combat")
+    eq(app.Layout.presetOverlays.nativeActionArea:GetWidth(), 524)
+    eq(app.Layout.previewWarnings.nativeActionArea, true)
+    app.Layout:CancelPresetPreview()
+    eq(app.Layout.previewWarnings, nil)
+    eq(app.Layout.presetOverlays.unit_player:IsShown(), false)
     eq(#app.errors, 0)
 end)
 
@@ -5459,8 +6409,8 @@ test("party buttons reserve one native private aura anchor per aura index", func
             eq(args.iconInfo.iconHeight, 12)
         end
     end
-    -- The anchors are what lets the native party frame go away.
-    eq(PartyFrame:IsShown(), false)
+    -- Allocated anchors do not establish encounter parity.
+    eq(PartyFrame:IsShown(), true)
     -- A member leaving releases only that member's slots; the rest stay.
     local saved = UnitExists
     _G.UnitExists = function(token) return token ~= "party2" end
@@ -5500,7 +6450,7 @@ test("raid buttons reserve private aura anchors and release them on roster loss"
             eq(H.privateAnchors.live[id].auraIndex, slot)
         end
     end
-    eq(CompactRaidFrameContainer:IsShown(), false)
+    eq(CompactRaidFrameContainer:IsShown(), true)
     -- A member leaving releases its slots, the surviving one keeps its own.
     _G.UnitExists = function(unit) return unit == "raid2" end
     H.Fire("GROUP_ROSTER_UPDATE")
@@ -5667,7 +6617,7 @@ test("a rejected member watch keeps that member off the takeover", function()
     local party = app.components.partyFrames
     eq(party.frames.party2.lumaWatched, nil)
     eq(party.frames.party1.lumaWatched, true)
-    eq(PartyFrame:IsShown(), false)
+    eq(PartyFrame:IsShown(), true)
     _G.RegisterUnitWatch = saved
     eq(#app.errors, 0)
 end)
@@ -5743,7 +6693,7 @@ test("private auras stay a documented gap instead of guessed anchors", function(
     eq(#app.errors, 0)
 end)
 
-test("both native party displays are suppressed and restored", function()
+test("both native party displays stay available", function()
     local app = H.Load()
     local native = H.NewFrame("CompactPartyFrame", UIParent)
     native:Show()
@@ -5751,11 +6701,11 @@ test("both native party displays are suppressed and restored", function()
     eq(native:IsShown(), true)
     app.Store:Set("modules", "partyFrames", true)
     -- Raid-style party frames live on CompactPartyFrame, not PartyFrame.
-    eq(native:IsShown(), false)
-    eq(PartyFrame:IsShown(), false)
-    -- The client re-showing it is pressed back down by the hook.
+    eq(native:IsShown(), true)
+    eq(PartyFrame:IsShown(), true)
+    -- The client retains control of its visibility.
     native:Show()
-    eq(native:IsShown(), false)
+    eq(native:IsShown(), true)
     app.Store:Set("modules", "partyFrames", false)
     eq(native:IsShown(), true)
     eq(PartyFrame:IsShown(), true)
@@ -5897,6 +6847,109 @@ test("the experience bar follows level, lock and watched reputation", function()
     eq(#app.errors, 0)
 end)
 
+test("retail watched reputation uses the current API and safe progress ranges", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local experience = app.components.experience
+    local mode, pending, capped = "normal", false, false
+    _G.C_Reputation = {
+        GetWatchedFactionData = function()
+            if mode == "none" then return nil end
+            if mode == "normalCapped" then
+                return { factionID = 42, name = "Test faction", reaction = 8,
+                    currentReactionThreshold = 42000, nextReactionThreshold = 42000, currentStanding = 42000 }
+            end
+            return { factionID = 42, name = "Test faction", reaction = 5,
+                currentReactionThreshold = 3000, nextReactionThreshold = 9000, currentStanding = 4500 }
+        end,
+        IsFactionParagonForCurrentPlayer = function() return mode == "paragon" end,
+        IsMajorFaction = function()
+            if mode == "secret" then return H.Secret(true) end
+            return mode == "major" or mode == "paragon"
+        end,
+        GetFactionParagonInfo = function() return 12500, 10000, 1, pending end,
+    }
+    _G.C_MajorFactions = {
+        GetMajorFactionData = function() return { renownLevelThreshold = 2500,
+            renownReputationEarned = 1000, renownLevel = 3, maxLevel = 10 } end,
+        HasMaximumRenown = function() return capped end,
+    }
+    _G.C_GossipInfo = {
+        GetFriendshipReputation = function()
+            if mode == "friendCapped" then
+                return { friendshipFactionID = 42, reaction = "Best friend", reactionThreshold = 3000,
+                    nextThreshold = nil, standing = 3000 }
+            end
+            if mode ~= "friend" then return { friendshipFactionID = 0 } end
+            return { friendshipFactionID = 42, reaction = "Friend", reactionThreshold = 1000,
+                nextThreshold = 3000, standing = 1600 }
+        end,
+    }
+    H.Fire("UPDATE_FACTION")
+    eq(experience.mode, "reputation")
+    eq(experience.text:GetText():find("25%%") ~= nil, true)
+    GameTooltip.lines = {}
+    experience.frame.scripts.OnEnter()
+    eq(table.concat(GameTooltip.lines, "\n"):find("1500 / 6000", 1, true) ~= nil, true)
+    mode = "normalCapped"
+    H.Fire("UPDATE_FACTION")
+    eq(experience.text:GetText():find("100%%") ~= nil, true)
+    mode = "friend"
+    H.Fire("UPDATE_FACTION")
+    eq(experience.text:GetText():find("30%%") ~= nil, true)
+    eq(experience.faction.standing, "Friend")
+    mode = "friendCapped"
+    H.Fire("UPDATE_FACTION")
+    eq(experience.text:GetText():find("100%%") ~= nil, true)
+    eq(experience.faction.standing, "Best friend")
+    mode = "major"
+    H.Fire("UPDATE_FACTION")
+    eq(experience.text:GetText():find("40%%") ~= nil, true)
+    eq(experience.faction.standing, string.format(app.L.reputationRenown, 3))
+    capped = true
+    H.Fire("MAJOR_FACTION_RENOWN_LEVEL_CHANGED")
+    eq(experience.text:GetText():find("100%%") ~= nil, true)
+    mode = "paragon"
+    H.Fire("UPDATE_FACTION")
+    eq(experience.text:GetText():find("25%%") ~= nil, true)
+    eq(experience.faction.standing, app.L.reputationParagon)
+    pending = true
+    H.Fire("UPDATE_FACTION")
+    eq(experience.text:GetText():find("100%%") ~= nil, true)
+    eq(experience.text:GetText():find(app.L.reputationRewardPending, 1, true) ~= nil, true)
+    mode = "secret"
+    H.Fire("UPDATE_FACTION")
+    eq(experience.frame:IsShown(), false)
+    eq(experience.mode, nil)
+    mode = "none"
+    _G.IsXPUserDisabled = function() return H.Secret(false) end
+    H.Fire("UPDATE_FACTION")
+    eq(experience.frame:IsShown(), false)
+    _G.IsXPUserDisabled = function() return false end
+    H.Fire("UPDATE_FACTION")
+    eq(experience.mode, "xp")
+    eq(experience.frame:IsShown(), true)
+    _G.C_Reputation, _G.C_MajorFactions, _G.C_GossipInfo = nil, nil, nil
+    eq(#app.errors, 0)
+end)
+
+test("watched reputation can run without XP APIs", function()
+    local app = H.Load()
+    _G.UnitXP, _G.UnitXPMax = nil, nil
+    _G.C_Reputation = {
+        GetWatchedFactionData = function() return { factionID = 42, name = "Test faction", reaction = 5,
+            currentReactionThreshold = 0, nextReactionThreshold = 100, currentStanding = 40 } end,
+        IsFactionParagonForCurrentPlayer = function() return false end,
+        IsMajorFaction = function() return false end,
+    }
+    _G.C_GossipInfo = { GetFriendshipReputation = function() return { friendshipFactionID = 0 } end }
+    H.Fire("PLAYER_LOGIN")
+    eq(app.components.experience.running, true)
+    eq(app.components.experience.mode, "reputation")
+    eq(app.components.experience.text:GetText():find("40%%") ~= nil, true)
+    _G.C_Reputation, _G.C_GossipInfo = nil, nil
+    eq(#app.errors, 0)
+end)
+
 test("the minimap keeps native and third-party buttons and says so", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local minimap = app.components.minimap
@@ -5954,12 +7007,12 @@ test("chat input mirrors the frame font and spacing and restores both", function
     eq(box.font, "Fonts/Chat.ttf")
     eq(box.fontSize, 14)
     -- One leading rule derived from the client's own font size.
-    eq(frame.spacing, 14 + math.floor(14 / 6))
+    eq(frame.spacing, math.floor(14 / 6))
     -- The client's own font menu changes the frame font; the next paint follows.
     frame.fontSize = 18
     app.components.chat:Refresh()
     eq(box.fontSize, 18)
-    eq(frame.spacing, 18 + math.floor(18 / 6))
+    eq(frame.spacing, math.floor(18 / 6))
     -- Disable restores the box font and the spacing the frame started with.
     app.Store:Set("modules", "chat", false)
     eq(box.fontSize, 13)
@@ -5978,8 +7031,10 @@ test("chat backing fades on focus and survives a mid-fade reversal", function()
     eq(background:IsShown(), true)
     H.Advance(0.05)
     eq(background:GetAlpha() > 0 and background:GetAlpha() < 1, true)
+    local beforeReverse = background:GetAlpha()
     -- Losing focus mid-fade reverses from the current alpha and settles hidden.
     ChatFrame1EditBox:ClearFocus()
+    eq(background:GetAlpha(), beforeReverse)
     H.Advance(0.5)
     eq(background:GetAlpha(), 0)
     eq(background:IsShown(), false)
@@ -6002,6 +7057,44 @@ test("chat backing fades on focus and survives a mid-fade reversal", function()
     eq(#app.errors, 0)
 end)
 
+test("chat follows a replaced edit box and releases the old focus hooks", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local entry = app.components.chat.windows[1]
+    local old = ChatFrame1EditBox
+    ChatFrame1.fontSize = 18
+    app.components.chat:Refresh()
+    eq(old.fontSize, 18)
+    local replacement = H.NewFrame(nil, ChatFrame1)
+    replacement.HasFocus = function() return false end
+    ChatFrame1.editBox = replacement
+    H.Fire("UPDATE_CHAT_WINDOWS")
+    eq(entry.editBox, replacement)
+    eq(old.fontSize, 13)
+    old.scripts.OnEditFocusGained(old)
+    eq(entry.editBackground:IsShown(), false)
+    replacement.scripts.OnEditFocusGained(replacement)
+    eq(entry.editBackground:IsShown(), true)
+    H.Advance(0.3)
+    eq(entry.editBackground:GetAlpha(), 1)
+    app.Store:Set("modules", "chat", false)
+    eq(entry.editBackground:IsShown(), false)
+    replacement.scripts.OnEditFocusGained(replacement)
+    eq(entry.editBackground:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("chat keeps an edit box font when its previous font cannot be read", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local replacement = H.NewFrame(nil, ChatFrame1)
+    replacement.GetFont = function() error("font unavailable") end
+    ChatFrame1.editBox = replacement
+    H.Fire("UPDATE_CHAT_WINDOWS")
+    eq(replacement.font, nil)
+    app.Store:Set("modules", "chat", false)
+    eq(replacement.font, nil)
+    eq(#app.errors, 0)
+end)
+
 test("chat hides the input backing when its window hides mid-fade", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local entry = app.components.chat.windows[1]
@@ -6015,6 +7108,20 @@ test("chat hides the input backing when its window hides mid-fade", function()
     H.Advance(0.5)
     eq(entry.editBackground:IsShown(), true)
     eq(entry.editBackground:GetAlpha(), 1)
+    eq(#app.errors, 0)
+end)
+
+test("chat never shows a focused input backing while its window is hidden", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local entry = app.components.chat.windows[2]
+    eq(ChatFrame2:IsShown(), false)
+    ChatFrame2EditBox:SetFocus()
+    eq(entry.editBackground:IsShown(), false)
+    ChatFrame2:Show()
+    eq(entry.editBackground:IsShown(), true)
+    ChatFrame2EditBox:ClearFocus()
+    H.Advance(0.3)
+    eq(entry.editBackground:IsShown(), false)
     eq(#app.errors, 0)
 end)
 
@@ -6309,29 +7416,62 @@ test("equipment sets list nothing gracefully and never swap from a refresh", fun
     eq(#app.errors, 0)
 end)
 
-test("the game-window entry stays reachable and the native toggle opens once", function()
+test("character preview animation and native window entry stay independent", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "characterWindow", true)
     local component = app.components.characterWindow
     local window = component.window
     CharacterFrame:Show()
-    ToggleCharacter("PaperDollFrame")
+    SlashCmdList.LUMAUI("char")
     eq(window:IsShown(), true)
-    eq(CharacterFrame:IsShown(), false)
+    eq(CharacterFrame:IsShown(), true)
     -- Closing is a fade; the window hides when the transition completes.
-    ToggleCharacter("PaperDollFrame")
+    SlashCmdList.LUMAUI("char")
     H.Advance(0.2)
     eq(window:IsShown(), false)
-    -- The header entry opens the game's own window and does not get caught by
-    -- the hook it fires.
+    -- Opening the native entry while it is already shown must not close it.
+    SlashCmdList.LUMAUI("char")
     CharacterFrame:Show()
     H.Click(window.nativeEntry)
     eq(window:IsShown(), false)
     eq(CharacterFrame:IsShown(), true)
-    eq(component.nativeOpen, nil)
     -- Opening again after the native window was used still works.
-    ToggleCharacter("PaperDollFrame")
+    SlashCmdList.LUMAUI("char")
     eq(window:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("character card keeps equipment headings and identity in their own zones", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "characterWindow", true)
+    local component = app.components.characterWindow
+    local window = component.window
+    eq(window.lumaSurfaceRole, "card")
+    eq(window.backdrop, nil)
+    eq(window.modelStage.lumaSurfaceRole, "inset")
+    eq(window.statsPanel.lumaSurfaceRole, "inset")
+    eq(window.title.lumaTypeRole, "display")
+    eq(window.identityName.lumaTypeRole, "display")
+    eq(window.identityRealm.lumaTypeRole, "label")
+    eq(window.identityName:GetWidth(), 320)
+    eq(window.identityRealm:GetWidth(), 125)
+    eq(window.identityRealm.wordWrap, false)
+    for _, key in ipairs({ "equipGroupArmor", "equipGroupAccessories", "equipGroupWeapons" }) do
+        local first
+        for _, slot in ipairs(window.slots) do
+            if slot.groupKey == key then first = slot; break end
+        end
+        local heading = window.gearHeaders[key]
+        eq(first ~= nil and heading ~= nil, true)
+        eq(heading.point[3] - first.point[3], 22)
+        eq(heading.point[3] < 0, true)
+    end
+    local plate, children = window.lumaPlate, #window.children
+    app.Store:Set("appearance", "windowOpacity", 0.8)
+    component:Refresh()
+    eq(window.lumaPlate, plate)
+    eq(window.lumaPlate.vertexColor[4], 0.8)
+    eq(#window.children, children)
     eq(#app.errors, 0)
 end)
 
@@ -6357,6 +7497,61 @@ test("long faction and set names stay clear of the right-hand value", function()
 end)
 
 -- ==== TRACK: VIS-18 BAG AND BANK AVAILABILITY ====
+test("bag and bank share card styling and item quality edges", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("bags")
+    H.bankView = { [Enum.BankType.Character] = true }
+    H.bankTabs = { [Enum.BankType.Character] = { -1 } }
+    H.bankSlots[-1] = { [1] = { itemID = 801, name = "Bank item", link = "|Hitem:801|h[Bank item]|h" } }
+    app.Store:Set("modules", "bank", true)
+    local inventory, bank = app.components.inventory, app.components.bank
+    eq(inventory.frame.lumaSurfaceRole, "card")
+    eq(bank.frame.lumaSurfaceRole, "card")
+    local cell = inventory.buttons[1]
+    app.Items.Paint(cell, { texture = 134400, count = 1, quality = 1, locked = false })
+    eq(cell.lumaSurfaceRole, "embedded")
+    eq(cell.border:IsShown(), false)
+    app.Items.Paint(cell, { texture = 134400, count = 1, quality = 2, locked = false })
+    eq(cell.border:IsShown(), true)
+    eq(cell.border.borderColor[2], ITEM_QUALITY_COLORS[2].g)
+    app.Items.Paint(cell, { texture = 134400, count = 1, quality = 1, locked = false })
+    eq(cell.border:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("inventory search retains the shared input focus state", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("bags")
+    local inventory = app.components.inventory
+    local input = inventory.search
+    input.scripts.OnEditFocusGained(input)
+    eq(input.state.focus, true)
+    eq(app.Controls.focused, input)
+    eq(inventory.searchHint:IsShown(), false)
+    input.scripts.OnEditFocusLost(input)
+    eq(input.state.focus, false)
+    eq(app.Controls.focused, nil)
+    eq(inventory.searchHint:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("secret item lock state never enters a comparison or an item action", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local original = C_Container.GetContainerItemInfo
+    C_Container.GetContainerItemInfo = function()
+        return { hyperlink = "|Hitem:701|h[Item]|h", itemID = 701, itemName = "Item",
+            stackCount = 1, iconFileID = 134400, quality = 1,
+            isLocked = H.Secret(true), hasNoValue = H.Secret(true) }
+    end
+    local item = app.Items.Read(0, 1)
+    eq(item.locked, true)
+    eq(item.junk, false)
+    app.Items.Pickup(item)
+    eq(H.calls.pickup, nil)
+    C_Container.GetContainerItemInfo = original
+    eq(#app.errors, 0)
+end)
+
 test("locked slots dim their cell and refuse item actions", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     SlashCmdList.LUMAUI("bags")
@@ -6372,7 +7567,7 @@ test("locked slots dim their cell and refuse item actions", function()
         if bag == 1 then return plain end
         return nil
     end
-    inventory.search.scripts.OnTextChanged()
+    inventory.search.scripts.OnTextChanged(inventory.search)
     local first = inventory.buttons[1]
     eq(first.item.bag, 0)
     eq(first.item.locked, true)
@@ -6500,12 +7695,12 @@ test("the client's own backdrop style cannot put the native tooltip art back", f
     eq(GameTooltip.NineSlice:IsShown(), false)
     style(GameTooltip, { layoutType = "TooltipAzeriteLayout", padding = { left = 6, right = 6, top = 6, bottom = 6 } })
     eq(GameTooltip.NineSlice:IsShown(), false)
-    eq(tooltip.decor.GameTooltip.bg:IsShown(), true)
+    eq(tooltip.decor.GameTooltip.plate:IsShown(), true)
     -- A lazy reapply after the tooltip hides still leaves nothing floating.
     GameTooltip:Hide()
     style(GameTooltip, nil, false)
     eq(GameTooltip.NineSlice:IsShown(), false)
-    eq(tooltip.decor.GameTooltip.bg:IsShown(), false)
+    eq(tooltip.decor.GameTooltip.plate:IsShown(), false)
     eq(#app.errors, 0)
 end)
 
@@ -6516,14 +7711,14 @@ test("comparison tooltips stay secondary and never borrow the item quality edge"
     ShoppingTooltip2:Show()
     local accent = app.Theme:Accent()
     local decor = app.components.tooltip.decor
-    eq(decor.ShoppingTooltip1.lines[1].color[1], accent[1])
-    eq(decor.ShoppingTooltip1.lines[1].color[2], accent[2])
+    eq(decor.ShoppingTooltip1.quality.color[1], accent[1])
+    eq(decor.ShoppingTooltip1.quality.color[2], accent[2])
     -- The main tooltip may use the item quality colour when the option is on.
     GameTooltip.itemLink = "|Hitem:999|h[Quality item]|h"
     GameTooltip:Show()
-    eq(decor.GameTooltip.lines[1].color[1], 0.0)
+    eq(decor.GameTooltip.quality.color[1], 0.0)
     -- The comparison is quieter than the tooltip it compares against.
-    eq(decor.ShoppingTooltip1.lines[1].color[4] < decor.GameTooltip.lines[1].color[4], true)
+    eq(decor.ShoppingTooltip1.quality.color[4] < decor.GameTooltip.quality.color[4], true)
     ShoppingTooltip1:Hide()
     ShoppingTooltip2:Hide()
     GameTooltip:Hide()
@@ -6558,7 +7753,7 @@ test("an unknown, forbidden or embedded tooltip is left entirely alone", functio
     -- and the client's own embedded-hide of the art is left as it is.
     ItemRefTooltip.IsEmbedded = true
     ItemRefTooltip:Show()
-    eq(tooltip.decor.ItemRefTooltip.bg:IsShown(), false)
+    eq(tooltip.decor.ItemRefTooltip.plate:IsShown(), false)
     eq(ItemRefTooltip.NineSlice:IsShown(), false)
     ItemRefTooltip.IsEmbedded = false
     ItemRefTooltip:Hide()
@@ -6566,7 +7761,7 @@ test("an unknown, forbidden or embedded tooltip is left entirely alone", functio
     -- above, so showing it a second time would otherwise be a no-op.
     GameTooltip:Hide()
     GameTooltip:Show()
-    eq(tooltip.decor.GameTooltip.bg:IsShown(), true)
+    eq(tooltip.decor.GameTooltip.plate:IsShown(), true)
     GameTooltip:Hide()
     eq(#app.errors, 0)
 end)
@@ -6582,13 +7777,13 @@ test("decor follows a reused tooltip's size and is released on disable", functio
         GameTooltip:Hide()
         GameTooltip:Show()
         -- The surface is anchored to the tooltip itself, never to a stored size.
-        eq(decor.bg.point[1], "BOTTOMRIGHT")
-        eq(decor.bg.point[2], GameTooltip)
+        eq(decor.plate.point[1], "BOTTOMRIGHT")
+        eq(decor.plate.point[2], GameTooltip)
     end
     eq(#H.frames, frames)
     local style = _G.SharedTooltip_SetBackdropStyle
     app.Store:Set("modules", "tooltip", false)
-    eq(decor.bg:IsShown(), false)
+    eq(decor.plate:IsShown(), false)
     eq(GameTooltip.NineSlice:IsShown(), true)
     -- Restore goes through the client's own reset, not a guessed visibility.
     eq(GameTooltip.style, nil)
@@ -7177,6 +8372,132 @@ end)
 -- ==== TRACK: VIS-23 SPELLBOOK WINDOW — append new tests above this line ====
 
 -- ==== TRACK: VIS-22 SOCIAL WINDOW — append new tests above this line ====
+
+-- ==== TRACK: VIS-24 STYLE FOUNDATION — append new tests above this line ====
+
+test("a list row has no fill until it is touched", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local parent = H.NewFrame(nil, UIParent)
+    local row = app.Controls:Toggle(parent, "row", 0, function() return false end, function() end)
+    -- A switch row is a line of text on the page, not a raised slab: one fill per
+    -- row is what made the settings page read as a grid of boxes.
+    eq(row.flat, true)
+    eq(row.backgroundColor[4], 0)
+    row.state.hover = true
+    row:Refresh()
+    eq(row.backgroundColor[4] > 0, true)
+    row.state.hover = false
+    row:Refresh()
+    eq(row.backgroundColor[4], 0)
+    -- Disabled rows keep the transparent rhythm and only dim their text.
+    row:SetEnabled(false)
+    eq(row.backgroundColor[4], 0)
+    eq(#app.errors, 0)
+end)
+
+test("a control draws its hairline only while it has a state to announce", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local parent = H.NewFrame(nil, UIParent)
+    local button = app.Controls:Button(parent, "plain", 120, nil)
+    local accent = app.Theme:Accent()
+    -- Idle: the ring exists but is fully transparent, so the control is a flat patch.
+    eq(button.ring ~= nil, true)
+    eq(button.ring.borderColor[4], 0)
+    -- Selected: the accent hairline appears, and it is the accent, not the line token.
+    button:SetSelected(true)
+    eq(button.ring.borderColor[4], 1)
+    eq(button.ring.borderColor[1], accent[1])
+    -- Deselecting puts it away again rather than leaving a permanent border.
+    button:SetSelected(false)
+    eq(button.ring.borderColor[4], 0)
+    -- A primary button is announced at rest, because that is what makes it primary.
+    local primary = app.Controls:Button(parent, "go", 120, nil, { kind = "primary" })
+    eq(primary.ring.borderColor[4], 1)
+    -- Hover is a state too.
+    primary.state.hover = true
+    primary:Refresh()
+    eq(primary.ring.borderColor[4], 1)
+    eq(#app.errors, 0)
+end)
+
+test("surface layers stay inside the client's sublevel range", function()
+    local app = H.Load()
+    local layers = app.Surface.LAYERS
+    -- CreateTexture rejects a sublevel outside -8..7 at run time, and the error
+    -- reaches whatever called it (a chat command, a settings click), so the range
+    -- is asserted here rather than discovered in game.
+    for name, value in pairs(layers) do
+        eq(type(value), "number")
+        eq(value >= -8 and value <= 7, true)
+        eq(name ~= nil, true)
+    end
+    -- The shadow must be drawn under the plate, not over it.
+    eq(layers.shadow < layers.plate, true)
+end)
+
+test("type roles are a closed ascending scale with one resolved face", function()
+    local app = H.Load()
+    local roles = app.Type.roles
+    eq(#({ "display", "title", "body", "label", "micro", "world" }), 6)
+    eq(roles.display.size > roles.title.size, true)
+    eq(roles.title.size > roles.body.size, true)
+    eq(roles.body.size > roles.label.size, true)
+    eq(roles.label.size > roles.micro.size, true)
+    -- Only the over-the-world role carries an outline; a card never needs one.
+    eq(roles.world.outline, true)
+    eq(roles.body.outline, nil)
+    eq(roles.display.weight, "strong")
+    local face = app.Type:Face()
+    eq(type(face), "string")
+    eq(face ~= "", true)
+    -- Resolved once and reused: the probe must not run per FontString.
+    eq(app.Type:Face(), face)
+end)
+
+test("surface roles name purpose and paint a shape without a backdrop edge", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.Surface.roles.card.shadow, true)
+    -- Only one role floats; a shadow on every surface is what makes a layout noisy.
+    local shadows = 0
+    for _, role in pairs(app.Surface.roles) do if role.shadow then shadows = shadows + 1 end end
+    eq(shadows, 1)
+    local frame = H.NewFrame(nil, UIParent)
+    app.Surface:Plate(frame, "card")
+    eq(frame.lumaSurfaceRole, "card")
+    eq(frame.lumaPlate ~= nil, true)
+    -- The harness has no slice API, so the plate must fall back to a square fill
+    -- and no shadow rather than leaving a half-built texture behind.
+    eq(app.Surface:CanSlice(), false)
+    eq(frame.lumaShadow, nil)
+    -- An unknown role degrades to the card instead of erroring at the call site.
+    local other = H.NewFrame(nil, UIParent)
+    app.Surface:Plate(other, "nonsense")
+    eq(other.lumaSurfaceRole, "card")
+    eq(#app.errors, 0)
+end)
+
+test("hairlines hold one physical pixel at any UI scale", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local parent = H.NewFrame(nil, UIParent)
+    local line = app.Surface:HLine(parent, 0.5)
+    eq(line:GetHeight(), app.Pixel:Size(1))
+    local vertical = app.Surface:VLine(parent)
+    eq(vertical:GetWidth(), app.Pixel:Size(1))
+end)
+
+test("the style sheet builds once, repaints and reuses its frame", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local frame = app.StyleSheet:Toggle(true)
+    eq(frame:IsShown(), true)
+    eq(app.StyleSheet.frame, frame)
+    -- A second open must not build a second card.
+    app.StyleSheet:Toggle(false)
+    eq(frame:IsShown(), false)
+    eq(app.StyleSheet:Toggle(true), frame)
+    app.StyleSheet:Paint()
+    eq(#app.errors, 0)
+end)
+
 
 print(string.format("%d/%d tests passed", passed, total))
 if passed ~= total then os.exit(1) end

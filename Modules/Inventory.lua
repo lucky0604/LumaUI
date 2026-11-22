@@ -48,12 +48,14 @@ end
 local function buildSplit()
     if module.split then return end
     local frame = CreateFrame("Frame", "LumaUIInventorySplit", UIParent, "BackdropTemplate")
+    frame:Hide()
     frame:SetSize(240, 150)
     frame:SetFrameStrata("HIGH")
     frame:EnableMouse(true)
+    frame:SetPoint("CENTER", module.frame, "CENTER")
     UISpecialFrames[#UISpecialFrames + 1] = "LumaUIInventorySplit"
-    app.Theme:Panel(frame, true)
-    local title = app.Theme:Text(frame, 14)
+    app.Surface:Plate(frame, "card")
+    local title = app.Type:Text(frame, "title")
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText(L.bagSplitTitle)
     local close = app.Controls:Button(frame, "×", 28, function() frame:Hide() end)
@@ -67,6 +69,10 @@ local function buildSplit()
     input:SetScript("OnEnterPressed", function() confirmSplit() end)
     input:SetScript("OnEscapePressed", function() frame:Hide() end)
     module.split = { frame = frame, input = input, range = range, confirm = confirm }
+    frame:SetScript("OnHide", function()
+        input:ClearFocus()
+        module.split.item = nil
+    end)
 end
 
 local function openSplit(item)
@@ -123,7 +129,7 @@ local function build(self)
     frame:EnableMouse(true)
     frame:SetClampedToScreen(true)
     UISpecialFrames[#UISpecialFrames + 1] = "LumaUIInventory"
-    local title = app.Theme:Text(frame, 21)
+    local title = app.Type:Text(frame, "display")
     title:SetPoint("TOPLEFT", 20, -18)
     title:SetText(L.bagTitle)
     local close = app.Controls:Button(frame, "×", 28, function() frame:Hide() end)
@@ -179,7 +185,7 @@ module = app:RegisterComponent({ id = "inventory", label = "inventory",
         self:Listen("ITEM_DATA_LOAD_RESULT", refresh)
     end,
     Refresh = function(self)
-        app.Theme:Panel(self.frame)
+        app.Surface:Plate(self.frame, "card")
         paintFilters(self)
         refresh(self)
     end,

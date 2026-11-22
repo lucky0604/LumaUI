@@ -1,63 +1,10 @@
 local _, app = ...
 
--- Raid prototype (M3 plan item 6, second half): up to 40 secure raid buttons
--- built exactly like the party prototype and the player/target preview that
--- already work in game — a SecureUnitButtonTemplate button plus
--- RegisterUnitWatch — instead of a secure group header. A header builds its
--- children in secured code whose attribute contract changed between builds,
--- and that approach has failed in this project twice; explicit watched buttons
--- behave the same on every client and never leave a raid without frames.
---
--- Buttons are created on demand: only the tokens the client reports as
--- existing get a frame, and a frame is reused (hidden, not destroyed) when its
--- member leaves, so a roster swap or a rejoin does not allocate new secured
--- objects. A button keeps its own "raidN" token and click attributes for its
--- whole life; only its grid point ever changes, which is what makes regrouping
--- a pure reflow instead of a rebuild. Creating buttons, setting attributes,
--- pointing them at their slot and the native takeover all happen in the
--- non-combat queue; combat events only call drawing methods on non-protected
--- controls.
---
--- Layout: the roster's subgroup (the third value of GetRaidRosterInfo) decides
--- the column, so raid subgroups 1..8 become columns 1..8 with at most eight
--- members down each one, in raid index order. The mode is decided once for the
--- whole raid: if any existing member's subgroup is missing, every button falls
--- back to the original index grid (five columns of eight) instead of mixing
--- the two coordinate systems, because a mixed grid could put two members on
--- the same spot. A member who changes subgroup is simply re-pointed at its new
--- column by the next queued reflow; in combat that reflow waits for combat to
--- end. The grid frame is sized to the columns and rows actually used, so a
--- ten-player raid gets a compact block instead of eight empty columns.
---
--- Marks: the raid target icon is a 12 x 12 texture in the button's top right
--- corner. The classic numbered icons
--- (Interface\TargetingFrame\UI-RaidTargetingIcon_1..8) are one texture each, so
--- no atlas coordinates are needed and the whole mark is a single SetTexture;
--- if a client ever lacks that numbered set, the fallback is
--- Interface\RaidFrame\Raid-TargetIcons with the 4 x 2 SetTexCoord grid used by
--- the unit-frame marks part. The icon paints from a plain 1..8 index only, so
--- repainting it is drawing-only and safe in combat (RAID_TARGET_UPDATE never
--- queues a rebuild).
---
--- Secret rules: names go straight to SetText, health values only reach the
--- engine's own bar methods, and every API value a decision depends on goes
--- through pcall plus Capabilities.Plain. Nothing here does arithmetic,
--- comparison, concatenation or persistence with a restricted value. The
--- subgroup and the raid target index are public values on current builds, but
--- they still take the same pcall + Plain path.
---
--- The native raid frame container is hidden only while at least one of our
--- buttons belongs to a member the client reports, and it is restored as soon as
--- the raid is gone or the component stops, so a failure can never leave a player
--- without raid frames. The manager tab (native raid options and ready check) is
--- never hidden: this prototype does not implement those actions.
---
--- Private auras: the native compact raid frame shows an encounter's private
--- auras through its own container anchor; hiding it without a replacement would
--- drop them. Each raid button therefore reserves two native display slots (aura
--- indexes 1..2) at its right edge, drawn by the client in its own priority
--- order, and the takeover requires the anchor API. A client without
--- AddPrivateAuraAnchor keeps the native raid frames.
+-- Optional raid preview: watched secure buttons are created for existing
+-- members and reused on roster changes. Native raid frames remain under client
+-- control until interaction and encounter parity is validated. Secure objects
+-- and private-aura anchors are configured outside combat; secret unit values
+-- reach native drawing methods without Lua arithmetic or persistence.
 
 local MAX_UNITS = 40
 local MAX_SUBGROUPS = 8
@@ -94,12 +41,12 @@ for index = 1, 8 do MARK_ICONS[index] = string.format(MARK_TEXTURE, index) end
 local UNIT_EVENTS = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_NAME_UPDATE", "UNIT_FLAGS", "UNIT_CONNECTION" }
 local GLOBAL_EVENTS = { "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD", "RAID_ROSTER_UPDATE" }
 local TARGET_EVENT = "RAID_TARGET_UPDATE"
--- Only the frame container is replaced. CompactRaidFrameManager is the native
--- entry to the raid options and the ready check, which this prototype does not
--- implement, so it stays on screen until VIS-12 covers the same actions.
+-- The guarded takeover path would only cover the container, not the manager.
 local NATIVE_TAKEOVER = { "CompactRaidFrameContainer" }
 local NATIVE_NAMES = { "CompactRaidFrameContainer", "CompactRaidFrameManager" }
 local BUILD_JOB, NATIVE_JOB = "raidFrames/build", "raidFrames/native"
+-- Private-aura anchors still require real encounter and interaction validation.
+local NATIVE_PARITY_VALIDATED = false
 local component
 
 local function unitToken(index) return "raid" .. index end
@@ -444,16 +391,14 @@ local function syncPrivate(self)
     end
 end
 
--- The takeover follows what is actually on screen: while one of our buttons
--- belongs to an existing member the native frames stay hidden, otherwise they
--- are given back.
+-- Native takeover remains gated until encounter and interaction validation.
 local function syncNative(self)
     local taken = false
     for index = 1, MAX_UNITS do
         local button = self.frames and self.frames[index]
         if button and memberCovered(button) and unitExists(button.unitToken) then taken = true; break end
     end
-    if taken then taken = privateCovered(self) end
+    if taken then taken = NATIVE_PARITY_VALIDATED and privateCovered(self) end
     for _, name in ipairs(NATIVE_TAKEOVER) do
         if taken then hideNative(name) else restoreNative(name) end
     end
@@ -556,7 +501,8 @@ function component:Describe()
         local taken = state ~= nil and state.hidden == true
         states[#states + 1] = name .. "=" .. (taken and app.L.nativeTaken or app.L.nativeKept)
     end
-    return "raidFrames: " .. table.concat(states, ", ") .. " · " .. app.L.raidCoverage
+    return "raidFrames: " .. table.concat(states, ", ") .. " · " .. app.L.nativeAwaitingValidation
+        .. " · " .. app.L.raidCoverage
 end
 
 -- `/luma raid`: prints what the raid prototype actually sees, so a report like

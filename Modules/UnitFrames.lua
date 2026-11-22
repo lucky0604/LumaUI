@@ -1,6 +1,5 @@
 local _, app = ...
--- targettarget has no native counterpart, so its spec carries no native name
--- and the takeover step skips it; it sits below the target preview.
+-- The target-of-target preview sits below the target preview.
 local specs = {
     { unit = "player", x = -270, y = -185, native = "PlayerFrame" },
     { unit = "target", x = 270, y = -185, native = "TargetFrame" },
@@ -10,18 +9,10 @@ local specs = {
 }
 
 local BASE_HEIGHT = 66
-local NATIVE_JOB = "unitFrames/native"
-local NATIVE_CAST_BARS = { "PlayerCastingBarFrame", "PetCastingBarFrame" }
--- A native unit frame is only replaced when every part that carries the
--- information the native frame shows is available. A client without the aura
--- API keeps its native unit frames instead of losing buffs and debuffs, and a
--- client without the cast API keeps its native cast bars.
+-- Part availability is diagnostic only; it does not prove native parity.
 local REPLACEMENT_PARTS = { "bars", "cast", "auras" }
 local FRAME_EVENTS = { "PLAYER_ENTERING_WORLD", "PLAYER_TARGET_CHANGED", "PLAYER_FOCUS_CHANGED", "UNIT_PET" }
 local component
--- Native hooks are installed once per frame for the whole session, keyed by
--- global frame name; enable/disable cycles only change the state the hook reads.
-local nativeHooked = {}
 
 -- Runs every available part in its own error-isolated call. Event payloads are
 -- ignored for dispatch, so restricted unit tokens from events never reach
@@ -133,93 +124,6 @@ local function hidePartControls(frame)
     if frame.mark and frame.mark:IsShown() then frame.mark:Hide() end
 end
 
--- Native takeover, reversed on disable. Each frame records whether it was shown
--- before the takeover, so releasing it restores exactly that state and never
--- guesses. Reads are safe during combat, but these are secure frames, so every
--- Show or Hide goes through the combat queue (same key, latest intent wins).
-local function nativeFrame(name)
-    local frame = _G[name]
-    if frame and type(frame.Hide) == "function" and type(frame.Show) == "function" then return frame end
-end
-
-local function nativeTaken(name)
-    local state = component and component.native and component.native[name]
-    return state ~= nil and state.taken == true
-end
-
--- The hook only queues, so it stays safe when the client re-shows a frame
--- during combat (Edit Mode, vehicle, targeting).
-local function suppressNative(name)
-    if not component or not component.running or not nativeTaken(name) then return end
-    app.Queue:Run(NATIVE_JOB, function()
-        if not component or not component.running or not nativeTaken(name) then return end
-        local frame = nativeFrame(name)
-        if frame and frame:IsShown() then pcall(frame.Hide, frame) end
-    end)
-end
-
-local function takeNative(name)
-    local frame = nativeFrame(name)
-    if not frame then return false end
-    component.native = component.native or {}
-    local state = component.native[name]
-    if not state then
-        state = { shown = frame:IsShown() and true or false }
-        component.native[name] = state
-    end
-    state.taken = true
-    if not nativeHooked[name] then
-        nativeHooked[name] = true
-        if type(frame.HookScript) == "function" then
-            frame:HookScript("OnShow", function() suppressNative(name) end)
-        end
-    end
-    suppressNative(name)
-    return true
-end
-
--- Gives one native frame back without touching the others: the record of what
--- the client showed before is consumed, and the frame is only re-shown when it
--- was shown before the takeover. A re-enable in the meantime keeps the frame.
-local function giveNative(name)
-    local state = component.native and component.native[name]
-    if not state then return end
-    state.taken = nil
-    if not state.shown then
-        component.native[name] = nil
-        return
-    end
-    app.Queue:Run(NATIVE_JOB, function()
-        if nativeTaken(name) then return end
-        local frame = nativeFrame(name)
-        if frame and not frame:IsShown() then pcall(frame.Show, frame) end
-        if component.native then component.native[name] = nil end
-    end)
-end
-
--- Restores every recorded frame in one queued job (one queue key, so a burst of
--- state changes still touches the protected frames once, after combat).
-local function releaseNatives()
-    local names = {}
-    for name, state in pairs(component.native or {}) do
-        state.taken = nil
-        names[#names + 1] = name
-    end
-    if #names == 0 then return end
-    app.Queue:Run(NATIVE_JOB, function()
-        if component.running then return end
-        for index = 1, #names do
-            local name = names[index]
-            local state = component.native and component.native[name]
-            if state and state.shown then
-                local frame = nativeFrame(name)
-                if frame and not frame:IsShown() then pcall(frame.Show, frame) end
-            end
-            if component.native then component.native[name] = nil end
-        end
-    end)
-end
-
 local function missingParts(parts)
     local missing = {}
     for _, id in ipairs(REPLACEMENT_PARTS) do
@@ -235,24 +139,81 @@ local function activePartIds(parts)
     return set
 end
 
--- Decides the takeover from actual capability: no native frame is hidden while
--- the part that would have to replace it is missing. The decision is recorded
--- so `/luma status` can explain it.
-local function applyTakeover(self)
-    local parts = self.parts
-    local missing = missingParts(parts)
-    local castPart = parts ~= nil and parts.cast ~= nil and parts.cast.available == true
-    self.takeover = { units = #missing == 0, cast = castPart, missing = missing }
-    for _, spec in ipairs(specs) do
-        if spec.native then
-            if self.takeover.units then takeNative(spec.native) else giveNative(spec.native) end
+-- Capability probes establish what the preview can draw, but they do not
+-- establish parity with the native frame (including private encounter auras).
+-- The takeover switch is an explicit per-profile choice (/luma takeover), never
+-- a default: hiding native unit frames is opt-in and reversible, and a missing
+-- replacement part always wins back the native frame regardless of the switch.
+local TAKEOVER_FRAMES = { "PlayerFrame", "TargetFrame", "FocusFrame", "PetFrame", "TargetFrameToT" }
+
+local function nativeFrameOf(name)
+    local frame = _G[name]
+    if frame and type(frame.Hide) == "function" and type(frame.Show) == "function" then return frame end
+end
+
+local function frameShown(frame)
+    if not frame or type(frame.IsShown) ~= "function" then return false end
+    local ok, shown = pcall(frame.IsShown, frame)
+    return ok and shown == true
+end
+
+local function suppressNativeFrames(self)
+    if not self.nativeShown then
+        self.nativeShown = {}
+        for _, name in ipairs(TAKEOVER_FRAMES) do
+            local frame = nativeFrameOf(name)
+            if frame then self.nativeShown[name] = { shown = frameShown(frame) } end
         end
     end
-    for _, name in ipairs(NATIVE_CAST_BARS) do
-        if castPart then takeNative(name) else giveNative(name) end
+    self.nativeSuppressed = true
+    app.Queue:Run("unitFrames/native", function()
+        if not component.running or not component.nativeSuppressed then return end
+        for _, name in ipairs(TAKEOVER_FRAMES) do
+            local state = component.nativeShown and component.nativeShown[name]
+            if state and state.shown then
+                local frame = nativeFrameOf(name)
+                if frame and frameShown(frame) then pcall(frame.Hide, frame) end
+            end
+        end
+    end)
+end
+
+local function restoreNativeFrames(self)
+    local shown = self.nativeShown
+    self.nativeSuppressed = nil
+    self.nativeShown = nil
+    if not shown then return end
+    app.Queue:Run("unitFrames/native", function()
+        if component.running and component.nativeSuppressed then return end
+        for _, name in ipairs(TAKEOVER_FRAMES) do
+            if shown[name] and shown[name].shown then
+                local frame = nativeFrameOf(name)
+                if frame and not frameShown(frame) then pcall(frame.Show, frame) end
+            end
+        end
+    end)
+end
+
+local function applyTakeover(self)
+    local missing = missingParts(self.parts)
+    -- The switch reads the profile every evaluation, so /luma takeover applies
+    -- without an enable cycle. Parts missing or the private-aura anchor API
+    -- unavailable keep every native frame regardless of the switch: without
+    -- anchors an encounter's private auras would have nowhere to draw.
+    -- The native buff/debuff frames keep drawing the player's private auras;
+    -- the client anchors them to PlayerFrame.unit, not to anything this
+    -- preview draws, so hiding the player frame does not orphan them.
+    local wanted = app.Store:Profile().ui.takeoverUnitFrames == true
+    local anchored = app.PrivateAuras.Available()
+    local units = wanted and anchored and #missing == 0
+    local cast = wanted and anchored and #missing == 0
+    self.takeover = { units = units, cast = cast, missing = missing }
+    if units then
+        suppressNativeFrames(self)
+    else
+        restoreNativeFrames(self)
     end
     if #missing > 0 and not self.warnedMissing then
-        -- Once per enable cycle: a profile change must not repeat the message.
         self.warnedMissing = true
         app:Print(string.format(app.L.unitTakeoverKept, table.concat(missing, ", ")))
     end
@@ -265,7 +226,6 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames",
         self.activeParts = activePartIds(self.parts)
         self.warnedMissing = nil
         self.frames = self.frames or {}
-        self.native = {}
         for _, spec in ipairs(specs) do
             local frame = self.frames[spec.unit]
             if not frame then
@@ -310,7 +270,9 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames",
             hidePartControls(frame)
             frame:Hide()
         end
-        releaseNatives()
+        -- The native frames come back even though the component stops: the
+        -- restore job runs after the stop, so the guard inside checks nothing.
+        restoreNativeFrames(self)
     end,
 })
 
@@ -328,5 +290,5 @@ function component:Describe()
     if #missing > 0 then
         text = text .. ", " .. app.L.nativeMissing .. ": " .. table.concat(missing, ",")
     end
-    return text .. " · " .. app.L.unitCoverage
+    return text .. " · " .. app.L.nativeAwaitingValidation .. " · " .. app.L.unitCoverage
 end

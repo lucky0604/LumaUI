@@ -1,33 +1,10 @@
 local _, app = ...
 
--- Party prototype (M3 plan item 6): four fixed secure unit buttons for
--- party1..party4, built exactly like the player/target preview that already
--- works in game — a SecureUnitButtonTemplate button plus RegisterUnitWatch —
--- instead of a secure group header. The group header machinery creates its
--- buttons in secured code whose attribute contract changes between builds;
--- four explicit watched buttons behave the same on every client and never
--- leave the party without frames.
---
--- Protected rules: buttons are created, sized and given their attributes out
--- of combat through the queue, and their visibility is driven by
--- RegisterUnitWatch, not by Lua. Event redraws only touch drawing methods on
--- non-protected controls. Secret rules: names go straight to SetText, unit
--- values only reach native bar methods, and nothing here does arithmetic,
--- comparison, concatenation or persistence with a restricted value.
---
--- The native party frame is hidden only while at least one party unit exists,
--- and restored as soon as the group is gone or the component stops, so a
--- failure can never leave a player with no party frames at all.
---
--- Private auras: the native party frame draws an encounter's private auras
--- through its own secure anchors, so taking it away without a replacement would
--- lose them. Each party button reserves three native display slots (aura
--- indexes 1..3) in its bottom-right corner, one per private aura the client has
--- for that member, in the client's own priority order. The icons, stacks and
--- countdowns are drawn by the client; nothing here reads or reasons about the
--- aura itself. The takeover therefore also requires the anchor API — a client
--- without it keeps the native party frame instead of a replacement that would
--- silently drop private auras.
+-- Optional party preview: four watched secure buttons. Native party frames stay
+-- under client control until interaction and encounter parity is validated.
+-- Secure objects and private-aura anchors are configured outside combat; unit
+-- values are passed to native drawing methods without secret-value operations.
+-- Five client-drawn private aura slots are reserved for each visible member.
 
 local PARTY_UNITS = { party1 = 1, party2 = 2, party3 = 3, party4 = 4 }
 local ORDER = { "party1", "party2", "party3", "party4" }
@@ -36,11 +13,10 @@ local UNIT_EVENTS = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNI
 local GLOBAL_EVENTS = { "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_ENABLED" }
 local BUILD_JOB = "partyFrames/build"
 local NATIVE_JOB = "partyFrames/native"
+-- API availability and anchor allocation alone do not prove encounter parity.
+local NATIVE_PARITY_VALIDATED = false
 local PRIVATE_JOB = "partyFrames/private"
--- Two native party displays exist on Retail: the classic PartyFrame and the
--- raid-style CompactPartyFrame used when the player enables raid-style party
--- frames. Suppressing only PartyFrame left the raid-style block on screen next
--- to ours, so both are recorded, pressed down and restored independently.
+-- Both client-owned party displays are reported in diagnostics.
 local NATIVE_NAMES = { "PartyFrame", "CompactPartyFrame" }
 local FRAME_WIDTH, FRAME_HEIGHT, FRAME_GAP = 190, 46, 4
 -- The four buttons are one layout item now: a plain container carries the group
@@ -53,13 +29,13 @@ local GROUP_WIDTH, GROUP_HEIGHT = 190, 196
 -- Private aura slots: the native compact party frame reserves five private aura
 -- displays per member (CompactUnitFrameTemplate, maxPrivateAuras = 5), so the
 -- replacement reserves the same five along the bottom edge of the button, in the
--- client's own priority order. They overlay the bar the way the native display
--- does; none of their content is read here.
+-- client's own priority order. They sit below the power bar; none of their
+-- content is read here.
 local PRIVATE_SLOTS = 5
 local PRIVATE_ICON = 12
 local PRIVATE_STEP = -14
 local PRIVATE_OPTIONS = { size = PRIVATE_ICON, point = "BOTTOMRIGHT",
-    offsetX = -8, offsetY = 8, step = PRIVATE_STEP }
+    offsetX = -8, offsetY = 3, step = PRIVATE_STEP }
 local component
 
 local function slotY(index) return -300 - (index - 1) * (FRAME_HEIGHT + FRAME_GAP) end
@@ -98,7 +74,7 @@ local function create(unit)
     frame:SetAttribute("unit", unit)
     frame:SetAttribute("*type1", "target")
     frame:SetAttribute("*type2", "togglemenu")
-    frame.name = app.Theme:Text(frame, 11)
+    frame.name = app.Type:Text(frame, "body")
     frame.name:SetPoint("TOPLEFT", 8, -4)
     -- The role glyph owns the top right corner; the name stops before it.
     frame.name:SetWidth(FRAME_WIDTH - 30)
@@ -108,20 +84,20 @@ local function create(unit)
     if type(frame.name.SetShadowColor) == "function" then
         pcall(frame.name.SetShadowColor, frame.name, 0, 0, 0, 0.85)
     end
-    frame.role = app.Theme:Text(frame, 10)
+    frame.role = app.Type:Text(frame, "micro")
     frame.role:SetPoint("TOPRIGHT", -8, -4)
     frame.role:SetWidth(12)
     frame.role:SetJustifyH("RIGHT")
     frame.role:SetText("")
-    frame.health = app.Theme:Bar(frame, 16)
-    frame.health:SetPoint("TOPLEFT", 8, -20)
-    frame.health:SetPoint("TOPRIGHT", -8, -20)
+    frame.health = app.Theme:Bar(frame, 8)
+    frame.health:SetPoint("TOPLEFT", 8, -18)
+    frame.health:SetPoint("TOPRIGHT", -8, -18)
     frame.status = app.Theme:Text(frame.health, 10)
     frame.status:SetPoint("CENTER")
     frame.status:SetText("")
-    frame.power = app.Theme:Bar(frame, 4)
-    frame.power:SetPoint("TOPLEFT", 8, -40)
-    frame.power:SetPoint("TOPRIGHT", -8, -40)
+    frame.power = app.Theme:Bar(frame, 3)
+    frame.power:SetPoint("TOPLEFT", 8, -27)
+    frame.power:SetPoint("TOPRIGHT", -8, -27)
     frame.events = CreateFrame("Frame")
     frame.events:SetScript("OnEvent", function()
         app:Call("partyFrames/" .. unit, draw, frame)
@@ -129,11 +105,8 @@ local function create(unit)
     return frame
 end
 
--- The native party frame is secure: every Show/Hide goes through the queue,
--- the state it had before the takeover is recorded once per enable cycle, and
--- an OnShow hook presses it back down while the prototype runs. The hook is
--- installed once for the session (guarded on the native frame itself), so
--- stop/start cycles never stack hooks.
+-- Native display lookup supports diagnostics and the currently gated takeover
+-- path. If that path is ever validated, its protected writes use the queue.
 local function nativeFrame(name)
     local frame = _G[name]
     if frame and type(frame.Hide) == "function" and type(frame.Show) == "function" then return frame end
@@ -209,10 +182,7 @@ local function restoreNative(self)
     end)
 end
 
--- Decides the takeover from what is actually on screen: with party members the
--- native frame is hidden, without them it is given back. Private auras are part
--- of the native frame's job, so the replacement only counts as complete when
--- every button holds its native anchor slots; otherwise the native frame stays.
+-- Reports whether every visible member has a complete set of private anchors.
 local function privateCovered(self)
     if not app.PrivateAuras.Available() then return false end
     for _, unit in ipairs(ORDER) do
@@ -239,7 +209,7 @@ local function syncPrivate(self)
 end
 
 local function syncNative(self)
-    if anyPartyMember() and privateCovered(self) then hideNative(self) else restoreNative(self) end
+    if NATIVE_PARITY_VALIDATED and anyPartyMember() and privateCovered(self) then hideNative(self) else restoreNative(self) end
 end
 
 local function drawAll(self)
@@ -319,7 +289,8 @@ component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", d
 function component:Describe()
     if not self.running then return nil end
     local state = self.nativeHidden and app.L.nativeTaken or app.L.nativeKept
-    return string.format("partyFrames: %s (%s) · %s", state, app.L.partyFrames, app.L.partyCoverage)
+    return string.format("partyFrames: %s (%s) · %s · %s", state, app.L.partyFrames,
+        app.L.nativeAwaitingValidation, app.L.partyCoverage)
 end
 
 -- `/luma party`: prints what the party prototype actually sees, so a report

@@ -67,20 +67,24 @@ end
 
 local function hideDecor(decor)
     if not decor then return end
-    decor.bg:Hide()
-    for _, line in ipairs(decor.lines) do line:Hide() end
+    if decor.plate then decor.plate:Hide() end
+    if decor.shadow then decor.shadow:Hide() end
+    if decor.quality then decor.quality:Hide() end
+    for _, line in ipairs(decor.lines or {}) do line:Hide() end
 end
 
 local function ensureDecor(self, target, spec)
     local decor = self.decor[spec.name]
     if decor then return decor end
     decor = { name = spec.name, role = spec.role, lines = {} }
-    -- Textures live on BACKGROUND/BORDER, below the ARTWORK text the client
-    -- builds, so the surface can never drift in front of native content.
-    decor.bg = target:CreateTexture(nil, "BACKGROUND")
-    for index = 1, 4 do
-        decor.lines[index] = target:CreateTexture(nil, "BORDER")
-    end
+    -- A tooltip borrows the same card recipe as every other surface instead of
+    -- drawing its own fill and four 1px strips: one shape, one shadow, and a single
+    -- quality rule along the top edge. Textures live on BACKGROUND/BORDER, below the
+    -- ARTWORK text the client builds, so the surface can never drift in front of
+    -- native content.
+    decor.shadow = target:CreateTexture(nil, "BACKGROUND", nil, -8)
+    decor.plate = target:CreateTexture(nil, "BACKGROUND", nil, -7)
+    decor.quality = target:CreateTexture(nil, "BORDER", nil, 1)
     decor.nine = target.NineSlice
     if decor.nine and type(decor.nine.IsShown) == "function" then
         local ok, shown = pcall(decor.nine.IsShown, decor.nine)
@@ -127,36 +131,52 @@ local function paint(self, name)
     end
 
     local role = ROLES[spec.role]
-    local surface = app.Theme.colors.surface
-    local opacity = app.Store:Profile().appearance.opacity
-    local bg = decor.bg
-    bg:ClearAllPoints()
-    bg:SetPoint("TOPLEFT", target, "TOPLEFT", -EDGE, EDGE)
-    bg:SetPoint("BOTTOMRIGHT", target, "BOTTOMRIGHT", EDGE, -EDGE)
-    bg:SetColorTexture(surface[1], surface[2], surface[3], math.min(1, opacity + role.fill))
+    local opacity = math.min(1, app.Store:Profile().appearance.opacity + role.fill)
+    local surface = app.Surface
+    local plate, shadow = decor.plate, decor.shadow
 
-    local red, green, blue = edgeColor(self, spec, target)
-    local lines = decor.lines
-    local function edges(texture, pointA, pointB, height, width)
-        texture:ClearAllPoints()
-        texture:SetPoint(pointA, bg, pointA)
-        texture:SetPoint(pointB, bg, pointB)
-        if height then texture:SetHeight(height) end
-        if width then texture:SetWidth(width) end
-        texture:SetColorTexture(red, green, blue, role.edge)
+    plate:ClearAllPoints()
+    plate:SetPoint("TOPLEFT", target, "TOPLEFT", -EDGE, EDGE)
+    plate:SetPoint("BOTTOMRIGHT", target, "BOTTOMRIGHT", EDGE, -EDGE)
+    surface:ApplyPlate(plate, "card")
+    -- The tooltip floats over arbitrary game art, so it keeps a stronger fill than
+    -- an ordinary window: text must stay readable over a raid fight.
+    if type(plate.SetVertexColor) == "function" then
+        plate:SetVertexColor(app.Theme.colors.surface[1], app.Theme.colors.surface[2],
+            app.Theme.colors.surface[3], opacity)
     end
-    edges(lines[1], "TOPLEFT", "TOPRIGHT", 1)
-    edges(lines[2], "BOTTOMLEFT", "BOTTOMRIGHT", 1)
-    edges(lines[3], "TOPLEFT", "BOTTOMLEFT", nil, 1)
-    edges(lines[4], "TOPRIGHT", "BOTTOMRIGHT", nil, 1)
+
+    if shadow and surface:CanSlice() then
+        local inset = surface.shadowInset
+        shadow:ClearAllPoints()
+        shadow:SetPoint("TOPLEFT", plate, "TOPLEFT", -inset, inset)
+        shadow:SetPoint("BOTTOMRIGHT", plate, "BOTTOMRIGHT", inset, -inset)
+        if type(shadow.SetTexture) == "function" then shadow:SetTexture(surface.media.shadow) end
+        if type(shadow.SetTextureSliceMargins) == "function" then
+            local margin = surface.shadowMargin
+            shadow:SetTextureSliceMargins(margin, margin, margin, margin)
+        end
+        if type(shadow.SetVertexColor) == "function" then shadow:SetVertexColor(0, 0, 0, 1) end
+    end
+
+    -- One quality rule instead of a four-sided frame: it marks what the tooltip is
+    -- about without wrapping every tooltip in a box again.
+    local red, green, blue = edgeColor(self, spec, target)
+    local quality = decor.quality
+    quality:ClearAllPoints()
+    quality:SetPoint("TOPLEFT", plate, "TOPLEFT", 1, -1)
+    quality:SetPoint("TOPRIGHT", plate, "TOPRIGHT", -1, -1)
+    quality:SetHeight(app.Pixel:Pixels(1))
+    quality:SetColorTexture(red, green, blue, role.edge)
 
     -- The surface is corner-anchored to the tooltip itself, so the client can
     -- resize it between uses and the decoration follows without any stored
     -- size. Visibility tracks the tooltip, so a reused tooltip that hides is
     -- never left with a floating surface.
     local shown = target:IsShown()
-    bg:SetShown(shown)
-    for _, texture in ipairs(lines) do texture:SetShown(shown) end
+    plate:SetShown(shown)
+    quality:SetShown(shown)
+    if shadow then shadow:SetShown(shown and surface:CanSlice()) end
 end
 
 -- The client re-applies its backdrop style on every hide and whenever tooltip

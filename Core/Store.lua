@@ -11,7 +11,7 @@ Store.defaults = {
         accent = "ocean", tooltipQuality = true },
     modules = { launcher = true, minimap = true, questTracker = true, questList = true, dataStrip = true, experience = true, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = false },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
-        clickCast = {}, auraFilter = "all",
+        clickCast = {}, auraFilter = "all", takeoverUnitFrames = false,
         -- One clock by default. The strip is the default owner; the minimap
         -- panel is the alternative, and the choice persists per profile.
         clock = "strip", stripCompact = true },
@@ -67,6 +67,9 @@ function Store:Normalize(input)
     end
     -- Aura row filter: everything, or only debuffs the player can dispel.
     if ui.auraFilter == "dispel" then result.ui.auraFilter = "dispel" end
+    -- Native unit-frame takeover is an explicit per-profile opt-in; anything
+    -- but true keeps the game's frames on screen.
+    result.ui.takeoverUnitFrames = ui.takeoverUnitFrames == true
     -- One clock. "strip" (default), "minimap" or "off"; anything else keeps
     -- the default, so a damaged value can never hide the time entirely.
     if ui.clock == "minimap" or ui.clock == "off" then result.ui.clock = ui.clock end

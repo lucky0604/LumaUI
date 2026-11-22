@@ -77,92 +77,42 @@ end
 -- Painting helpers
 -- ---------------------------------------------------------------------------
 
--- Every gradient texture is created once and repainted in place, so a theme
--- change repaints the window instead of stacking another texture on it.
-local function createBand(owner)
-    local band = owner:CreateTexture(nil, "BACKGROUND", nil, -7)
-    band:SetColorTexture(1, 1, 1, 1)
-    return band
-end
-
-local function paintBand(band, from, to, alpha)
-    band:SetColorTexture(1, 1, 1, 1)
-    if type(band.SetGradient) == "function" and type(_G.CreateColor) == "function" then
-        local ok = pcall(band.SetGradient, band, "HORIZONTAL",
-            CreateColor(from[1], from[2], from[3], alpha or 0.45),
-            CreateColor(to[1], to[2], to[3], 0))
-        if ok then return end
-    end
-    band:SetColorTexture(from[1], from[2], from[3], (alpha or 0.45) * 0.6)
-end
-
--- A vertical wash from a slightly lighter top to the panel colour, over the
--- panel's own edge. White first: a plain colour set after a gradient clears it.
+-- Repaint the cached card when the profile or theme changes. The plate and
+-- shadow are shared with the settings and inventory windows.
 local function paintBackground(window)
-    local surface, raised = app.Theme.colors.surface, app.Theme.colors.raised
-    local alpha = app.Theme:Opacity("window")
-    local bg = window.bg
-    if not bg then
-        bg = window:CreateTexture(nil, "BACKGROUND", nil, -8)
-        bg:SetAllPoints(window)
-        window.bg = bg
-    end
-    bg:SetColorTexture(1, 1, 1, 1)
-    if type(bg.SetGradient) == "function" and type(_G.CreateColor) == "function" then
-        local ok = pcall(bg.SetGradient, bg, "VERTICAL",
-            CreateColor(raised[1], raised[2], raised[3], alpha),
-            CreateColor(surface[1], surface[2], surface[3], alpha))
-        if ok then return end
-    end
-    bg:SetColorTexture(surface[1], surface[2], surface[3], alpha)
+    app.Surface:Plate(window, "card")
 end
 
 local function paintHeader(window)
-    local accent = app.Theme:Accent()
-    local surface = app.Theme.colors.surface
-    if not window.headerBand then
-        window.headerBand = createBand(window)
-        window.headerBand:SetPoint("TOPLEFT", 1, -1)
-        window.headerBand:SetPoint("TOPRIGHT", -1, -1)
-        window.headerBand:SetHeight(HEADER_H)
+    local rule = app.Surface:HLine(window, 0.45)
+    rule:SetPoint("TOPLEFT", PAD, -HEADER_H)
+    rule:SetPoint("TOPRIGHT", -PAD, -HEADER_H)
+    window.headerRule = rule
+    local function paint()
+        local line, text = app.Theme.colors.line, app.Theme.colors.text
+        rule:SetHeight(app.Pixel:Pixels(1, window))
+        rule:SetVertexColor(line[1], line[2], line[3], 0.45)
+        window.title:SetTextColor(text[1], text[2], text[3], 1)
     end
-    if not window.headerRule then
-        window.headerRule = window:CreateTexture(nil, "ARTWORK")
-        window.headerRule:SetPoint("TOPLEFT", PAD, -HEADER_H)
-        window.headerRule:SetPoint("TOPRIGHT", -PAD, -HEADER_H)
-        window.headerRule:SetHeight(1)
-    end
-    local text = app.Theme.colors.text
-    window.painters[#window.painters + 1] = function()
-        local live = app.Theme:Accent()
-        local base = app.Theme.colors.surface
-        paintBand(window.headerBand, live, base, 0.30)
-        window.headerRule:SetColorTexture(live[1], live[2], live[3], 0.9)
-        window.title:SetTextColor(text[1], text[2], text[3])
-    end
-    paintBand(window.headerBand, accent, surface, 0.30)
-    window.headerRule:SetColorTexture(accent[1], accent[2], accent[3], 0.9)
-    window.title:SetTextColor(text[1], text[2], text[3])
+    window.painters[#window.painters + 1] = paint
+    paint()
 end
 
--- A small section label with a fading band and a hairline end: the left column
--- groups and the list pages use the same recipe.
+-- Section labels use the same quiet type role and rule as the settings pages.
 local function sectionHeader(window, parent, text, x, y, width)
-    local label = app.Theme:Text(parent, 11, false)
-    label:SetPoint("TOPLEFT", x, y - 2)
+    local label = app.Type:Text(parent, "label")
+    label:SetPoint("TOPLEFT", x, -y - 2)
+    label:SetWidth(width + 8)
+    label:SetWordWrap(false)
     label:SetText(text)
-    local band = createBand(parent)
-    band:SetPoint("TOPLEFT", x, y - 2)
-    band:SetSize(width, 16)
-    local rule = parent:CreateTexture(nil, "ARTWORK")
-    rule:SetPoint("TOPLEFT", x, y - 19)
-    rule:SetSize(width, 1)
+    local rule = app.Surface:HLine(parent, 0.25)
+    rule:SetPoint("TOPLEFT", x, -y - 19)
+    rule:SetWidth(width)
     local function paint()
-        local accent = app.Theme:Accent()
-        local surface = app.Theme.colors.surface
-        paintBand(band, accent, surface, 0.5)
-        rule:SetColorTexture(accent[1], accent[2], accent[3], 0.18)
-        label:SetTextColor(accent[1], accent[2], accent[3], 1)
+        local line, muted = app.Theme.colors.line, app.Theme.colors.muted
+        rule:SetHeight(app.Pixel:Pixels(1, parent))
+        rule:SetVertexColor(line[1], line[2], line[3], 0.25)
+        label:SetTextColor(muted[1], muted[2], muted[3], 1)
     end
     window.painters[#window.painters + 1] = paint
     paint()
@@ -876,9 +826,6 @@ local function buildTabs(window)
     bar:SetPoint("BOTTOMLEFT", 1, 1)
     bar:SetPoint("BOTTOMRIGHT", -1, 1)
     bar:SetHeight(TAB_H)
-    local band = bar:CreateTexture(nil, "BACKGROUND", nil, -7)
-    band:SetAllPoints(bar)
-    band:SetColorTexture(0, 0, 0, 0.22)
     window.tabs = {}
     for index, key in ipairs(TAB_LABELS) do
         local button = app.Controls:Tab(bar, app.L[key], 120, function() showPage(window, index) end,
@@ -889,7 +836,7 @@ local function buildTabs(window)
 end
 
 local function buildListHeader(window, page, text)
-    page.title = app.Theme:Text(page, 14, false)
+    page.title = app.Type:Text(page, "title")
     page.title:SetPoint("TOPLEFT", PAD, -10)
     page.title:SetText(text)
     page.rule = page:CreateTexture(nil, "ARTWORK")
@@ -914,17 +861,19 @@ local function buildIdentity(window, page)
     strip:SetSize(W - 2 * PAD, IDENTITY_H)
     window.identity = strip
 
-    window.identityName = app.Theme:Text(strip, 18, false)
+    window.identityName = app.Type:Text(strip, "display")
     window.identityName:SetPoint("TOPLEFT", 0, -2)
-    window.identityName:SetWidth(380)
+    window.identityName:SetWidth(320)
     window.identityName:SetWordWrap(false)
     window.identityName:SetText("")
 
-    window.identityRealm = app.Theme:Text(strip, 11, true)
+    window.identityRealm = app.Type:Text(strip, "label")
     window.identityRealm:SetPoint("LEFT", window.identityName, "RIGHT", 8, -1)
+    window.identityRealm:SetWidth(125)
+    window.identityRealm:SetWordWrap(false)
     window.identityRealm:SetText("")
 
-    window.identityMeta = app.Theme:Text(strip, 12, true)
+    window.identityMeta = app.Type:Text(strip, "label")
     window.identityMeta:SetPoint("TOPLEFT", 0, -30)
     window.identityMeta:SetWidth(420)
     window.identityMeta:SetWordWrap(false)
@@ -936,7 +885,7 @@ local function buildIdentity(window, page)
     window.itemLevel = CreateFrame("Frame", nil, strip)
     window.itemLevel:SetSize(90, 50)
     window.itemLevel:SetPoint("TOPRIGHT", 0, -0)
-    window.itemLevel.value = app.Theme:Text(window.itemLevel, 20, false)
+    window.itemLevel.value = app.Type:Text(window.itemLevel, "display")
     window.itemLevel.value:SetPoint("TOPRIGHT", 0, 0)
     window.itemLevel.value:SetJustifyH("RIGHT")
     window.itemLevel.value:SetText("-")
@@ -1034,12 +983,12 @@ local function buildGear(window, page)
     end
     local columnHeight = math.max(stackHeight, weaponHeight)
     local top = MAIN_TOP + math.max(0, math.floor((MAIN_H - columnHeight) / 2))
-    window.slots = {}
+    window.slots, window.gearHeaders = {}, {}
     local y = top
     for _, group in ipairs(groups) do
         if #group.slots > 0 then
             local groupTop = group.columns == 1 and top or y
-            sectionHeader(window, page, app.L[group.key], group.x, groupTop,
+            window.gearHeaders[group.key] = sectionHeader(window, page, app.L[group.key], group.x, groupTop,
                 group.columns == 1 and SLOT or GEAR_W)
             local slotTop = groupTop + 24
             for index, slotID in ipairs(group.slots) do
@@ -1067,7 +1016,7 @@ local function buildModel(window, page)
     stage:SetSize(MODEL_W, MAIN_H)
     stage:EnableMouse(false)
     window.modelStage = stage
-    window.painters[#window.painters + 1] = function() app.Theme:PaintSurface(stage, "embedded") end
+    window.painters[#window.painters + 1] = function() app.Surface:Plate(stage, "inset") end
     local glow = stage:CreateTexture(nil, "BACKGROUND", nil, -6)
     glow:SetPoint("CENTER", 0, 30)
     glow:SetSize(MODEL_W - 24, MAIN_H - 140)
@@ -1355,7 +1304,8 @@ local function buildStats(window, page)
     panel:SetPoint("TOPLEFT", STATS_X - 6, -(MAIN_TOP - 6))
     panel:SetSize(STATS_W, MAIN_H + 6)
     panel:EnableMouse(false)
-    window.painters[#window.painters + 1] = function() app.Theme:PaintSurface(panel, "embedded") end
+    window.statsPanel = panel
+    window.painters[#window.painters + 1] = function() app.Surface:Plate(panel, "inset") end
 
     local scroll = app.Controls:Scroll(page, STAT_CONTENT_W + 2, MAIN_H)
     scroll:SetPoint("TOPLEFT", STATS_X, -MAIN_TOP)
@@ -1433,16 +1383,11 @@ local function makeDraggable(window)
     window.dragHandle = handle
 end
 
--- The native character frame is hidden only while the LumaUI window is actually
--- shown. A failed LumaUI build therefore never takes the native panel away.
+-- The preview is independent of the native character window and its binding.
 local function showWindow()
     local window = component and component.window
     if not window then return end
     component.wantsOpen = true
-    local native = _G.CharacterFrame
-    if native and type(native.Hide) == "function" and not native:IsForbidden() then
-        pcall(native.Hide, native)
-    end
     if not window:IsShown() then
         window:SetAlpha(0)
         window:Show()
@@ -1462,11 +1407,10 @@ local function hideWindow()
     end, "open")
 end
 
--- The explicit "game window" entry: the native frame is left alone for this one
--- toggle, so pages the LumaUI window does not implement stay reachable.
+-- The explicit "game window" entry closes the preview and opens the native
+-- frame if necessary. If it is already shown, do not toggle it closed.
 local function openNativeWindow()
     if not component or not component.running then return false end
-    component.nativeOpen = true
     component.wantsOpen = false
     local window = component.window
     if window then
@@ -1475,17 +1419,19 @@ local function openNativeWindow()
         if window:IsShown() then window:Hide() end
     end
     local ok = pcall(function()
+        local native = _G.CharacterFrame
+        if native and type(native.IsShown) == "function" and native:IsShown() then return end
         if type(_G.ToggleCharacter) == "function" then _G.ToggleCharacter("PaperDollFrame") end
     end)
-    component.nativeOpen = nil
     return ok
 end
 
 local function build(window)
     window:SetSize(W, H)
     window.painters = {}
+    window.painters[#window.painters + 1] = function() paintBackground(window) end
     paintBackground(window)
-    window.title = app.Theme:Text(window, 16, false)
+    window.title = app.Type:Text(window, "display")
     window.title:SetPoint("TOPLEFT", PAD, -12)
     window.title:SetText(app.L.characterWindow)
     paintHeader(window)
@@ -1540,7 +1486,6 @@ component = app:RegisterComponent({ id = "characterWindow", label = "characterWi
         if not self.window then
             local window = CreateFrame("Frame", "LumaUICharacterWindow", UIParent, "BackdropTemplate")
             window:Hide()
-            app.Theme:Panel(window)
             -- The relative window scale is a property of this panel; Layout is
             -- still the only place that turns it into an actual frame scale.
             app.Layout:Register("characterWindow", window, 0, 0, app.L.characterWindow,
@@ -1577,16 +1522,6 @@ component = app:RegisterComponent({ id = "characterWindow", label = "characterWi
                 endModelDrag(window.model)
                 reflowStats(window)
             end)
-            -- The hook is installed once with the window and keeps the game's
-            -- toggle semantics; openNativeWindow sets nativeOpen for one call so
-            -- the game's own panel stays reachable.
-            if type(hooksecurefunc) == "function" and type(_G.ToggleCharacter) == "function" then
-                pcall(hooksecurefunc, "ToggleCharacter", function()
-                    if not component.running then return end
-                    if component.nativeOpen then return end
-                    if window:IsShown() then hideWindow() else showWindow() end
-                end)
-            end
         end
         refreshStats(self.window)
         -- Equipment, item cache, rating and set changes repaint while open; while
@@ -1620,7 +1555,6 @@ component = app:RegisterComponent({ id = "characterWindow", label = "characterWi
         local window = self.window
         if not window then return end
         self.wantsOpen = false
-        self.nativeOpen = nil
         endModelDrag(window.model)
         app.Transitions:Cancel(window, "open")
         for _, page in pairs(window.pages or {}) do app.Transitions:Cancel(page, "page") end
@@ -1630,8 +1564,7 @@ component = app:RegisterComponent({ id = "characterWindow", label = "characterWi
     end,
 })
 
--- Diagnostics for `/luma status`: the native panel is hidden only while this
--- window is open, and its own pages stay reachable through the header entry.
+-- Diagnostics for `/luma status`: the native panel and binding remain intact.
 function component:Describe()
     if not self.running then return nil end
     return string.format("characterWindow: %s (%s)", app.L.nativeEntryKept, app.L.characterNativeEntry)

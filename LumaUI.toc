@@ -14,6 +14,8 @@ Core\Store.lua
 Core\Runtime.lua
 UI\Pixel.lua
 UI\Theme.lua
+UI\Type.lua
+UI\Surface.lua
 UI\Transitions.lua
 UI\Layout.lua
 UI\Controls.lua
@@ -21,6 +23,7 @@ UI\Items.lua
 UI\MemberInfo.lua
 UI\PrivateAuras.lua
 UI\Settings.lua
+UI\StyleSheet.lua
 Modules\Launcher.lua
 Modules\Minimap.lua
 Modules\QuestTracker.lua

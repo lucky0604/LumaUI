@@ -6,8 +6,8 @@ app.Pixel = Pixel
 -- scale. Every call reads the live scale: a UI scale change (or a window with
 -- its own scale) needs no cached value, and LumaUI never writes UIParent's
 -- scale to get a crisp edge.
-function Pixel:Scale()
-    local parent = _G.UIParent
+function Pixel:Scale(frame)
+    local parent = frame or _G.UIParent
     local scale = parent and type(parent.GetEffectiveScale) == "function"
         and parent:GetEffectiveScale()
     scale = app.Capabilities.Plain(scale, "number")
@@ -21,10 +21,10 @@ end
 
 -- A count of physical pixels expressed in UI units: exact, no rounding (one
 -- pixel is already on the grid by definition).
-function Pixel:Pixels(count)
+function Pixel:Pixels(count, frame)
     local value = app.Capabilities.Plain(count, "number") or 0
     if value <= 0 then return 0 end
-    return value / self:Scale()
+    return value / self:Scale(frame)
 end
 
 -- Snap a size to whole physical pixels. A positive size is never smaller than

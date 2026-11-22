@@ -4,7 +4,11 @@ local Theme = {
         surface = { 0.045, 0.075, 0.115 }, raised = { 0.075, 0.12, 0.17 },
         -- A quiet step up from the window colour, used inside a window instead
         -- of drawing a border around every row.
-        embedded = { 0.075, 0.115, 0.16 },
+        -- Three deliberate steps: a window/panel, a raised element on top of it,
+        -- and a recessed well inside it. "embedded" used to sit within a hair of
+        -- "raised", so an inset region and a button read as the same material;
+        -- it is now clearly darker than the panel, which is what "inset" means.
+        embedded = { 0.030, 0.050, 0.078 },
         line = { 0.22, 0.32, 0.40 }, text = { 0.91, 0.96, 0.98 }, muted = { 0.58, 0.70, 0.77 },
         ocean = { 0.37, 0.86, 0.83 }, ember = { 1, 0.68, 0.32 },
         friendly = { 0.20, 0.82, 0.38 }, neutral = { 0.93, 0.78, 0.25 },
@@ -28,11 +32,13 @@ app.Theme = Theme
 -- Semantic surface roles. Each role names its fill, colour token and opacity
 -- token; PaintSurface is the single place that turns a role into a backdrop.
 -- "embedded" has no edge on purpose: grouping comes from a small value change,
--- not from a border around every row.
+-- not from a border around every row. "button" lost its edge too — an idle
+-- control is a flat patch, and the accent hairline is a state the control draws
+-- itself, which is what stops a settings page from reading as a grid of boxes.
 local SURFACES = {
     window = { fill = "panel", color = "surface", edge = true, opacity = "windowOpacity" },
     embedded = { fill = "inset", color = "embedded", edge = false, opacity = "windowOpacity" },
-    button = { fill = "panel", color = "raised", edge = true, opacity = "windowOpacity" },
+    button = { fill = "panel", color = "raised", edge = false, opacity = "windowOpacity" },
     hud = { fill = "panel", color = "surface", edge = false, opacity = "hudOpacity" },
     chat = { fill = "panel", color = "surface", edge = false, opacity = "chatOpacity" },
     chatActive = { fill = "flat", color = "raised", edge = false, opacity = "chatActiveOpacity" },

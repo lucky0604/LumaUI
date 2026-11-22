@@ -124,14 +124,14 @@ app:RegisterComponent({ id = "dataStrip", label = "dataStrip",
             frame:SetSize(WIDTH_FULL, HEIGHT)
             frame:EnableMouse(false)
             self.frame = frame
-            self.zone = app.Theme:Text(frame, 12)
+            self.zone = app.Type:Text(frame, "body")
             self.zone:SetPoint("LEFT", 12, 0)
             self.zone:SetWidth(180)
-            self.clock = app.Theme:Text(frame, 12)
+            self.clock = app.Type:Text(frame, "body")
             self.clock:SetPoint("LEFT", 198, 0)
-            self.performance = app.Theme:Text(frame, 11, true)
+            self.performance = app.Type:Text(frame, "label")
             self.performance:SetPoint("LEFT", 258, 0)
-            self.money = app.Theme:Text(frame, 12)
+            self.money = app.Type:Text(frame, "body")
             self.money:SetPoint("RIGHT", -12, 0)
             -- The strip and the experience bar share one top-centre group, so
             -- the pair moves as one layout item.
@@ -178,7 +178,7 @@ app:RegisterComponent({ id = "dataStrip", label = "dataStrip",
         relayout(self)
         -- A HUD support uses the HUD role: it lets the world through instead of
         -- repeating the window surface behind combat information.
-        app.Theme:PaintSurface(self.frame, "hud")
+        app.Surface:Plate(self.frame, "hud")
         update(self)
     end,
     Disable = function(self) if self.frame then self.frame:Hide() end end,

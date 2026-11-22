@@ -4,7 +4,7 @@ local SettingsUI = { pages = {}, active = "general", profileOffset = 0 }
 app.Settings = SettingsUI
 
 local function note(parent, text, y, width)
-    local label = app.Theme:TextRole(parent, "muted")
+    local label = app.Type:Text(parent, "micro")
     label:SetPoint("TOPLEFT", 0, y)
     label:SetWidth(width or 462)
     label:SetText(text)
@@ -12,19 +12,22 @@ local function note(parent, text, y, width)
     return label
 end
 
+local function noteHeight(label, minimum)
+    local ok, value = pcall(label.GetStringHeight, label)
+    value = ok and app.Capabilities.Plain(value, "number") or nil
+    return math.max(minimum, value and math.ceil(value) + 10 or minimum)
+end
+
 -- A quiet group heading: one muted line and a very light rule. Grouping comes
 -- from this, not from a second outlined surface around every row.
 local function section(parent, text, y)
-    local label = app.Theme:Text(parent, 11, true)
+    local label = app.Type:Text(parent, "label")
     label:SetPoint("TOPLEFT", 0, y)
     label:SetWidth(462)
     label:SetText(text)
-    local line = parent:CreateTexture(nil, "ARTWORK")
+    local line = app.Surface:HLine(parent, 0.3)
     line:SetPoint("TOPLEFT", 0, y - 15)
     line:SetWidth(462)
-    line:SetHeight(app.Pixel:Pixels(1))
-    local c = app.Theme.colors.line
-    line:SetColorTexture(c[1], c[2], c[3], 0.3)
     return label
 end
 
@@ -73,40 +76,42 @@ function SettingsUI:BuildGeneral(page)
     local updates = {}
     local function get(key) return app.Store:Profile().appearance[key] end
     local function set(key, value) self:Result(app.Store:Set("appearance", key, value)) end
-    local y = -26
-    note(body, L.generalHint, 0, 462)
+    local hint = note(body, L.generalHint, 0, 462)
+    local y = -noteHeight(hint, 26)
     section(body, L.sectionSize, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
         Controls:Range(body, L.scale, y, 0.7, 1.5, 0.05, function() return get("scale") end,
-            function(v) set("scale", v) end))
+            function(v) set("scale", v) end, { width = 462 }))
     y = y - 70
     section(body, L.sectionMotion, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
-        Controls:Toggle(body, L.motion, y, function() return get("motion") end, function(v) set("motion", v) end))
+        Controls:Toggle(body, L.motion, y, function() return get("motion") end, function(v) set("motion", v) end,
+            { width = 462 }))
     y = y - 40
     updates[#updates + 1] = settingsControl(page,
         Controls:Toggle(body, L.reduceMotion, y, function() return get("reduceMotion") end,
-            function(v) set("reduceMotion", v) end))
+            function(v) set("reduceMotion", v) end, { width = 462 }))
     y = y - 44
     section(body, L.sectionOpacity, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
         Controls:Range(body, L.windowOpacity, y, 0.45, 1, 0.05, function() return get("windowOpacity") end,
-            function(v) set("windowOpacity", v) end))
+            function(v) set("windowOpacity", v) end, { width = 462 }))
     y = y - 70
     updates[#updates + 1] = settingsControl(page,
         Controls:Range(body, L.hudOpacity, y, 0.15, 1, 0.05, function() return get("hudOpacity") end,
-            function(v) set("hudOpacity", v) end))
+            function(v) set("hudOpacity", v) end, { width = 462 }))
     y = y - 70
     updates[#updates + 1] = settingsControl(page,
         Controls:Range(body, L.chatOpacity, y, 0, 1, 0.05, function() return get("chatOpacity") end,
-            function(v) set("chatOpacity", v) end))
+            function(v) set("chatOpacity", v) end, { width = 462 }))
     y = y - 70
     updates[#updates + 1] = settingsControl(page,
         Controls:Range(body, L.chatActiveOpacity, y, 0.2, 1, 0.05,
-            function() return get("chatActiveOpacity") end, function(v) set("chatActiveOpacity", v) end))
+            function() return get("chatActiveOpacity") end, function(v) set("chatActiveOpacity", v) end,
+            { width = 462 }))
     y = y - 74
     section(body, L.sectionAccent, y)
     y = y - 22
@@ -117,16 +122,17 @@ function SettingsUI:BuildGeneral(page)
     y = y - 40
     updates[#updates + 1] = settingsControl(page,
         Controls:Toggle(body, L.tooltipQuality, y, function() return get("tooltipQuality") end,
-            function(v) set("tooltipQuality", v) end))
+            function(v) set("tooltipQuality", v) end, { width = 462 }))
     y = y - 44
     section(body, L.sectionInfo, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
         Controls:Toggle(body, L.stripCompact, y, function() return app.Store:Profile().ui.stripCompact == true end,
-            function(v) self:Result(app.Store:Set("ui", "stripCompact", v)) end))
+            function(v) self:Result(app.Store:Set("ui", "stripCompact", v)) end, { width = 462 }))
     y = y - 40
     local clockLabel = note(body, L.clockOwner, y, 462)
     page.clockLabel = clockLabel
+    local clockOffset = noteHeight(clockLabel, 20)
     -- Exactly one clock: three mutually exclusive choices, none of them a
     -- forced write on login. The current value is read from the profile on
     -- every update, so a profile switch repaints the selected button.
@@ -136,7 +142,7 @@ function SettingsUI:BuildGeneral(page)
             self:Result(app.Store:Set("ui", "clock", key))
             self:Update()
         end))
-        button:SetPoint("TOPLEFT", x, y - 20)
+        button:SetPoint("TOPLEFT", x, y - clockOffset)
         clockButtons[key] = button
         return button
     end
@@ -147,7 +153,7 @@ function SettingsUI:BuildGeneral(page)
         local current = app.Store:Profile().ui.clock
         for key, button in pairs(clockButtons) do button:SetSelected(key == current) end
     end }
-    y = y - 62
+    y = y - clockOffset - 42
     section(body, L.sectionLayout, y)
     y = y - 22
     local edit = settingsControl(page, Controls:Button(body, L.edit, 150, function() app.Layout:Toggle() end))
@@ -159,15 +165,15 @@ function SettingsUI:BuildGeneral(page)
     reset:SetPoint("TOPLEFT", 164, y)
     y = y - 44
     page.instructions = note(body, L.instructions, y, 462)
-    y = y - 44
+    y = y - noteHeight(page.instructions, 44)
     section(body, L.sectionCompatibility, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
         Controls:Range(body, L.legacyOpacity, y, 0.45, 1, 0.05, function() return get("opacity") end,
-            function(v) set("opacity", v) end))
+            function(v) set("opacity", v) end, { width = 462 }))
     y = y - 70
     page.compatibilityHint = note(body, L.compatibilityHint, y, 462)
-    body:SetHeight(math.max(420, -y + 34))
+    body:SetHeight(math.max(420, -y + noteHeight(page.compatibilityHint, 34)))
     page.Update = function()
         for _, control in ipairs(updates) do control:Update() end
         local readonly = app.Store.readonly
@@ -187,6 +193,9 @@ function SettingsUI:BuildModules(page)
     scroll:SetScrollChild(body)
     page.rows = {}
     page.scroll = scroll
+    -- The coexistence note renders under the module rows; the diagnostics page
+    -- carries the full probe of what else is loaded in the session.
+    note(page, L.diagCoexistenceHint, -316, 462)
     local issues = app.Theme:TextRole(page, "muted")
     issues:SetPoint("TOPLEFT", 0, -342)
     issues:SetWidth(330)
@@ -225,81 +234,132 @@ function SettingsUI:BuildModules(page)
 end
 
 function SettingsUI:BuildLayout(page)
-    note(page, L.layoutHint, -2, 462)
-    local move = Controls:Button(page, L.edit, 150, function() app.Layout:Toggle() end)
-    move:SetPoint("TOPLEFT", 0, -52)
-    local reset = Controls:Button(page, L.resetLayout, 150, function()
+    -- A single scroll area carries the notes, preset controls and all registered
+    -- panels. Long translations and warnings can grow without covering rows or
+    -- the fixed window footer, and the page retains its own scroll position.
+    local scroll = Controls:Scroll(page, 464, 420)
+    scroll:SetPoint("TOPLEFT")
+    local body = CreateFrame("Frame", nil, scroll)
+    body:SetSize(462, 420)
+    scroll:SetScrollChild(body)
+    page.scroll, self.layoutScroll = scroll, scroll
+
+    local hint = note(body, L.layoutHint, -2, 462)
+    local y = -2 - noteHeight(hint, 38)
+    local move = Controls:Button(body, L.edit, 150, function() app.Layout:Toggle() end)
+    move:SetPoint("TOPLEFT", 0, y)
+    local reset = Controls:Button(body, L.resetLayout, 150, function()
         self:Result(app.Store:Reset(true))
         app.Layout:ApplyAll()
     end)
-    reset:SetPoint("TOPLEFT", 164, -52)
-    local editMode = Controls:Button(page, L.openEditMode, 250, function()
+    reset:SetPoint("TOPLEFT", 164, y)
+    y = y - 40
+    local editMode = Controls:Button(body, L.openEditMode, 250, function()
         if EditModeManagerFrame and ShowUIPanel then
             ShowUIPanel(EditModeManagerFrame)
         else
             app:Print(L.editModeUnavailable)
         end
     end)
-    editMode:SetPoint("TOPLEFT", 0, -92)
+    editMode:SetPoint("TOPLEFT", 0, y)
     self.layoutEditMode = editMode
-    note(page, L.nativeLayoutHint, -128, 462)
-    -- 16:9 preset: preview is explicit, applying writes only to the current
-    -- profile and snapshots what was there, undo restores that snapshot.
-    note(page, L.presetHint, -164, 462)
-    local preview = Controls:Button(page, L.presetPreview, 104, function()
-        app.Layout:PreviewPreset("default16x9")
+    y = y - 36
+    local nativeHint = note(body, L.nativeLayoutHint, y, 462)
+    y = y - noteHeight(nativeHint, 28)
+    local presetHint = note(body, L.presetHint, y, 462)
+    y = y - noteHeight(presetHint, 28)
+    local selectedPreset = "default16x9"
+    local choices = {}
+    local function choosePreset(name)
+        selectedPreset = name
+        app.Layout:CancelPresetPreview()
+        self:Update()
+    end
+    choices.default16x9 = Controls:Button(body, L.preset16x9, 150, function() choosePreset("default16x9") end)
+    choices.default16x9:SetPoint("TOPLEFT", 0, y)
+    choices.combat = Controls:Button(body, L.presetCombat, 150, function() choosePreset("combat") end)
+    choices.combat:SetPoint("TOPLEFT", 164, y)
+    self.presetChoices = choices
+    y = y - 38
+    local preview = Controls:Button(body, L.presetPreview, 104, function()
+        app.Layout:PreviewPreset(selectedPreset)
         self:Update()
     end)
-    preview:SetPoint("TOPLEFT", 0, -196)
-    local apply = Controls:Button(page, L.presetApply, 104, function()
-        app.Layout:ApplyPreset("default16x9")
+    preview:SetPoint("TOPLEFT", 0, y)
+    local apply = Controls:Button(body, L.presetApply, 104, function()
+        app.Layout:ApplyPreset(selectedPreset)
         self:Update()
     end)
-    apply:SetPoint("TOPLEFT", 112, -196)
-    local cancel = Controls:Button(page, L.presetCancel, 104, function()
+    apply:SetPoint("TOPLEFT", 112, y)
+    local cancel = Controls:Button(body, L.presetCancel, 104, function()
         app.Layout:CancelPresetPreview()
         self:Update()
     end)
-    cancel:SetPoint("TOPLEFT", 224, -196)
-    local undo = Controls:Button(page, L.presetUndo, 104, function()
+    cancel:SetPoint("TOPLEFT", 224, y)
+    local undo = Controls:Button(body, L.presetUndo, 104, function()
         app.Layout:UndoPreset()
         self:Update()
     end)
-    undo:SetPoint("TOPLEFT", 336, -196)
+    undo:SetPoint("TOPLEFT", 336, y)
     self.presetButtons = { preview = preview, apply = apply, cancel = cancel, undo = undo }
-    local count = note(page, "", -236, 462)
+    y = y - 40
+    local count = note(body, "", y, 462)
     self.layoutCount = count
-    local scroll = Controls:Scroll(page, 464, 160)
-    scroll:SetPoint("TOPLEFT", 0, -254)
-    local body = CreateFrame("Frame", nil, scroll)
-    body:SetSize(462, 160)
-    scroll:SetScrollChild(body)
+    page.layoutHint, page.nativeLayoutHint, page.presetHint = hint, nativeHint, presetHint
+    page.layoutMove = move
+    local function positionStatic()
+        local top = -2 - noteHeight(hint, 38)
+        move:ClearAllPoints(); move:SetPoint("TOPLEFT", 0, top)
+        reset:ClearAllPoints(); reset:SetPoint("TOPLEFT", 164, top)
+        top = top - 40
+        editMode:ClearAllPoints(); editMode:SetPoint("TOPLEFT", 0, top)
+        top = top - 36
+        nativeHint:ClearAllPoints(); nativeHint:SetPoint("TOPLEFT", 0, top)
+        top = top - noteHeight(nativeHint, 28)
+        presetHint:ClearAllPoints(); presetHint:SetPoint("TOPLEFT", 0, top)
+        top = top - noteHeight(presetHint, 28)
+        choices.default16x9:ClearAllPoints(); choices.default16x9:SetPoint("TOPLEFT", 0, top)
+        choices.combat:ClearAllPoints(); choices.combat:SetPoint("TOPLEFT", 164, top)
+        top = top - 38
+        preview:ClearAllPoints(); preview:SetPoint("TOPLEFT", 0, top)
+        apply:ClearAllPoints(); apply:SetPoint("TOPLEFT", 112, top)
+        cancel:ClearAllPoints(); cancel:SetPoint("TOPLEFT", 224, top)
+        undo:ClearAllPoints(); undo:SetPoint("TOPLEFT", 336, top)
+        top = top - 40
+        count:ClearAllPoints(); count:SetPoint("TOPLEFT", 0, top)
+        return top
+    end
     self.layoutRows = {}
-    self.layoutScroll = scroll
-    -- Rows are built on demand for the entries that actually exist, so every
-    -- registered panel is reachable no matter how many components are running.
-    local function createRow(index)
+    local function createRow()
         local row = CreateFrame("Frame", nil, body)
         row:SetSize(462, 32)
-        row:SetPoint("TOPLEFT", 0, -(index - 1) * 34)
         row.label = app.Theme:TextRole(row, "label")
         row.label:SetPoint("LEFT")
         row.label:SetWidth(320)
+        row.label:SetWordWrap(false)
         row.button = Controls:Button(row, L.move, 90, function()
             if row.id then app.Layout:SetEditing(true) end
         end)
         row.button:SetPoint("RIGHT")
-        self.layoutRows[index] = row
         return row
     end
-    self.layoutEmpty = note(page, L.noLayoutEntries, -254, 464)
+    self.layoutEmpty = note(body, L.noLayoutEntries, 0, 462)
     page.Update = function()
         local ids = app.Layout:IDs()
         local rows = self.layoutRows
         local readonly = app.Store.readonly
+        local layoutText = string.format(L.layoutCount, #ids)
+        if app.Layout.previewWarnings and next(app.Layout.previewWarnings) then
+            layoutText = layoutText .. " · " .. L.presetOverlapHint
+        end
+        count:SetText(layoutText)
+        local rowTop = positionStatic() - noteHeight(count, 20)
         for index, id in ipairs(ids) do
-            local row = rows[index] or createRow(index)
+            local row = rows[index]
+            if not row then row = createRow(); rows[index] = row end
             row.id = id
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 0, rowTop - (index - 1) * 34)
             local entry = app.Layout.entries[id]
             row.label:SetText(entry and entry.label or id)
             row:SetShown(true)
@@ -309,16 +369,22 @@ function SettingsUI:BuildLayout(page)
             rows[index].id = nil
             rows[index]:SetShown(false)
         end
+        self.layoutEmpty:ClearAllPoints()
+        self.layoutEmpty:SetPoint("TOPLEFT", 0, rowTop)
         self.layoutEmpty:SetShown(#ids == 0)
-        count:SetText(string.format(L.layoutCount, #ids))
         move:SetEnabled(not readonly)
         reset:SetEnabled(not readonly)
         editMode:SetEnabled(not readonly)
+        for name, button in pairs(choices) do
+            button:SetEnabled(not readonly)
+            button:SetSelected(name == selectedPreset)
+        end
         preview:SetEnabled(not readonly)
         apply:SetEnabled(not readonly)
         cancel:SetEnabled(not readonly and app.Layout.previewName ~= nil)
         undo:SetEnabled(not readonly and app.Layout.presetSnapshot ~= nil)
-        body:SetHeight(math.max(160, #ids * 34))
+        local rowsHeight = #ids > 0 and #ids * 34 or noteHeight(self.layoutEmpty, 20)
+        body:SetHeight(math.max(420, -rowTop + rowsHeight + 6))
         scroll:UpdateRange()
     end
 end
@@ -475,6 +541,7 @@ function SettingsUI:BuildDiagnostics(page)
     end
     addSection("status", L.diagStatus, true)
     addSection("native", L.diagNative, false)
+    addSection("coexistence", L.diagCoexistence, false)
     addSection("errors", L.diagErrors, true)
     reflow = function()
         local y = 0
@@ -525,6 +592,47 @@ function SettingsUI:BuildDiagnostics(page)
             end
         end
         if #native == 0 then native[1] = L.nativeNone end
+        local coexistence = {}
+        -- The addon census is advisory only: it names what else is in the
+        -- session, sorted with loaded entries first, so two HUDs drawing over
+        -- one area can be attributed from the diagnostics page. Addon names and
+        -- titles are plain client data, not secret unit identity.
+        do
+            local addons = {}
+            local numAddons = type(C_AddOns) == "table" and type(C_AddOns.GetNumAddOns) == "function"
+                and C_AddOns.GetNumAddOns() or 0
+            local loadable = type(C_AddOns) == "table" and type(C_AddOns.IsAddOnLoaded) == "function"
+            for index = 1, numAddons do
+                local name, title = C_AddOns.GetAddOnInfo(index)
+                name = app.Capabilities.Plain(name, "string")
+                if name and name ~= app.name then
+                    -- IsAddOnLoaded returns loadedOrLoading, loaded; loading
+                    -- counts as loaded here so an in-flight addon is still named.
+                    local loaded = false
+                    if loadable then
+                        local loadedOrLoading = C_AddOns.IsAddOnLoaded(name)
+                        loaded = loadedOrLoading == true
+                    end
+                    addons[#addons + 1] = {
+                        name = name,
+                        title = app.Capabilities.Plain(title, "string") or name,
+                        loaded = loaded == true,
+                    }
+                end
+            end
+            table.sort(addons, function(a, b)
+                if a.loaded ~= b.loaded then return a.loaded end
+                return a.name < b.name
+            end)
+            if #addons == 0 then
+                coexistence[1] = L.diagCoexistenceNone
+            else
+                for _, entry in ipairs(addons) do
+                    coexistence[#coexistence + 1] = entry.name .. " (" .. entry.title .. ") · "
+                        .. (entry.loaded and L.diagCoexistenceLoaded or L.diagCoexistenceAbsent)
+                end
+            end
+        end
         local errors = { L.errors .. ": " .. #app.errors }
         if #app.errors == 0 then
             errors[#errors + 1] = L.emptyDiagnostics
@@ -535,10 +643,12 @@ function SettingsUI:BuildDiagnostics(page)
         end
         page.bodies.status:SetText(table.concat(status, "\n"))
         page.bodies.native:SetText(table.concat(native, "\n"))
+        page.bodies.coexistence:SetText(table.concat(coexistence, "\n"))
         page.bodies.errors:SetText(table.concat(errors, "\n"))
         sections[1].header:SetText(L.diagStatus)
         sections[2].header:SetText(L.diagNative)
-        sections[3].header:SetText((#app.errors > 0 and (L.diagErrors .. "  ·  " .. #app.errors)) or L.diagErrors)
+        sections[3].header:SetText(L.diagCoexistence)
+        sections[4].header:SetText((#app.errors > 0 and (L.diagErrors .. "  ·  " .. #app.errors)) or L.diagErrors)
         reflow()
     end
 end
@@ -563,7 +673,9 @@ function SettingsUI:Build()
     frame:SetScript("OnHide", function()
         self.wantsOpen = false
         app.Transitions:Cancel(self, "open")
+        for _, page in pairs(self.pages) do app.Transitions:Settle(page, "page") end
         if self.frame then self.frame:SetAlpha(0) end
+        if self.profileInput then self.profileInput:ClearFocus() end
         if app.Controls then app.Controls:ClearFocus() end
         self.confirmDelete, self.confirmReset = nil, nil
     end)
@@ -571,10 +683,10 @@ function SettingsUI:Build()
     local theme = app.Theme
     -- Compact header: title and version on one line, one wrapped subtitle, one
     -- rule; the pages start higher than the old 110px header allowed.
-    local title = theme:TextRole(frame, "title")
+    local title = app.Type:Text(frame, "display")
     title:SetPoint("TOPLEFT", theme:Space("lg") + 6, -12)
     title:SetText("LumaUI")
-    local version = theme:TextRole(frame, "muted")
+    local version = app.Type:Text(frame, "micro")
     version:SetPoint("LEFT", title, "RIGHT", 8, 0)
     version:SetText(app.version)
     self.versionLabel = version
@@ -622,19 +734,44 @@ function SettingsUI:Select(key)
     local page = self.pages[self.active]
     -- Each page keeps its own scroll position for the session; switching pages
     -- never repositions another page.
-    if previous and previous ~= page then app.Transitions:Settle(previous) end
+    if previous and previous ~= page then
+        app.Transitions:Settle(previous)
+        if previous == self.pages.profiles and self.profileInput then self.profileInput:ClearFocus() end
+        app.Controls:ClearFocus()
+    end
     for name, current in pairs(self.pages) do current:SetShown(name == self.active) end
-    if page and self.frame and self.frame:IsShown() then
+    if page and previous ~= page and self.frame and self.frame:IsShown() then
         page:SetAlpha(0)
-        app.Transitions:Fade(page, page, 1, 0.16, nil, "page")
+        app.Transitions:Animate(page, "page", {
+            from = 0, to = 1, duration = 0.16,
+            apply = function(value)
+                page:SetAlpha(value)
+                page:ClearAllPoints()
+                page:SetPoint("TOPLEFT", self.frame, "TOPLEFT", 228, -76 + 4 * value)
+            end,
+        })
     end
     self:Update()
 end
 
+-- Keep the applied alpha as the start of a reversal. Native Alpha animations
+-- can leave GetAlpha reporting the base value while their visual alpha changes.
+function SettingsUI:FadeWindow(target, duration, onDone)
+    local frame = self.frame
+    app.Transitions:Animate(self, "open", {
+        from = frame:GetAlpha(), to = target, duration = duration,
+        apply = function(value) frame:SetAlpha(value) end,
+        onDone = onDone,
+    })
+end
+
 function SettingsUI:Update()
     if not self.frame then return end
-    app.Theme:PaintSurface(self.frame, "window")
-    if self.navPanel then app.Theme:PaintSurface(self.navPanel, "embedded") end
+    -- A window is a card: rounded, softly shadowed, and with no hairline around it.
+    -- The old backdrop wrapped the whole window in a 1px edge, which is what made it
+    -- read as a flat page rather than as a surface floating over the world.
+    app.Surface:Plate(self.frame, "card")
+    if self.navPanel then app.Surface:Plate(self.navPanel, "inset") end
     local c = app.Theme:Accent()
     self.rule:SetColorTexture(c[1], c[2], c[3])
     for key, button in pairs(self.navigation) do
@@ -662,7 +799,7 @@ function SettingsUI:Open(page)
         frame:SetAlpha(0)
         frame:Show()
     end
-    app.Transitions:Fade(self, frame, 1, 0.18, nil, "open")
+    self:FadeWindow(1, 0.18)
 end
 
 function SettingsUI:Close()
@@ -672,12 +809,12 @@ function SettingsUI:Close()
     -- A closing window must not keep keyboard focus.
     if app.Controls then app.Controls:ClearFocus() end
     if self.profileInput then self.profileInput:ClearFocus() end
-    app.Transitions:Fade(self, frame, 0, 0.13, function()
+    self:FadeWindow(0, 0.13, function()
         -- A reopen replaces the task, so this callback only runs for the final
         -- close request; the intent flag is a second guard.
         if self.wantsOpen then return end
         if self.frame and self.frame:IsShown() then self.frame:Hide() end
-    end, "open")
+    end)
 end
 
 function SettingsUI:Toggle(page)

@@ -16,32 +16,117 @@ local function maxPlayerLevel()
     return ok and plain(level, "number") or nil
 end
 
--- Reputation replaces the experience bar whenever the player is watching a
--- faction, exactly as the native bar does; watching it is the client's own
--- statement that reputation is what this character is progressing.
-local function watchedFaction()
-    if type(GetWatchedFactionInfo) ~= "function" then return nil end
-    local ok, name, reaction, minimum, maximum, current = pcall(GetWatchedFactionInfo)
-    if not ok then return nil end
+-- Normalize only public values. An incomplete watched faction leaves the
+-- native progress bar responsible for it instead of presenting a guessed XP bar.
+local function factionState(name, reaction, minimum, maximum, current, standing)
     name, reaction = plain(name, "string"), plain(reaction, "number")
     minimum, maximum, current = plain(minimum, "number"), plain(maximum, "number"), plain(current, "number")
-    if not name or not minimum or not maximum or not current or maximum <= minimum then return nil end
-    local label
-    if reaction then
-        label = _G["FACTION_STANDING_LABEL" .. reaction]
-        if type(label) ~= "string" then label = type(_FACTION_STANDING_LABEL) == "table" and _FACTION_STANDING_LABEL[reaction] or nil end
+    standing = plain(standing, "string")
+    if not name or name == "" or not minimum or not maximum or not current then return nil end
+    if maximum <= minimum then
+        local cap = plain(_G.MAX_REPUTATION_REACTION, "number") or 8
+        if maximum == minimum and reaction and reaction >= cap and current >= maximum then
+            minimum, maximum, current = 0, 1, 1
+        else
+            return nil
+        end
     end
-    return { name = name, reaction = reaction, minimum = minimum, maximum = maximum, current = current,
-        standing = type(label) == "string" and label or nil }
+    if not standing and reaction then
+        standing = plain(_G["FACTION_STANDING_LABEL" .. reaction], "string")
+        if not standing and type(_FACTION_STANDING_LABEL) == "table" then
+            standing = plain(_FACTION_STANDING_LABEL[reaction], "string")
+        end
+    end
+    return { name = name, reaction = reaction, minimum = minimum, maximum = maximum,
+        current = math.max(minimum, math.min(maximum, current)), standing = standing }
+end
+
+local function callBoolean(fn, id)
+    if type(fn) ~= "function" then return nil end
+    local ok, result = pcall(fn, id)
+    if not ok then return nil end
+    return plain(result, "boolean")
+end
+
+local function modernFaction(api)
+    local ok, data = pcall(api.GetWatchedFactionData)
+    if not ok or app.Capabilities.IsSecret(data) then return nil, true end
+    if data == nil then return nil, false end
+    if type(data) ~= "table" then return nil, true end
+    local id, name = plain(data.factionID, "number"), plain(data.name, "string")
+    if id == 0 or name == "" then return nil, false end
+    if not id or not name then return nil, true end
+    local reaction = plain(data.reaction, "number")
+    local paragon = callBoolean(api.IsFactionParagonForCurrentPlayer, id)
+    local major = callBoolean(api.IsMajorFaction, id)
+    if paragon == nil or major == nil then return nil, true end
+    if paragon then
+        if type(api.GetFactionParagonInfo) ~= "function" then return nil, true end
+        local success, current, threshold, _, pending = pcall(api.GetFactionParagonInfo, id)
+        current, threshold, pending = plain(current, "number"), plain(threshold, "number"), plain(pending, "boolean")
+        if not success or not current or not threshold or threshold <= 0 or pending == nil then return nil, true end
+        local progress = pending and threshold or current % threshold
+        local state = factionState(name, reaction, 0, threshold, progress, app.L.reputationParagon)
+        if state then state.rewardPending = pending end
+        return state, true
+    end
+    if major then
+        local majorApi = _G.C_MajorFactions
+        if type(majorApi) ~= "table" or type(majorApi.GetMajorFactionData) ~= "function" then return nil, true end
+        local success, info = pcall(majorApi.GetMajorFactionData, id)
+        if not success or app.Capabilities.IsSecret(info) or type(info) ~= "table" then return nil, true end
+        local threshold, earned = plain(info.renownLevelThreshold, "number"), plain(info.renownReputationEarned, "number")
+        local level, maximumLevel = plain(info.renownLevel, "number"), plain(info.maxLevel, "number")
+        local capped = callBoolean(majorApi.HasMaximumRenown, id)
+        if capped == nil and level and maximumLevel and maximumLevel > 0 then capped = level >= maximumLevel end
+        if not threshold or threshold <= 0 or not earned or capped == nil then return nil, true end
+        local label = level and string.format(app.L.reputationRenown, level) or nil
+        return factionState(name, reaction, 0, threshold, capped and threshold or earned, label), true
+    end
+    local gossip = _G.C_GossipInfo
+    if type(gossip) ~= "table" or type(gossip.GetFriendshipReputation) ~= "function" then return nil, true end
+    local success, friendship = pcall(gossip.GetFriendshipReputation, id)
+    if not success or app.Capabilities.IsSecret(friendship) then return nil, true end
+    if friendship ~= nil then
+        if type(friendship) ~= "table" then return nil, true end
+        local friendshipID = plain(friendship.friendshipFactionID, "number")
+        if not friendshipID then return nil, true end
+        if friendshipID > 0 then
+            local label = plain(friendship.reaction, "string")
+            if app.Capabilities.IsSecret(friendship.nextThreshold) then return nil, true end
+            if friendship.nextThreshold == nil then return factionState(name, reaction, 0, 1, 1, label), true end
+            return factionState(name, reaction, friendship.reactionThreshold,
+                friendship.nextThreshold, friendship.standing, label), true
+        end
+    end
+    return factionState(name, reaction, data.currentReactionThreshold,
+        data.nextReactionThreshold, data.currentStanding), true
+end
+
+local function watchedFaction()
+    local api = _G.C_Reputation
+    if type(api) == "table" and type(api.GetWatchedFactionData) == "function" then
+        return modernFaction(api)
+    end
+    if type(GetWatchedFactionInfo) ~= "function" then return nil, false end
+    local ok, name, reaction, minimum, maximum, current = pcall(GetWatchedFactionInfo)
+    if not ok or app.Capabilities.IsSecret(name) then return nil, true end
+    if name == nil then return nil, false end
+    return factionState(name, reaction, minimum, maximum, current), true
 end
 
 local function xpState()
-    local current = plain(type(UnitXP) == "function" and UnitXP("player") or nil, "number")
-    local maximum = plain(type(UnitXPMax) == "function" and UnitXPMax("player") or nil, "number")
+    if type(UnitXP) ~= "function" or type(UnitXPMax) ~= "function" then return nil end
+    local currentOK, current = pcall(UnitXP, "player")
+    local maximumOK, maximum = pcall(UnitXPMax, "player")
+    current = currentOK and plain(current, "number") or nil
+    maximum = maximumOK and plain(maximum, "number") or nil
     if not current or not maximum or maximum <= 0 then return nil end
     if type(IsXPUserDisabled) == "function" then
         local ok, disabled = pcall(IsXPUserDisabled)
-        if ok and disabled == true then return nil end
+        if not ok then return nil end
+        disabled = plain(disabled, "boolean")
+        if disabled ~= false then return nil end
     end
     local level = type(UnitLevel) == "function" and plain(UnitLevel("player"), "number") or nil
     local ceiling = maxPlayerLevel()
@@ -64,22 +149,24 @@ local function paintMode(self, mode, faction)
 end
 
 local function update(self)
-    local faction = watchedFaction()
-    local xp = not faction and xpState() or nil
+    local faction, watching = watchedFaction()
+    local xp = not watching and xpState() or nil
     if not faction and not xp then
         -- Nothing applies to this character right now (max level, XP locked,
         -- no watched faction): the bar hides instead of printing a fake 0%.
-        self.mode = nil
+        self.mode, self.faction, self.current, self.maximum = nil, nil, nil, nil
         self.frame:Hide()
         return
     end
     self.frame:Show()
     if faction then
         self.mode, self.faction = MODE_REPUTATION, faction
+        self.current, self.maximum = nil, nil
         self.bar:SetMinMaxValues(faction.minimum, faction.maximum)
         self.bar:SetValue(faction.current)
         local percent = math.floor((faction.current - faction.minimum) / (faction.maximum - faction.minimum) * 100)
         local label = faction.name .. (faction.standing and ("  ·  " .. faction.standing) or "")
+        if faction.rewardPending then label = label .. "  ·  " .. app.L.reputationRewardPending end
         self.text:SetFormattedText("%s  %d%%", label, percent)
     else
         self.mode, self.faction = MODE_XP, nil
@@ -98,7 +185,7 @@ local function tooltip(frame, module)
         if module.mode == MODE_REPUTATION and faction then
             GameTooltip:SetText(faction.name)
             if faction.standing then GameTooltip:AddLine(faction.standing, 0.8, 0.9, 0.9, true) end
-            GameTooltip:AddLine(string.format("%d / %d", faction.current, faction.maximum), 1, 1, 1)
+            GameTooltip:AddLine(string.format("%d / %d", faction.current - faction.minimum, faction.maximum - faction.minimum), 1, 1, 1)
             GameTooltip:Show()
             return
         end
@@ -119,7 +206,11 @@ end
 app:RegisterComponent({ id = "experience", label = "experience",
     -- Either an XP range or a watched faction is enough; the client decides
     -- which one applies at any moment.
-    Supported = function() return type(UnitXP) == "function" and type(UnitXPMax) == "function" end,
+    Supported = function()
+        return (type(UnitXP) == "function" and type(UnitXPMax) == "function")
+            or (type(C_Reputation) == "table" and type(C_Reputation.GetWatchedFactionData) == "function")
+            or type(GetWatchedFactionInfo) == "function"
+    end,
     Enable = function(self)
         if not self.frame then
             local frame = CreateFrame("Frame", "LumaUIExperience", UIParent, "BackdropTemplate")
@@ -130,6 +221,9 @@ app:RegisterComponent({ id = "experience", label = "experience",
             self.bar:SetPoint("BOTTOMRIGHT", -1, 1)
             self.text = app.Theme:Text(self.bar, 11)
             self.text:SetPoint("CENTER")
+            self.text:SetWidth(630)
+            self.text:SetWordWrap(false)
+            self.text:SetJustifyH("CENTER")
             frame:EnableMouse(true)
             tooltip(frame, self)
             local screenHeight = UIParent:GetHeight()
@@ -137,7 +231,7 @@ app:RegisterComponent({ id = "experience", label = "experience",
                 { label = app.L.topInfoGroup, x = 0, y = screenHeight / 2 - 47, width = 650, height = 59 })
         end
         for _, event in ipairs({ "PLAYER_XP_UPDATE", "PLAYER_LEVEL_UP", "UPDATE_EXHAUSTION", "DISABLE_XP_GAIN", "ENABLE_XP_GAIN",
-            "PLAYER_ENTERING_WORLD", "UPDATE_FACTION", "CHAT_MSG_COMBAT_FACTION_CHANGE" }) do
+            "PLAYER_ENTERING_WORLD", "UPDATE_FACTION", "MAJOR_FACTION_RENOWN_LEVEL_CHANGED", "CHAT_MSG_COMBAT_FACTION_CHANGE" }) do
             self:Listen(event, update)
         end
         update(self)

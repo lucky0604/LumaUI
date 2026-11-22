@@ -7,10 +7,6 @@ local nativeArt = {
     "HighlightLeft", "HighlightMiddle", "HighlightRight",
 }
 
--- Matches CHAT_FRAME_TAB_NOMOUSE_ALPHA: an inactive tab sits this far back in
--- the native UI, so LumaUI's own decoration uses the same visual weight.
-local IDLE_ALPHA = 0.6
-
 local function windowLimit()
     local limit = app.Capabilities.Plain(NUM_CHAT_WINDOWS, "number") or 10
     return math.max(1, math.min(12, math.floor(limit)))
@@ -74,7 +70,7 @@ local function ensureDecor(tab)
     decor.rule = tab:CreateTexture(nil, "BORDER", nil, 2)
     decor.rule:SetPoint("BOTTOMLEFT", decor.bg, "BOTTOMLEFT", 0, 0)
     decor.rule:SetPoint("BOTTOMRIGHT", decor.bg, "BOTTOMRIGHT", 0, 0)
-    decor.rule:SetHeight(2)
+    decor.rule:SetHeight(app.Pixel:Pixels(1, tab))
     decor.rule:Hide()
     return decor
 end
@@ -133,11 +129,10 @@ local function applyLook(entry)
     local selected = entry.selected == true
     local unread = entry.unread == true
     local bg = selected and colors.raised or colors.surface
-    -- The generated surface textures are dark; the same lift PaintSurface uses
-    -- keeps a tab from reading as a grey box next to the chat backing.
-    decor.bg:SetColorTexture(bg[1] * 2.1, bg[2] * 2.1, bg[3] * 2.1, selected and 1 or IDLE_ALPHA)
+    decor.bg:SetColorTexture(bg[1] * 2.1, bg[2] * 2.1, bg[3] * 2.1, selected and 0.55 or 0)
     decor.bg:Show()
     local rule = selected and accent or colors.line
+    decor.rule:SetHeight(app.Pixel:Pixels(1, tab))
     decor.rule:SetColorTexture(rule[1], rule[2], rule[3], selected and 1 or (unread and 0.85 or 0))
     decor.rule:SetShown(selected or unread == true)
     decor.hover:SetColorTexture(colors.line[1], colors.line[2], colors.line[3], entry.hovering and 0.3 or 0)

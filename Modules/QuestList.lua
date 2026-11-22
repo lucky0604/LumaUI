@@ -9,9 +9,12 @@ local MAX_ROWS = 250
 local MAX_TEXT_LINES = 12
 local TASK_TICK = 30
 local NATIVE_JOB = "questList/native"
+-- Module APIs do not establish complete quest-tracker parity on their own.
+local NATIVE_PARITY_VALIDATED = false
 local ITEM_JOB = "questList/items"
 local BANNER_HEIGHT = 20
 local component
+local scheduleOverlap
 
 local FILTERS = { "tracked", "zone", "all" }
 local FILTER_TEXT = { tracked = "questListTracked", zone = "questListZone", all = "questListAll" }
@@ -25,11 +28,9 @@ local ICONS = {
 -- separate files for every quest classification, so use the shared atlas.
 local ACTIVE_ATLAS = "SideInProgressquesticon"
 
--- The panel is a replacement for the quest modules of the native objective
--- tracker: it keeps the quest log's grouping, folds groups and quests, tracks
--- or untracks from the title, and super-tracks from the icon. Only the modules
--- this panel actually covers are taken down; scenario, dungeon, achievement
--- and the other trackers keep their own native module.
+-- Quest panel preview: grouping, folding and tracking are independent of the
+-- native tracker. All native objective modules remain under client control
+-- until the preview has passed feature-parity and in-game validation.
 
 local function callQuest(name, ...)
     local log = _G.C_QuestLog
@@ -449,19 +450,19 @@ local function paintLocked(self, current, entry)
     local frame, label, icon = current.frame, current.label, current.icon
     if not frame:IsShown() then return end
     local previous = frame.entry
-    if not previous or previous.kind ~= entry.kind then
-        label:SetText("")
-        frame.right:SetText("")
-        frame.dot:Hide()
-        return
-    end
+    if not previous or previous.kind ~= entry.kind then return end
+    -- A secure item button retains its attributes until combat ends. Keep the
+    -- row's original quest and text together with that button if the list is
+    -- reordered or the item changes while protected geometry is locked.
+    if entry.kind == "quest" and (previous.quest.id ~= entry.quest.id
+        or current.itemLink ~= entry.quest.itemLink) then return end
     frame.entry = entry
     frame.iconButton.entry = entry
     local muted, text = app.Theme.colors.muted, app.Theme.colors.text
     local accent = app.Theme:Accent()
     if entry.kind == "group" then
         label:SetText(entry.name)
-        label:SetFont(GameFontNormal:GetFont(), 12, "")
+        label:SetFont(app.Type:Face(), 12, "")
         label:SetTextColor(accent[1], accent[2], accent[3], 1)
         frame.arrow:SetText(self.folds[entry.key] and "+" or "-")
         frame.right:SetFormattedText("%d", entry.count)
@@ -471,7 +472,7 @@ local function paintLocked(self, current, entry)
         current.itemLink = quest.itemLink
         local red, green, blue, alpha, flags = titleInk(self, quest, text)
         label:SetText(quest.title)
-        label:SetFont(GameFontNormal:GetFont(), 13, flags)
+        label:SetFont(app.Type:Face(), 13, flags)
         label:SetTextColor(red, green, blue, alpha)
         paintQuestIcon(icon, quest.state)
         local timeLeft = quest.isTask and quest.timeLeft
@@ -503,11 +504,11 @@ local function paintLocked(self, current, entry)
         if entry.color == "ready" then red, green, blue, alpha = 0.95, 0.8, 0.42, 1
         elseif entry.color == "failed" then red, green, blue, alpha = 0.9, 0.4, 0.38, 1 end
         label:SetText(entry.text)
-        label:SetFont(GameFontNormal:GetFont(), 11, "")
+        label:SetFont(app.Type:Face(), 11, "")
         label:SetTextColor(red, green, blue, alpha)
     else
         label:SetText(L.questListEmpty)
-        label:SetFont(GameFontNormal:GetFont(), 11, "")
+        label:SetFont(app.Type:Face(), 11, "")
         label:SetTextColor(muted[1], muted[2], muted[3], 1)
     end
 end
@@ -520,7 +521,7 @@ local function ensureItemButton(self, current)
     if inCombat() then return nil end
     local frame = CreateFrame("Button", nil, current.frame, "SecureActionButtonTemplate")
     frame:SetSize(18, 18)
-    frame:SetPoint("RIGHT", -20, 0)
+    frame:SetPoint("RIGHT", -14, 0)
     frame:SetFrameLevel(current.frame:GetFrameLevel() + 2)
     local icon = frame:CreateTexture(nil, "ARTWORK")
     icon:SetAllPoints(frame)
@@ -719,14 +720,8 @@ refresh = function(self)
             if not current then break end
             paintLocked(self, current, entry)
         end
-        for index = #rows + 1, #(self.rows or {}) do
-            local current = self.rows[index]
-            current.itemLink = nil
-            current.label:SetText("")
-            current.frame.right:SetText("")
-            current.frame.entry = { kind = "stale" }
-            current.frame.iconButton.entry = nil
-        end
+        -- Surplus rows keep their identity until their secure item buttons can
+        -- be hidden in the deferred layout pass.
     else
         for index, entry in ipairs(rows) do
             local current = row(self, index)
@@ -755,16 +750,16 @@ refresh = function(self)
         local body = math.max(y, height - 48)
         self.frame:SetHeight(height)
         self.body:SetSize(BODY_WIDTH, body)
-        self.frame:Show()
+        if not self.overlapHidden then self.frame:Show() end
         -- Shrinking content can leave the scroll view past its new range.
         local overflow = math.max(0, body - (height - 50))
         local offset = self.scroll.GetVerticalScroll and self.scroll:GetVerticalScroll() or 0
         if offset > overflow then self.scroll:SetVerticalScroll(overflow) end
     end
-    -- The native modules follow what the panel actually shows: replaced while
-    -- there is at least one quest row, handed back when the filter is empty.
+    -- Track whether the preview contains quest rows for diagnostics.
     self.hasContent = data.quests > 0
     requestSync(self)
+    scheduleOverlap(self)
 end
 
 local function setFilter(self, key)
@@ -957,7 +952,7 @@ row = function(self, index)
     hover:SetAllPoints(frame)
     hover:Hide()
     frame.hover = hover
-    local arrow = app.Theme:Text(frame, 11, true)
+    local arrow = app.Type:Text(frame, "label")
     arrow:SetPoint("LEFT", 2, 0)
     arrow:SetWidth(14)
     arrow:Hide()
@@ -969,8 +964,10 @@ row = function(self, index)
     local icon = iconButton:CreateTexture(nil, "ARTWORK")
     icon:SetAllPoints(iconButton)
     iconButton:Hide()
-    local label = app.Theme:Text(frame, 13)
-    local right = app.Theme:Text(frame, 11, true)
+    local label = app.Type:Text(frame, "body")
+    local right = app.Type:Text(frame, "label")
+    right:SetJustifyH("RIGHT")
+    right:SetWordWrap(false)
     right:SetPoint("RIGHT", -2, 0)
     local dot = frame:CreateTexture(nil, "ARTWORK")
     dot:SetPoint("RIGHT", -3, 0)
@@ -1027,6 +1024,7 @@ paintRow = function(self, current, entry, y)
     frame.right:SetText("")
     frame.right:ClearAllPoints()
     frame.right:SetPoint("RIGHT", -2, 0)
+    frame.right:SetWidth(28)
     frame.dot:Hide()
     label:ClearAllPoints()
     label:SetWidth(BODY_WIDTH)
@@ -1050,13 +1048,14 @@ paintRow = function(self, current, entry, y)
         if qr then markColor = { qr, qg, qb } end
         label:SetText(quest.title)
         label:SetPoint("LEFT", QUEST_INDENT, 0)
-        label:SetWidth(BODY_WIDTH - QUEST_INDENT - 40)
+        label:SetWidth(BODY_WIDTH - QUEST_INDENT - (quest.itemLink and 110 or 82))
         paintQuestIcon(icon, quest.state)
         frame.iconButton:Show()
         -- The pooled item-use button is applied after all rows are painted.
         current.itemLink = quest.itemLink
         frame.right:ClearAllPoints()
-        frame.right:SetPoint("RIGHT", -14, 0)
+        frame.right:SetPoint("RIGHT", quest.itemLink and -38 or -14, 0)
+        frame.right:SetWidth(56)
         -- World quest rows give the right slot to the remaining time in the
         -- turn-in gold; the fold toggle keeps working, it just loses its "+"
         -- marker. Regular rows keep the marker and the muted color.
@@ -1100,7 +1099,7 @@ paintRow = function(self, current, entry, y)
         label:SetWidth(BODY_WIDTH)
     end
 
-    label:SetFont(GameFontNormal:GetFont(), size, flags)
+    label:SetFont(app.Type:Face(), size, flags)
     label:SetTextColor(red, green, blue, alpha)
     if markColor then
         frame.mark:SetColorTexture(markColor[1], markColor[2], markColor[3], 1)
@@ -1121,7 +1120,7 @@ local function build(self)
     frame:SetFrameStrata("LOW")
     frame:EnableMouse(false)
     self.frame = frame
-    self.title = app.Theme:Text(frame, 13)
+    self.title = app.Type:Text(frame, "body")
     self.title:SetPoint("TOPLEFT", 12, -12)
     self.title:SetWordWrap(false)
     self.rule = app.Theme:Rule(frame)
@@ -1134,7 +1133,7 @@ local function build(self)
         local button = CreateFrame("Button", nil, frame)
         button:SetSize(38, 16)
         button:SetPoint("TOPRIGHT", FILTER_OFFSETS[key], -11)
-        local label = app.Theme:Text(button, 11, true)
+        local label = app.Type:Text(button, "micro")
         label:SetPoint("CENTER")
         label:SetText(L[FILTER_TEXT[key]])
         label:SetWordWrap(false)
@@ -1168,11 +1167,104 @@ local function nativeFrame()
     if frame and type(frame.Hide) == "function" and type(frame.Show) == "function" then return frame end
 end
 
--- The panel replaces the quest modules of the native tracker, not the tracker
--- itself: scenario, dungeon, achievement, adventure, bonus-objective and
--- profession objectives keep their module on screen. Removing a module from
--- the container also takes it out of the client's stacking pass, which is why
--- this is not just a Hide.
+-- Compare the two independently scaled frames in screen-space. Geometry can
+-- be unavailable while the client lays out frames; that is an unknown result,
+-- never evidence that they do or do not overlap.
+local function screenRect(frame)
+    if not frame or type(frame.GetRect) ~= "function" or type(frame.GetEffectiveScale) ~= "function" then return nil end
+    if type(frame.IsForbidden) == "function" then
+        local ok, forbidden = pcall(frame.IsForbidden, frame)
+        if not ok or Plain(forbidden, "boolean") ~= false then return nil end
+    end
+    local ok, left, bottom, width, height, scale = pcall(function()
+        local x, y, w, h = frame:GetRect()
+        return x, y, w, h, frame:GetEffectiveScale()
+    end)
+    if not ok then return nil end
+    left, bottom = Plain(left, "number"), Plain(bottom, "number")
+    width, height, scale = Plain(width, "number"), Plain(height, "number"), Plain(scale, "number")
+    if not left or not bottom or not width or not height or not scale
+        or width <= 0 or height <= 0 or scale <= 0 then return nil end
+    return { left = left * scale, right = (left + width) * scale,
+        bottom = bottom * scale, top = (bottom + height) * scale }
+end
+
+local function nativeVisible(frame)
+    if not frame then return false end
+    local method = frame.IsVisible or frame.IsShown
+    if type(method) ~= "function" then return nil end
+    local ok, visible = pcall(method, frame)
+    if not ok then return nil end
+    return Plain(visible, "boolean")
+end
+
+local nativeObserved = setmetatable({}, { __mode = "k" })
+local function observeNative(frame)
+    if not frame or nativeObserved[frame] or type(frame.HookScript) ~= "function" then return end
+    if type(frame.IsForbidden) == "function" then
+        local ok, forbidden = pcall(frame.IsForbidden, frame)
+        if not ok or Plain(forbidden, "boolean") ~= false then return end
+    end
+    nativeObserved[frame] = true
+    for _, event in ipairs({ "OnShow", "OnHide", "OnSizeChanged" }) do
+        pcall(frame.HookScript, frame, event, function()
+            if component and component.running and nativeFrame() == frame then scheduleOverlap(component) end
+        end)
+    end
+end
+
+local function checkOverlap(self)
+    if not self.running or not self.frame or inCombat() then return end
+    local native = nativeFrame()
+    local shown = nativeVisible(native)
+    if shown == nil then return end
+    local overlaps = false
+    if shown then
+        local own, other = screenRect(self.frame), screenRect(native)
+        if not own or not other then return end
+        overlaps = own.left < other.right and own.right > other.left
+            and own.bottom < other.top and own.top > other.bottom
+    end
+    local entry = app.Layout.entries.questList
+    if overlaps then
+        if not self.overlapHidden then
+            self.overlapHidden = true
+            if entry then entry.allowHiddenMove = true end
+            self.frame:Hide()
+            app:Print(L.questOverlapHidden)
+        end
+    elseif self.overlapHidden then
+        self.overlapHidden = nil
+        if entry then entry.allowHiddenMove = nil end
+        self.frame:Show()
+    end
+end
+
+scheduleOverlap = function(self)
+    if not self.running then return end
+    if inCombat() then
+        -- PLAYER_REGEN_ENABLED already owns the deferred refresh; avoid adding
+        -- a queue job for every ordinary quest update during combat.
+        self.overlapPending = true
+        return
+    end
+    self.overlapPending = nil
+    observeNative(nativeFrame())
+    if self.overlapTimer then return end
+    local timerApi = _G.C_Timer and _G.C_Timer.NewTimer
+    if type(timerApi) ~= "function" then app:Call("questList/overlap", checkOverlap, self); return end
+    local generation = self.overlapGeneration or 0
+    local ok, timer = pcall(timerApi, 0.05, function()
+        if not self.running or self.overlapGeneration ~= generation then return end
+        self.overlapTimer = nil
+        app:Call("questList/overlap", checkOverlap, self)
+    end)
+    if ok and timer then self.overlapTimer = timer else app:Call("questList/overlap", checkOverlap, self) end
+end
+
+
+-- The dormant takeover path targets individual quest modules, never the whole
+-- tracker. It remains gated pending complete feature and in-game validation.
 local NATIVE_MODULES = { "CampaignQuestObjectiveTracker", "QuestObjectiveTracker", "WorldQuestObjectiveTracker" }
 
 local function nativeContainer()
@@ -1189,19 +1281,7 @@ local function nativeModule(name)
 end
 
 local nativeHooked = {}
-
--- Recurring suppression used only by the last-resort whole-tracker fallback.
-local function hookWholeTracker(frame)
-    if nativeHooked[frame] or type(frame.HookScript) ~= "function" then return end
-    nativeHooked[frame] = true
-    frame:HookScript("OnShow", function(shown)
-        if not component or not component.running or not component.nativeHidden then return end
-        app.Queue:Run(NATIVE_JOB, function()
-            if not component or not component.running or not component.nativeHidden then return end
-            if shown:IsShown() then pcall(shown.Hide, shown) end
-        end)
-    end)
-end
+local showNative
 
 -- A module the client shows again (module registration, an Edit Mode layout,
 -- a quest update) is taken back down while the takeover is active. The hook is
@@ -1210,16 +1290,21 @@ local function hookModule(frame)
     if nativeHooked[frame] or type(frame.HookScript) ~= "function" then return end
     nativeHooked[frame] = true
     frame:HookScript("OnShow", function(shown)
-        if not component or not component.nativeHidden then return end
+        if not component or not component.running or not component.nativeHidden then return end
         -- A module the client re-registers mid-fight would be laid out by the
         -- client itself, which is legal for it but not for us: take it back
         -- down after the fight, when the container may be touched again.
         app.Queue:Run(NATIVE_JOB, function()
-            if not component or not component.nativeHidden or inCombat() then return end
+            if not component or not component.running or not component.nativeHidden or inCombat() then return end
             local state = component.nativeRemoved and component.nativeRemoved[shown]
             local container = nativeContainer()
-            if container and state and not state.removed then
-                state.removed = pcall(container.RemoveModule, container, shown)
+            if not container or not state then return end
+            local checked, present = pcall(container.HasModule, container, shown)
+            if not checked then return end
+            if present then
+                local removed = pcall(container.RemoveModule, container, shown)
+                local verified, stillPresent = pcall(container.HasModule, container, shown)
+                if not removed or not verified or stillPresent then return end
             end
             if shown:IsShown() then pcall(shown.Hide, shown) end
         end)
@@ -1239,72 +1324,89 @@ local function hideNative(self)
         end
     end
     if container and #modules > 0 then
-        self.nativeHidden = true
         self.nativeRemoved = self.nativeRemoved or {}
+        local count = 0
         for _, frame in ipairs(modules) do
-            local state = self.nativeRemoved[frame]
-            if not state then
-                state = { shown = frame:IsShown() and true or false, removed = false }
+            local checked, present = pcall(container.HasModule, container, frame)
+            if not checked then showNative(self); return end
+            if present then
+                local state = { shown = frame:IsShown() and true or false, removed = false }
                 self.nativeRemoved[frame] = state
+                local removed = pcall(container.RemoveModule, container, frame)
+                local verified, stillPresent = pcall(container.HasModule, container, frame)
+                -- AddModule is idempotent, so an inconclusive post-check must
+                -- still be included in rollback.
+                state.removed = not verified or not stillPresent
+                if not removed or not state.removed then showNative(self); return end
+                if frame:IsShown() and not pcall(frame.Hide, frame) then showNative(self); return end
+                count = count + 1
             end
-            if not state.removed then
-                state.removed = pcall(container.RemoveModule, container, frame)
-            end
-            if frame:IsShown() then pcall(frame.Hide, frame) end
-            hookModule(frame)
+        end
+        self.nativeHidden = count > 0
+        if self.nativeHidden then
+            for frame in pairs(self.nativeRemoved) do hookModule(frame) end
         end
         return
     end
-    -- A client (or the simulator) without the container module list falls back
-    -- to hiding the whole tracker; diagnostics name that mode explicitly.
-    local frame = nativeFrame()
-    if not frame then return end
-    if self.wholeShown == nil then self.wholeShown = frame:IsShown() and true or false end
-    self.nativeHidden = true
-    hookWholeTracker(frame)
-    if frame:IsShown() then pcall(frame.Hide, frame) end
+    -- The whole tracker also owns scenario, achievement and other objectives.
+    -- Without individual module control it stays available to the player.
 end
 
-local function showNative(self)
+showNative = function(self)
     local removed = self.nativeRemoved
-    local whole = self.wholeShown
-    self.nativeHidden, self.nativeRemoved, self.wholeShown = nil, nil, nil
+    self.nativeHidden = nil
     if removed then
-        local container = nativeContainer()
-        local added = false
-        if container then
-            for frame, state in pairs(removed) do
-                if state.removed and pcall(container.AddModule, container, frame) then added = true end
-            end
+        local container = nativeFrame()
+        if not container or type(container.AddModule) ~= "function" or type(container.HasModule) ~= "function" then
+            container = nil
         end
+        local added = false
+        local pending = {}
+        for frame, state in pairs(removed) do
+            if state.removed and container then
+                local called = pcall(container.AddModule, container, frame)
+                local checked, present = pcall(container.HasModule, container, frame)
+                if called and checked and present then
+                    state.removed = false
+                    added = true
+                end
+            end
+            if not state.removed and state.shown then
+                local checked, shown = pcall(frame.IsShown, frame)
+                if not checked or (not shown and not pcall(frame.Show, frame)) then
+                    pending[frame] = state
+                end
+            end
+            if state.removed then pending[frame] = state end
+        end
+        self.nativeRemoved = next(pending) and pending or nil
+        if self.nativeRemoved then app:Report("questList/restore", "Could not restore a native tracker module") end
         local manager = _G.ObjectiveTrackerManager
         if added and type(manager) == "table" and type(manager.UpdateAll) == "function" then
             -- The container's own displayability decides which modules show.
             pcall(manager.UpdateAll, manager)
-        else
-            for frame, state in pairs(removed) do
-                if state.shown and not frame:IsShown() then pcall(frame.Show, frame) end
-            end
         end
-        return
     end
-    local frame = nativeFrame()
-    if frame and whole and not frame:IsShown() then pcall(frame.Show, frame) end
 end
 
 -- Content decides the takeover. In combat the decision is queued, because a
 -- client that treats the tracker as protected must not be touched mid-fight.
 local function syncNative(self)
     if not self.running then return end
-    if self.hasContent == true then hideNative(self) else showNative(self) end
+    if self.nativeRemoved and not self.nativeHidden then
+        showNative(self)
+        if self.nativeRemoved then return end
+    end
+    if NATIVE_PARITY_VALIDATED and self.hasContent == true then hideNative(self) else showNative(self) end
 end
 
 requestSync = function(self)
     self.hasContent = self.hasContent == true
-    local wantHidden = self.hasContent == true
+    local wantHidden = NATIVE_PARITY_VALIDATED and self.hasContent == true
     -- Nothing to do when the recorded state already matches: this keeps routine
     -- quest log refreshes (including combat ones) out of the combat queue.
-    if (self.nativeHidden == true) == wantHidden then return end
+    if not (self.nativeRemoved and not self.nativeHidden)
+        and (self.nativeHidden == true) == wantHidden then return end
     if inCombat() then
         app.Queue:Run(NATIVE_JOB, function()
             if self.running then syncNative(self) end
@@ -1322,6 +1424,7 @@ component = app:RegisterComponent({ id = "questList", label = "questList", defau
     end,
     Enable = function(self)
         if not self.frame then build(self) end
+        self.overlapGeneration = (self.overlapGeneration or 0) + 1
         for _, event in ipairs({ "QUEST_LOG_UPDATE", "QUEST_ACCEPTED", "QUEST_REMOVED", "QUEST_TURNED_IN", "QUEST_WATCH_LIST_CHANGED", "SUPER_TRACKING_CHANGED" }) do
             self:Listen(event, refresh)
         end
@@ -1344,7 +1447,14 @@ component = app:RegisterComponent({ id = "questList", label = "questList", defau
                 refreshTaskTimes(current)
                 requestSync(current)
             end
+            scheduleOverlap(current)
         end)
+        self:Listen("EDIT_MODE_LAYOUTS_UPDATED", function(current) scheduleOverlap(current) end)
+        self:Listen("PLAYER_ENTERING_WORLD", function(current) scheduleOverlap(current) end)
+        app:Subscribe(self, "LAYOUT_APPLIED", function(id)
+            if id == "questList" then scheduleOverlap(self) end
+        end)
+        app:Subscribe(self, "RUNTIME_UPDATED", function() scheduleOverlap(self) end)
         -- Restore saved folds, then keep following the selected profile; the
         -- runtime cleanup unsubscribes this automatically on disable.
         seedFolds(self)
@@ -1356,12 +1466,16 @@ component = app:RegisterComponent({ id = "questList", label = "questList", defau
             self.filter = filter
             if seedFolds(self) or filterChanged then refresh(self) end
         end)
-        -- refresh ends with requestSync, so the takeover follows the content the
-        -- panel actually shows.
+        -- Refresh draws the current quest data and records whether it has rows.
         refresh(self)
     end,
     Refresh = refresh,
     Disable = function(self)
+        self.overlapGeneration = (self.overlapGeneration or 0) + 1
+        if self.overlapTimer then self.overlapTimer:Cancel(); self.overlapTimer = nil end
+        self.overlapHidden, self.overlapPending = nil, nil
+        local entry = app.Layout.entries.questList
+        if entry then entry.allowHiddenMove = nil end
         if self.frame then self.frame:Hide() end
         self.pendingReflow, self.lockedPaint = nil, nil
         if self.sessionBanner then
@@ -1376,15 +1490,15 @@ component = app:RegisterComponent({ id = "questList", label = "questList", defau
 })
 
 -- Diagnostics: one line for the components page inside `/luma status`. The
--- coverage part names whether the panel took only the quest modules (the
--- normal case, other trackers stay native) or had to hide the whole tracker.
+-- coverage part names whether the panel took only the quest modules.
 function component:Describe()
     if not self.running then return nil end
     local state = self.nativeHidden and app.L.nativeTaken or app.L.nativeKept
     local content = self.hasContent and app.L.nativeContent or app.L.nativeNoContent
     if not self.nativeHidden then
-        return string.format("questList: %s · %s", state, content)
+        local result = string.format("questList: %s · %s · %s", state, content, app.L.nativeAwaitingValidation)
+        if self.overlapHidden then result = result .. " · " .. app.L.questOverlapStatus end
+        return result
     end
-    local coverage = self.wholeShown ~= nil and app.L.nativeWhole or app.L.nativeQuestsOnly
-    return string.format("questList: %s · %s · %s", state, content, coverage)
+    return string.format("questList: %s · %s · %s", state, content, app.L.nativeQuestsOnly)
 end

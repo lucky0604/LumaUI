@@ -14,7 +14,7 @@ can be regenerated and compared without touching the release folder.
 
 import argparse
 import os
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -25,6 +25,72 @@ def save(image, name, out_dir):
     image = image.convert("RGBA")
     image.save(path, format="TGA")
     return path
+
+
+# The two nine-slice textures below are built to a fixed layout that UI/Surface.lua
+# mirrors: PLATE_SIZE/PLATE_RADIUS/PLATE_MARGIN and the shadow inset. Changing one
+# side without the other makes the corners either clip or blur, so the numbers live
+# in this comment as well as in the Lua constants.
+#
+# A nine-slice margin has to cover the whole shape it protects: for the plate that
+# is the corner radius, for the shadow it is inset + radius + blur. A margin that
+# is too small does not fail loudly, it cuts the arc and leaves a seam, so the
+# assertions below are the cheapest possible regression test.
+PLATE_SIZE = 32
+PLATE_RADIUS = 8
+PLATE_MARGIN = 10
+assert PLATE_MARGIN >= PLATE_RADIUS + 1, "plate margin must contain the corner arc"
+
+SHADOW_SIZE = 96
+SHADOW_INSET = 16
+SHADOW_RADIUS = 12
+SHADOW_BLUR = 6.0
+SHADOW_MARGIN = 36
+assert SHADOW_SIZE - 2 * SHADOW_MARGIN > 0, "shadow margin must leave a middle band"
+assert SHADOW_MARGIN >= SHADOW_INSET + SHADOW_RADIUS + SHADOW_BLUR, "shadow margin must contain arc and blur"
+
+SUPERSAMPLE = 4
+
+
+def coverage(size, radius, inset=0):
+    """Antialiased rounded-rect coverage, drawn 4x and downsampled.
+
+    The supersample is what keeps a 1-pixel corner ramp instead of a stair step,
+    and it is the only reason the texture is not simply drawn at final size.
+    """
+    big = size * SUPERSAMPLE
+    edge = inset * SUPERSAMPLE
+    image = Image.new("L", (big, big), 0)
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle([edge, edge, big - 1 - edge, big - 1 - edge],
+                           radius=radius * SUPERSAMPLE, fill=255)
+    return image.resize((size, size), Image.LANCZOS)
+
+
+def plate():
+    """A rounded card fill: white with the corner in the alpha channel.
+
+    No border is baked in. The reference design separates surfaces by fill value
+    and a soft shadow, not by a hairline around every box, so the theme can tint
+    this one texture for cards, buttons and inset regions alike.
+    """
+    image = Image.new("RGBA", (PLATE_SIZE, PLATE_SIZE), (255, 255, 255, 0))
+    image.putalpha(coverage(PLATE_SIZE, PLATE_RADIUS))
+    return image
+
+
+def shadow():
+    """A soft drop shadow: black with an alpha ramp, stretched behind a card.
+
+    The rounded rectangle sits inset by SHADOW_INSET so the blur has room to fade
+    inside the texture; UI/Surface.lua then offsets the texture by the same inset
+    when it draws, which puts the shadow edge back on the card edge.
+    """
+    alpha = coverage(SHADOW_SIZE, SHADOW_RADIUS, inset=SHADOW_INSET)
+    alpha = alpha.filter(ImageFilter.GaussianBlur(SHADOW_BLUR))
+    image = Image.new("RGBA", (SHADOW_SIZE, SHADOW_SIZE), (0, 0, 0, 0))
+    image.putalpha(alpha)
+    return image
 
 
 def panel(size=128):
@@ -111,6 +177,8 @@ def main():
         save(rule(), "rule.tga", out_dir),
         save(glow(), "glow.tga", out_dir),
         save(inset(), "inset.tga", out_dir),
+        save(plate(), "plate.tga", out_dir),
+        save(shadow(), "shadow.tga", out_dir),
     ]
     for path in written:
         print(path, os.path.getsize(path))

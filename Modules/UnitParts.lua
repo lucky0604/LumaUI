@@ -73,9 +73,11 @@ local bars = {
     events = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_NAME_UPDATE",
         "UNIT_DISPLAYPOWER", "UNIT_FLAGS", "UNIT_CONNECTION" },
     create = function(frame)
-        frame.name = app.Theme:Text(frame, 13)
-        frame.name:SetPoint("TOPLEFT", 12, -10)
-        frame.name:SetWidth(146)
+        frame.name = app.Type:Text(frame, "body")
+        frame.name:SetPoint("TOPLEFT", 10, -9)
+        frame.name:SetWidth(138)
+        frame.name:SetWordWrap(false)
+        frame.name:SetFont(app.Type:Face(), 12, "OUTLINE")
         -- Without a panel behind it the name floats over the world; a shadow
         -- keeps it readable on bright ground.
         if type(frame.name.SetShadowOffset) == "function" then
@@ -84,22 +86,27 @@ local bars = {
         if type(frame.name.SetShadowColor) == "function" then
             pcall(frame.name.SetShadowColor, frame.name, 0, 0, 0, 0.85)
         end
-        frame.health = app.Theme:Bar(frame, 19)
-        frame.health:SetPoint("TOPLEFT", 10, -31)
-        frame.health:SetPoint("TOPRIGHT", -10, -31)
-        frame.value = app.Theme:Text(frame.health, 11)
-        frame.value:SetPoint("RIGHT", -4, 0)
+        frame.health = app.Theme:Bar(frame, 9)
+        frame.health:SetPoint("TOPLEFT", 10, -26)
+        frame.health:SetPoint("TOPRIGHT", -10, -26)
+        frame.value = app.Type:Text(frame, "body")
+        frame.value:SetFont(app.Type:Face(), 11, "OUTLINE")
+        frame.value:SetPoint("TOPRIGHT", -10, -9)
+        frame.value:SetWidth(72)
+        frame.value:SetJustifyH("RIGHT")
+        frame.value:SetWordWrap(false)
         -- Death and disconnection are part of the native frame; the preview says
         -- so on the bar instead of silently showing a full health bar.
         frame.statusText = app.Theme:Text(frame.health, 11)
         frame.statusText:SetPoint("CENTER")
         frame.statusText:SetText("")
-        frame.power = app.Theme:Bar(frame, 4)
-        frame.power:SetPoint("TOPLEFT", 10, -54)
-        frame.power:SetPoint("TOPRIGHT", -10, -54)
+        frame.power = app.Theme:Bar(frame, 3)
+        frame.power:SetPoint("TOPLEFT", 10, -39)
+        frame.power:SetPoint("TOPRIGHT", -10, -39)
         frame.power:SetStatusBarColor(0.40, 0.58, 0.84)
-        frame.powerValue = app.Theme:Text(frame.power, 10)
-        frame.powerValue:SetPoint("RIGHT", -4, 0)
+        frame.powerValue = app.Type:Text(frame, "micro")
+        frame.powerValue:SetFont(app.Type:Face(), 10, "OUTLINE")
+        frame.powerValue:SetPoint("TOPRIGHT", -10, -45)
     end,
     draw = function(frame)
         local unit = frame.unitToken

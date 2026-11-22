@@ -18,12 +18,28 @@ local function command(input)
     elseif action == "bank" then app.components.bank:Toggle()
     elseif action == "party" then app.components.partyFrames:Diagnose()
     elseif action == "raid" and app.components.raidFrames then app.components.raidFrames:Diagnose()
+    elseif action == "bars" and app.components.actionPanel then app.components.actionPanel:Diagnose()
     elseif action == "char" then app.components.characterWindow:Toggle()
     elseif action == "aura" then
         local current = app.Store:Profile().ui.auraFilter
         local wanted = current == "dispel" and "all" or "dispel"
         if app.Store:Set("ui", "auraFilter", wanted) then
             app:Print(wanted == "dispel" and app.L.auraFilterDispel or app.L.auraFilterAll)
+            app:Reconcile()
+        end
+    elseif action == "takeover" then
+        -- Explicit native-unit-frame takeover. The value persists in the
+        -- profile; unitFrames applies it on its next Refresh/enable, so the
+        -- component must be running for the switch to have an effect.
+        local current = app.Store:Profile().ui.takeoverUnitFrames == true
+        local wanted = not current
+        if not app.Store:Set("ui", "takeoverUnitFrames", wanted) then
+            app:Print(app.L.takeoverFailed)
+        elseif wanted then
+            app:Print(app.L.takeoverOn)
+            app:Reconcile()
+        else
+            app:Print(app.L.takeoverOff)
             app:Reconcile()
         end
     elseif action == "cc" then
@@ -37,6 +53,19 @@ local function command(input)
             click:Bind(key:lower(), spell)
         end
     elseif action == "status" then app.Settings:Toggle("diagnostics")
+    elseif action == "style" then
+        -- A command that answers with silence is indistinguishable from a broken
+        -- one, so opening the sample reports the capability line to chat as well as
+        -- drawing it. app:Call also turns any failure inside the build into a
+        -- readable chat report instead of an invisible error.
+        if not app.StyleSheet then app:Print(app.L.styleMissing); return end
+        local ok, frame = app:Call("command/style", app.StyleSheet.Toggle, app.StyleSheet)
+        if not ok then return end
+        if frame and type(frame.IsShown) == "function" and frame:IsShown() then
+            app:Print(app.L.styleOpened .. "   ·   " .. app.StyleSheet:Describe())
+        else
+            app:Print(app.L.styleClosed)
+        end
     elseif action == "help" then app:Print(app.L.commands)
     else app.Settings:Toggle() end
 end

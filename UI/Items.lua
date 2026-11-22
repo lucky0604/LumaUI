@@ -51,8 +51,8 @@ function Items.Read(bag, slot)
         texture = Plain(info.iconFileID, "number"),
         count = Plain(info.stackCount, "number") or 1,
         quality = Plain(info.quality, "number"),
-        locked = info.isLocked == true,
-        junk = info.hasNoValue == true,
+        locked = app.Capabilities.IsSecret(info.isLocked) or Plain(info.isLocked, "boolean") == true,
+        junk = Plain(info.hasNoValue, "boolean") == true,
     }
 end
 
@@ -109,8 +109,15 @@ function Items.Cell(parent)
     button.icon:SetPoint("TOPLEFT", 2, -2)
     button.icon:SetPoint("BOTTOMRIGHT", -2, 2)
     button.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-    button.count = app.Theme:Text(button, 11)
+    button.count = app.Type:Text(button, "body")
+    button.count:SetFont(app.Type:Face(), 11, "OUTLINE")
     button.count:SetPoint("BOTTOMRIGHT", -2, 2)
+    button.border = CreateFrame("Frame", nil, button, "BackdropTemplate")
+    button.border:SetAllPoints(button)
+    button.border:EnableMouse(false)
+    button.border:Hide()
+    button.hover = button:CreateTexture(nil, "HIGHLIGHT")
+    button.hover:SetAllPoints(button)
     -- Junk (no vendor value) keeps its native meaning: a small gold mark, not
     -- a recoloured cell, so quality colours stay readable.
     button.junk = button:CreateTexture(nil, "OVERLAY")
@@ -133,15 +140,25 @@ function Items.Paint(button, item)
     button:SetShown(item ~= nil)
     if not item then
         if button.junk then button.junk:Hide() end
+        if button.border then button.border:Hide() end
         return
     end
     button.icon:SetTexture(item.texture or 134400)
     button.icon:SetDesaturated(item.locked == true)
     button.icon:SetAlpha(item.locked and 0.55 or 1)
     button.count:SetText(item.count > 1 and item.count or "")
-    app.Theme:Panel(button, true)
-    local red, green, blue = app.Theme:QualityColor(item.quality)
-    if red then button:SetBackdropBorderColor(red, green, blue, 1) end
+    app.Theme:PaintSurface(button, "embedded")
+    local accent = app.Theme:Accent()
+    button.hover:SetColorTexture(accent[1], accent[2], accent[3], 0.12)
+    local quality = Plain(item.quality, "number")
+    local red, green, blue = app.Theme:QualityColor(quality)
+    if red and quality ~= 1 then
+        button.border:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, button.border) })
+        button.border:SetBackdropBorderColor(red, green, blue, 1)
+        button.border:Show()
+    else
+        button.border:Hide()
+    end
     button.junk:SetShown(item.junk == true and item.locked ~= true)
 end
 
@@ -153,12 +170,12 @@ function Items.Search(frame, state, width, x, y, onChange)
     local hint = app.Theme:Text(frame, 12, true)
     hint:SetPoint("LEFT", input, "LEFT", 4, 0)
     hint:SetText(L.search)
-    input:SetScript("OnTextChanged", function()
+    input:HookScript("OnTextChanged", function()
         state.page = 1
         if onChange then onChange() end
     end)
-    input:SetScript("OnEditFocusGained", function() hint:Hide() end)
-    input:SetScript("OnEditFocusLost", function() hint:SetShown(input:GetText() == "") end)
+    input:HookScript("OnEditFocusGained", function() hint:Hide() end)
+    input:HookScript("OnEditFocusLost", function() hint:SetShown(input:GetText() == "") end)
     state.search, state.searchHint = input, hint
     return input
 end

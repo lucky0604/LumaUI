@@ -224,6 +224,19 @@ function Layout:UpdatePlaceholders()
     end
 end
 
+-- Positions use the entry's own units. Both preview and application use the
+-- same bounds so their outlines represent where the frame will actually land.
+function Layout:Constrain(id, x, y)
+    local entry = self.entries[id]
+    if not entry or not validFrame(entry.frame) then return x, y end
+    local scale = self:Scale(id)
+    local halfW = UIParent:GetWidth() / scale / 2
+    local halfH = UIParent:GetHeight() / scale / 2
+    local maxX = math.max(0, halfW - entry.frame:GetWidth() / 2 - self.margin)
+    local maxY = math.max(0, halfH - entry.frame:GetHeight() / 2 - self.margin)
+    return math.max(-maxX, math.min(maxX, x)), math.max(-maxY, math.min(maxY, y))
+end
+
 function Layout:Apply(id)
     local entry = self.entries[id]
     if not entry or not validFrame(entry.frame) then return end
@@ -244,19 +257,16 @@ function Layout:Apply(id)
     local saved = profile.positions[id]
     local x, y = entry.x or 0, entry.y or 0
     if saved then x, y = saved.x, saved.y end
-    -- Center offsets are stored in the frame's own coordinate system.
-    local halfW = UIParent:GetWidth() / scale / 2
-    local halfH = UIParent:GetHeight() / scale / 2
-    local maxX = math.max(0, halfW - frame:GetWidth() / 2 - self.margin)
-    local maxY = math.max(0, halfH - frame:GetHeight() / 2 - self.margin)
-    x, y = math.max(-maxX, math.min(maxX, x)), math.max(-maxY, math.min(maxY, y))
+    x, y = self:Constrain(id, x, y)
     frame:ClearAllPoints()
     frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
+    app:Publish("LAYOUT_APPLIED", id)
 end
 
 function Layout:ApplyAll()
     if InCombatLockdown() then return end
     for id in pairs(self.entries) do self:Apply(id) end
+    if self.previewName then self:PreviewPreset(self.previewName) end
 end
 
 function Layout:Overlay(id, entry)
@@ -318,12 +328,19 @@ function Layout:SetEditing(wanted)
         if entry.member then
             -- Members move with their group; they never get their own drag box.
             if entry.overlay then entry.overlay:Hide() end
-        elseif wanted and validFrame(entry.frame) and entry.frame:IsShown() then
+        elseif wanted and validFrame(entry.frame) and (entry.frame:IsShown() or entry.allowHiddenMove) then
             local overlay = self:Overlay(id, entry)
             local frame = entry.frame
             local scale = frame:GetEffectiveScale() / UIParent:GetEffectiveScale()
             local x, y = frame:GetCenter()
             local cx, cy = UIParent:GetCenter()
+            if not (app.Capabilities.Plain(x, "number") and app.Capabilities.Plain(y, "number")
+                and app.Capabilities.Plain(cx, "number") and app.Capabilities.Plain(cy, "number")) then
+                local saved = app.Store:Profile().positions[id]
+                local px, py = saved and saved.x or entry.x or 0, saved and saved.y or entry.y or 0
+                px, py = self:Constrain(id, px, py)
+                x, y, cx, cy = px, py, 0, 0
+            end
             overlay:SetSize(frame:GetWidth() * scale, frame:GetHeight() * scale)
             overlay:ClearAllPoints()
             overlay:SetPoint("CENTER", UIParent, "CENTER", x * scale - cx, y * scale - cy)
@@ -364,8 +381,31 @@ Layout.presets = {
             unit_targettarget = { 0.16, -0.29 },
         },
     },
+    combat = {
+        label = "presetCombat",
+        entries = {
+            topInfo = { 0.00, 0.45 },
+            party = { -0.33, -0.12 },
+            raidFrames = { -0.29, -0.10 },
+            questList = { 0.37, 0.06 },
+            unit_player = { -0.17, -0.23 },
+            unit_target = { 0.17, -0.23 },
+            unit_focus = { 0.29, -0.13 },
+            unit_pet = { -0.17, -0.31 },
+            unit_targettarget = { 0.17, -0.31 },
+        },
+    },
 }
 Layout.presetOverlays = {}
+local COMBAT_COLUMNS, COMBAT_ROWS = 12, 2
+local COMBAT_BUTTON_SIZE, COMBAT_BUTTON_GAP = 40, 4
+local COMBAT_ACTION_WIDTH = COMBAT_COLUMNS * COMBAT_BUTTON_SIZE + (COMBAT_COLUMNS - 1) * COMBAT_BUTTON_GAP
+local COMBAT_GAP = 24
+local COMBAT_SIDES = { unit_player = -1, unit_pet = -1, unit_target = 1, unit_targettarget = 1 }
+
+local function combatActionWidth()
+    return COMBAT_ACTION_WIDTH
+end
 
 function Layout:Presets()
     local list = {}
@@ -376,10 +416,16 @@ function Layout:Presets()
     return list
 end
 
-function Layout:PresetOffset(id, spec)
+function Layout:PresetOffset(id, spec, presetName)
     local scale = self:Scale(id)
-    return (spec[1] or 0) * UIParent:GetWidth() / scale,
-        (spec[2] or 0) * UIParent:GetHeight() / scale
+    local x = (spec[1] or 0) * UIParent:GetWidth() / scale
+    local side = presetName == "combat" and COMBAT_SIDES[id]
+    local entry = self.entries[id]
+    if side and entry and validFrame(entry.frame) then
+        local halfFrame = entry.frame:GetWidth() * scale / 2
+        x = side * (combatActionWidth() / 2 + COMBAT_GAP + halfFrame) / scale
+    end
+    return x, (spec[2] or 0) * UIParent:GetHeight() / scale
 end
 
 local function presetOverlay(id)
@@ -398,13 +444,37 @@ local function presetOverlay(id)
     return overlay
 end
 
+-- A static illustration only. It does not inspect, move, or create native
+-- buttons; the player configures the real bars through the game's Edit Mode.
+local function paintActionGuide(overlay)
+    overlay.label:ClearAllPoints()
+    overlay.label:SetPoint("BOTTOM", overlay, "TOP", 0, 6)
+    overlay.slots = overlay.slots or {}
+    local line = app.Theme.colors.line
+    for row = 0, COMBAT_ROWS - 1 do
+        for column = 0, COMBAT_COLUMNS - 1 do
+            local index = row * COMBAT_COLUMNS + column + 1
+            local slot = overlay.slots[index]
+            if not slot then
+                slot = overlay:CreateTexture(nil, "ARTWORK")
+                slot:SetSize(COMBAT_BUTTON_SIZE, COMBAT_BUTTON_SIZE)
+                slot:SetPoint("TOPLEFT", overlay, "TOPLEFT",
+                    column * (COMBAT_BUTTON_SIZE + COMBAT_BUTTON_GAP),
+                    -8 - row * (COMBAT_BUTTON_SIZE + COMBAT_BUTTON_GAP))
+                overlay.slots[index] = slot
+            end
+            slot:SetColorTexture(line[1], line[2], line[3], 0.25)
+        end
+    end
+end
+
 -- Draws outlines at the target positions without moving anything.
 function Layout:PreviewPreset(name)
     local preset = self.presets[name or "default16x9"]
     if not preset then return 0 end
     self:CancelPresetPreview()
     self.previewName = name or "default16x9"
-    local shown = 0
+    local shown, rectangles = 0, {}
     for id, spec in pairs(preset.entries) do
         local entry = self.entries[id]
         if entry and not entry.member and validFrame(entry.frame) then
@@ -412,34 +482,84 @@ function Layout:PreviewPreset(name)
             local scale = self:Scale(id)
             local width = math.max(20, (entry.frame:GetWidth() or 100) * scale)
             local height = math.max(14, (entry.frame:GetHeight() or 30) * scale)
-            local x, y = self:PresetOffset(id, spec)
+            local x, y = self:PresetOffset(id, spec, name)
+            x, y = self:Constrain(id, x, y)
             overlay:SetSize(width, height)
             overlay:ClearAllPoints()
             overlay:SetPoint("CENTER", UIParent, "CENTER", x * scale, y * scale)
             overlay.label:SetText(entry.label)
             overlay:Show()
+            rectangles[#rectangles + 1] = { id = id, overlay = overlay, label = entry.label,
+                x = x * scale, y = y * scale, width = width, height = height }
             shown = shown + 1
         end
     end
+    if name == "combat" then
+        local overlay = presetOverlay("nativeActionArea")
+        overlay:SetSize(combatActionWidth(), 100)
+        overlay:ClearAllPoints()
+        overlay:SetPoint("CENTER", UIParent, "BOTTOM", 0, UIParent:GetHeight() * 0.16)
+        paintActionGuide(overlay)
+        overlay.label:SetText(app.L.nativeActionArea)
+        overlay:Show()
+        rectangles[#rectangles + 1] = { id = "nativeActionArea", overlay = overlay,
+            label = app.L.nativeActionArea, x = 0, y = -UIParent:GetHeight() * 0.34,
+            width = combatActionWidth(), height = 100 }
+        shown = shown + 1
+    end
+    -- Rectangles are in UIParent units, including the same clamping and scale
+    -- used for application. The action area is a guide, not a native readback.
+    local warnings = {}
+    local halfScreenW, halfScreenH = UIParent:GetWidth() / 2, UIParent:GetHeight() / 2
+    for i, rect in ipairs(rectangles) do
+        if math.abs(rect.x) + rect.width / 2 > halfScreenW
+            or math.abs(rect.y) + rect.height / 2 > halfScreenH then
+            warnings[rect.id] = true
+        end
+        for j = i + 1, #rectangles do
+            local other = rectangles[j]
+            if math.abs(rect.x - other.x) < (rect.width + other.width) / 2
+                and math.abs(rect.y - other.y) < (rect.height + other.height) / 2 then
+                warnings[rect.id], warnings[other.id] = true, true
+            end
+        end
+    end
+    local accent = app.Theme:Accent()
+    for _, rect in ipairs(rectangles) do
+        if warnings[rect.id] then
+            rect.overlay:SetBackdropBorderColor(1, 0.37, 0.28, 1)
+            rect.overlay.label:SetText(rect.label .. " · " .. app.L.presetOverlapShort)
+        else
+            rect.overlay:SetBackdropBorderColor(accent[1], accent[2], accent[3], 1)
+        end
+    end
+    self.previewWarnings = warnings
     return shown
 end
 
 function Layout:CancelPresetPreview()
     self.previewName = nil
+    self.previewWarnings = nil
     for _, overlay in pairs(self.presetOverlays) do overlay:Hide() end
 end
 
 local function applyPresetNow(name)
     local preset = Layout.presets[name or "default16x9"]
     if not preset or app.Store.readonly then return false end
-    Layout.presetSnapshot = { name = name or "default16x9", positions = clonePositions(app.Store:Profile().positions) }
+    local positions = app.Store:Profile().positions
+    local snapshot = { name = name or "default16x9", positions = {}, touched = {} }
     for id, spec in pairs(preset.entries) do
         local entry = Layout.entries[id]
         if entry and not entry.member then
-            local x, y = Layout:PresetOffset(id, spec)
+            snapshot.touched[id] = true
+            if positions[id] then
+                snapshot.positions[id] = { x = positions[id].x, y = positions[id].y }
+            end
+            local x, y = Layout:PresetOffset(id, spec, name)
             app.Store:SetPosition(id, x, y)
         end
     end
+    Layout.presetSnapshot = snapshot
     Layout:CancelPresetPreview()
     Layout:ApplyAll()
     return true
@@ -453,7 +573,11 @@ end
 
 local function undoPresetNow()
     if not Layout.presetSnapshot or app.Store.readonly then return false end
-    app.Store:SetPositions(clonePositions(Layout.presetSnapshot.positions))
+    local positions = clonePositions(app.Store:Profile().positions)
+    for id in pairs(Layout.presetSnapshot.touched) do
+        positions[id] = Layout.presetSnapshot.positions[id]
+    end
+    app.Store:SetPositions(positions)
     Layout.presetSnapshot = nil
     Layout:ApplyAll()
     return true

@@ -34,6 +34,15 @@ function Frame:GetCenter()
 end
 function Frame:SetScale(scale) restricted(self); self.scale = scale end
 function Frame:GetScale() return self.scale or 1 end
+-- GetRect mirrors the client contract: left/bottom in parent-scaled screen
+-- coordinates. Frames start with no rect: the client always has one, but a
+-- fabricated default would imply screen positions (e.g. two frames "over-
+-- lapping") that no test asked for; a read-only report treats nil as "client
+-- did not report a rect". Tests that need geometry set frame.rect directly.
+function Frame:GetRect()
+    if not self.rect then return nil end
+    return self.rect.left, self.rect.bottom, self.rect.width, self.rect.height
+end
 function Frame:GetEffectiveScale() return self:GetScale() * (self.parent and self.parent:GetEffectiveScale() or 1) end
 function Frame:GetName() return self.name end
 function Frame:GetChildren() return self.children or {} end
@@ -92,6 +101,12 @@ function Frame:GetAttribute(key) return self.attributes[key] end
 function Frame:IsForbidden() return self.forbidden == true end
 function Frame:GetFrameLevel() return self.level or 1 end
 function Frame:SetFrameLevel(level) self.level = level end
+function Frame:GetFrameStrata() return self.strata or "MEDIUM" end
+function Frame:SetFrameStrata(strata) self.strata = strata end
+function Frame:EnableMouse(enabled) self.mouseEnabled = enabled == true end
+function Frame:IsMouseEnabled() return self.mouseEnabled == true end
+function Frame:EnableMouseWheel(enabled) self.mouseWheelEnabled = enabled == true end
+function Frame:IsMouseWheelEnabled() return self.mouseWheelEnabled == true end
 function Frame:SetText(value) self.text = value end
 function Frame:GetText() return self.text or "" end
 function Frame:GetItem() return self.itemName, self.itemLink end
@@ -196,7 +211,7 @@ function Frame:CreateAnimationGroup()
     end
     return group
 end
-for _, name in ipairs({ "SetFrameStrata", "SetClampedToScreen", "SetMovable", "EnableMouse", "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetJustifyH", "SetJustifyV", "SetStatusBarTexture", "SetOrientation", "SetValueStep", "SetObeyStepOnDrag", "EnableMouseWheel", "SetThumbTexture", "SetAutoFocus", "SetMaxLetters", "RegisterForClicks", "SetBagItem", "SetTextInsets" }) do Frame[name] = noop end
+for _, name in ipairs({ "SetClampedToScreen", "SetMovable", "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetJustifyH", "SetJustifyV", "SetStatusBarTexture", "SetOrientation", "SetValueStep", "SetObeyStepOnDrag", "SetThumbTexture", "SetAutoFocus", "SetMaxLetters", "RegisterForClicks", "SetBagItem", "SetTextInsets" }) do Frame[name] = noop end
 -- A real EditBox fires OnEditFocusLost from ClearFocus; the settings input
 -- relies on that chain to leave its focus state, and HasFocus must agree.
 function Frame:ClearFocus()
@@ -298,6 +313,11 @@ function H.Load(saved)
     H.shiftDown, H.superTracked = false, nil
     H.bankType, H.bankView, H.bankUsable, H.bankTabs = nil, nil, nil, nil
     H.privateAnchorRefuse = nil
+    -- A scene with LumaUI alone loaded; a test that needs another addon in the
+    -- census replaces H.addons before loading the app.
+    H.addons = {
+        { name = "LumaUI", title = "LumaUI", loadable = true, reason = "", security = "INSECURE", loaded = true },
+    }
     _G.LumaUIDB = saved
     _G.unpack = table.unpack or unpack
     _G.WOW_PROJECT_ID, _G.WOW_PROJECT_MAINLINE = 1, 1
@@ -349,8 +369,11 @@ function H.Load(saved)
     actionButton.NormalTexture = H.NewFrame(nil, actionButton)
     actionButton.SlotBackground = H.NewFrame(nil, actionButton)
     actionButton.SlotArt = H.NewFrame(nil, actionButton)
-    actionButton.HotKey = H.NewFrame(nil, actionButton)
-    actionButton.Count = H.NewFrame(nil, actionButton)
+    actionButton.TextOverlayContainer = H.NewFrame(nil, actionButton)
+    actionButton.HotKey = H.NewFrame(nil, actionButton.TextOverlayContainer)
+    actionButton.Count = H.NewFrame(nil, actionButton.TextOverlayContainer)
+    actionButton.TextOverlayContainer.HotKey = actionButton.HotKey
+    actionButton.TextOverlayContainer.Count = actionButton.Count
     MainActionBar.actionButtons[1] = actionButton
     _G.GameTooltip = H.NewFrame("GameTooltip", UIParent)
     GameTooltip.shown = false
@@ -509,6 +532,22 @@ function H.Load(saved)
     _G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, text) H.messages[#H.messages + 1] = text end }
     _G.GameFontNormal = H.NewFrame("GameFontNormal")
     _G.C_AddOns = { GetAddOnMetadata = function() return "0.4.0" end }
+    -- The coexistence probe enumerates the session's addons through the same
+    -- H.addons list that H.Load resets (a test replaces the list to stage a
+    -- session with other addons installed or loaded).
+    _G.C_AddOns.GetNumAddOns = function() return #H.addons end
+    _G.C_AddOns.GetAddOnInfo = function(index)
+        local entry = H.addons[index]
+        if not entry then return nil end
+        return entry.name, entry.title, entry.notes or "", entry.loadable and true or false,
+            entry.reason or "", entry.security or "INSECURE"
+    end
+    _G.C_AddOns.IsAddOnLoaded = function(name)
+        for _, entry in ipairs(H.addons) do
+            if entry.name == name then return entry.loaded == true, entry.loaded == true end
+        end
+        return false, false
+    end
     _G.C_Timer = {
         NewTicker = function(interval, callback)
             local timer = { interval = interval, callback = callback, Cancel = function(self) self.cancelled = true end }
@@ -1007,7 +1046,9 @@ function H.Load(saved)
     _G.GetHaste = function() return 20.2 end
     _G.GetMasteryEffect = function() return 20.1 end
     _G.GetVersatilityBonus = function() return 7.6 end
-    _G.ToggleCharacter = function() end
+    _G.ToggleCharacter = function()
+        CharacterFrame:SetShown(not CharacterFrame:IsShown())
+    end
     -- Optional system window adapters.
     _G.MailFrame = H.NewFrame("MailFrame", UIParent)
     _G.MailFrame.NineSlice = H.NewFrame(nil, MailFrame)

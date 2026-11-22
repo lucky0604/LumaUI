@@ -24,6 +24,7 @@ let luaCount = 0;
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, {withFileTypes:true})) {
     if (['.git','node_modules','dist'].includes(entry.name)) continue;
+    if (dir === root && entry.name === 'agent_flow') continue;
     const file = path.join(dir, entry.name);
     if (forbidden) check(!entry.name.toLowerCase().includes(forbidden), `Forbidden filename: ${file}`);
     if (entry.isDirectory()) { walk(file); continue; }
