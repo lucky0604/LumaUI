@@ -1,20 +1,33 @@
 local _, app = ...
-local module
 
--- Two readings of the same strip. Compact is the default: the constant
--- display carries the zone and the time only, and everything else (money,
--- network, coordinates, durability) is one hover away. The full layout is
--- still available as a saved per-profile choice.
-local WIDTH_FULL, WIDTH_COMPACT, HEIGHT = 650, 340, 30
+-- The Pearl information strip: one quiet band along the bottom edge, split by
+-- hairline gaps into the readings the visual target shows (money, durability,
+-- performance, bags, zone, guild/friends, mail, coordinates, time). Every value
+-- is read from a public API and kept plain; secret values never reach a string
+-- concatenation or a comparison here.
+local WIDTH_COMPACT = 340
+local HEIGHT = app.Theme.strip.height
+local ROW_HEIGHT = HEIGHT - 6
+
+local FIELDS = {
+    { key = "money", width = 100, icon = "Interface\\Icons\\INV_Misc_Coin_01" },
+    { key = "durability", width = 92, icon = "Interface\\Icons\\Trade_BlackSmithing" },
+    { key = "performance", width = 100, icon = "Interface\\Icons\\Spell_Arcane_Arcane04" },
+    { key = "bags", width = 80, icon = "Interface\\Icons\\INV_Misc_Bag_08" },
+    { key = "zone", width = 170, icon = "Interface\\Icons\\INV_Misc_Map_01" },
+    { key = "guild", width = 124, icon = "Interface\\Icons\\Achievement_GuildPerk_EveryonesAFriend" },
+    { key = "mail", width = 54, icon = "Interface\\Icons\\INV_Letter_05" },
+    { key = "coords", width = 76, icon = "Interface\\Icons\\INV_Misc_Map_02" },
+    { key = "clock", width = 46, icon = "Interface\\Icons\\INV_Misc_PocketWatch_01" },
+}
+local LEFT_ORDER = { "money", "durability", "performance", "bags" }
+local RIGHT_ORDER = { "clock", "coords", "mail", "guild" }
 
 local function ui()
     local profile = app.Store and app.Store:Profile()
     return profile and profile.ui or {}
 end
 
--- Exactly one LumaUI clock is visible at a time. The strip owns it by default;
--- "minimap" moves it into the minimap panel and "off" leaves the time to the
--- native calendar button.
 local function clockPlacement()
     local value = ui().clock
     if value == "minimap" or value == "off" then return value end
@@ -22,7 +35,28 @@ local function clockPlacement()
 end
 
 local function isCompact()
-    return ui().stripCompact ~= false
+    return ui().stripCompact == true
+end
+
+local function hex(color)
+    local function part(value)
+        value = math.max(0, math.min(1, value or 0))
+        return string.format("%02x", math.floor(value * 255 + 0.5))
+    end
+    return part(color[1]) .. part(color[2]) .. part(color[3])
+end
+
+local function tone(text, color)
+    if text == nil or text == "" then return "" end
+    return "|cff" .. hex(color) .. tostring(text) .. "|r"
+end
+
+local function label(text)
+    return tone(text, app.Theme.colors.muted)
+end
+
+local function value(text)
+    return tone(text, app.Theme:Accent())
 end
 
 local function gameTime()
@@ -34,46 +68,142 @@ local function gameTime()
     return string.format("%02d:%02d", hour, minute)
 end
 
+local function plainNumber(api, ...)
+    if type(api) ~= "function" then return nil end
+    local ok, result = pcall(api, ...)
+    return ok and app.Capabilities.Plain(result, "number") or nil
+end
+
+local function durability()
+    local read = _G.GetInventoryItemDurability
+    if type(read) ~= "function" then return nil end
+    local lowest
+    for slot = 1, 19 do
+        local ok, current, maximum = pcall(read, slot)
+        current = ok and app.Capabilities.Plain(current, "number") or nil
+        maximum = ok and app.Capabilities.Plain(maximum, "number") or nil
+        if current and maximum and maximum > 0 then
+            local percent = current / maximum * 100
+            if not lowest or percent < lowest then lowest = percent end
+        end
+    end
+    if not lowest then return nil end
+    return math.floor(lowest + 0.5)
+end
+
+local function bags()
+    local api = _G.C_Container
+    local slotsFn = api and api.GetContainerNumSlots or _G.GetContainerNumSlots
+    local freeFn = api and api.GetContainerNumFreeSlots or _G.GetContainerNumFreeSlots
+    if type(slotsFn) ~= "function" or type(freeFn) ~= "function" then return nil end
+    local used, total = 0, 0
+    for bag = 0, 5 do
+        local slots = plainNumber(slotsFn, bag)
+        local free = plainNumber(freeFn, bag)
+        if slots and free and slots > 0 then
+            total = total + slots
+            used = used + math.max(0, slots - free)
+        end
+    end
+    if total == 0 then return nil end
+    return used, total
+end
+
+local function coords()
+    local mapApi = _G.C_Map
+    if type(mapApi) ~= "table" or type(mapApi.GetBestMapForUnit) ~= "function"
+        or type(mapApi.GetPlayerMapPosition) ~= "function" then return nil end
+    local map = mapApi.GetBestMapForUnit("player")
+    local position = map and mapApi.GetPlayerMapPosition(map, "player")
+    if not position then return nil end
+    local x, y = position:GetXY()
+    x = app.Capabilities.Plain(x, "number")
+    y = app.Capabilities.Plain(y, "number")
+    if not x or not y then return nil end
+    return string.format("%.1f, %.1f", x * 100, y * 100)
+end
+
+local function performance()
+    local fps = plainNumber(_G.GetFramerate)
+    local latency
+    if type(GetNetStats) == "function" then
+        local ok, _, _, home, world = pcall(GetNetStats)
+        home = ok and app.Capabilities.Plain(home, "number") or nil
+        world = ok and app.Capabilities.Plain(world, "number") or nil
+        if home and world then latency = math.max(home, world) end
+    end
+    if not fps and not latency then return nil end
+    local text = label(app.L.fps) .. " " .. value(fps and math.floor(fps + 0.5) or "--")
+    if latency then
+        text = text .. "   " .. label(app.L.latency) .. " " .. value(latency)
+    end
+    return text
+end
+
 local function update(self)
     if not self.frame or not self.frame:IsShown() then return end
-    if self.zone then
-        local zone = type(GetRealZoneText) == "function" and app.Capabilities.Plain(GetRealZoneText(), "string")
-        self.zone:SetText(zone or "")
+    local accent = app.Theme:Accent()
+    if self.money then
+        local amount = plainNumber(_G.GetMoney)
+        local text = "--"
+        if amount and type(GetMoneyString) == "function" then
+            local ok, formatted = pcall(GetMoneyString, amount, true)
+            formatted = ok and app.Capabilities.Plain(formatted, "string") or nil
+            if formatted then text = formatted end
+        end
+        self.money:SetText(text)
+        self.money:SetTextColor(accent[1], accent[2], accent[3])
     end
-    if self.clock and self.clock:IsShown() then
-        self.clock:SetText(gameTime() or "")
+    if self.durability and self.durability:IsShown() then
+        local percent = durability()
+        self.durability:SetText(label(app.L.durability) .. " " ..
+            value(percent and (percent .. "%") or "--"))
     end
     if self.performance and self.performance:IsShown() then
-        local fps = type(GetFramerate) == "function" and app.Capabilities.Plain(GetFramerate(), "number")
-        local latency
-        if type(GetNetStats) == "function" then
-            local ok, _, _, home, world = pcall(GetNetStats)
-            home = ok and app.Capabilities.Plain(home, "number") or nil
-            world = ok and app.Capabilities.Plain(world, "number") or nil
-            if home and world then latency = math.max(home, world) end
-        end
-        if fps and latency then
-            self.performance:SetFormattedText("%d %s  ·  %d %s", math.floor(fps + 0.5), app.L.fps, latency, app.L.latency)
-        else
-            self.performance:SetText("")
-        end
+        self.performance:SetText(performance() or "--")
     end
-    if self.money and self.money:IsShown() and type(GetMoney) == "function" then
-        local amount = app.Capabilities.Plain(GetMoney(), "number")
-        local label = ""
-        if amount and type(GetMoneyString) == "function" then
-            local ok, value = pcall(GetMoneyString, amount, true)
-            label = ok and app.Capabilities.Plain(value, "string") or ""
+    if self.bags and self.bags:IsShown() then
+        local used, total = bags()
+        self.bags:SetText(label(app.L.bagLabel) .. " " ..
+            value(used and (used .. "/" .. total) or "--"))
+    end
+    if self.zone and self.zone:IsShown() then
+        local zone = type(GetRealZoneText) == "function"
+            and app.Capabilities.Plain(GetRealZoneText(), "string") or nil
+        self.zone:SetText(zone or "--")
+        local text = app.Theme.colors.text
+        self.zone:SetTextColor(text[1], text[2], text[3])
+    end
+    if self.guild and self.guild:IsShown() then
+        local guild = 0
+        if type(IsInGuild) == "function" then
+            local ok, inGuild = pcall(IsInGuild)
+            if ok and app.Capabilities.Plain(inGuild, "boolean") == true then
+                guild = plainNumber(_G.GetNumGuildMembers) or 0
+            end
         end
-        self.money:SetText(label)
+        local friends = plainNumber(_G.GetNumFriends) or 0
+        self.guild:SetText(label(app.L.guildLabel) .. " " .. value(guild) ..
+            "   " .. label(app.L.friendsLabel) .. " " .. value(friends))
+    end
+    if self.mail and self.mail:IsShown() then
+        local count = plainNumber(_G.GetInboxNumItems) or 0
+        self.mail:SetText(label(app.L.mailLabel) .. " " .. value(count))
+    end
+    if self.coords and self.coords:IsShown() then
+        self.coords:SetText(coords() or "--")
+        self.coords:SetTextColor(accent[1], accent[2], accent[3])
+    end
+    if self.clock and self.clock:IsShown() then
+        self.clock:SetText(gameTime() or "--")
+        self.clock:SetTextColor(accent[1], accent[2], accent[3])
     end
 end
 
--- A segment is one hover target. Mouse is enabled only on its own rectangle,
--- so the strip never steals clicks from anything underneath it.
 local function segment(self, key)
     local frame = CreateFrame("Frame", nil, self.frame)
-    frame:SetHeight(24)
+    frame:SetHeight(ROW_HEIGHT)
+    frame:EnableMouse(false)
     self.segments[key] = frame
     return frame
 end
@@ -89,75 +219,121 @@ local function hover(frame, report)
     end)
 end
 
--- One layout pass decides which fields the constant display carries. Hidden
--- fields stay built and anchored, so switching modes on a profile change never
--- rebuilds the strip; only their hover rectangles stop catching the mouse, so
--- the wide summary segment underneath owns that empty area without shadowing
--- a field that is actually printed.
+local function reportFor(key)
+    if key == "zone" or key == "coords" then return "ShowZone" end
+    if key == "performance" then return "ShowPerformance" end
+    if key == "money" then return "ShowMoney" end
+    if key == "clock" then return "ShowRaid" end
+    return "ShowSummary"
+end
+
+local function buildField(self, def)
+    local holder = segment(self, def.key)
+    holder:SetWidth(def.width)
+    if def.key ~= "money" and def.key ~= "zone" then
+        local line = holder:CreateTexture(nil, "ARTWORK")
+        line:SetWidth(app.Pixel:Pixels(1, holder))
+        line:SetHeight(12)
+        line:SetPoint("LEFT", -4, 0)
+        local color = app.Theme.colors.line
+        line:SetColorTexture(color[1], color[2], color[3], 0.28)
+    end
+    local offset = 0
+    if def.icon then
+        local icon = holder:CreateTexture(nil, "ARTWORK")
+        icon:SetSize(12, 12)
+        icon:SetPoint("LEFT", 0, 0)
+        if type(icon.SetTexture) == "function" then
+            pcall(icon.SetTexture, icon, def.icon)
+        end
+        local accent = app.Theme:Accent()
+        if type(icon.SetVertexColor) == "function" then icon:SetVertexColor(accent[1], accent[2], accent[3]) end
+        offset = 16
+    end
+    local text = app.Type:Text(holder, "body")
+    text:SetPoint("LEFT", offset, 0)
+    text:SetWidth(def.width - offset)
+    text:SetWordWrap(false)
+    text:SetJustifyH("LEFT")
+    self[def.key] = text
+    hover(holder, function(reports, owner) reports[reportFor(def.key)](reports, owner) end)
+end
+
 local function relayout(self)
-    local compact = isCompact()
-    -- The strip prints the time only when this profile gave it the clock; with
-    -- "minimap" the panel owns it and with "off" the native entry does.
+    -- Below 1200 px the left and right clusters would meet the centred zone
+    -- name; fall back to the compact reading instead of drawing overlapping text.
+    local compact = isCompact() or UIParent:GetWidth() < 1200
     local showClock = clockPlacement() == "strip"
-    self.frame:SetWidth(compact and WIDTH_COMPACT or WIDTH_FULL)
-    self.zone:SetShown(true)
-    self.clock:SetShown(showClock)
-    self.performance:SetShown(not compact)
-    self.money:SetShown(not compact)
-    self.summary:SetShown(compact)
-    local segments = self.segments or {}
-    if segments.zone then segments.zone:EnableMouse(true) end
-    if segments.summary then segments.summary:EnableMouse(compact) end
-    if segments.performance then segments.performance:EnableMouse(not compact) end
-    if segments.money then segments.money:EnableMouse(not compact) end
-    if segments.clock then segments.clock:EnableMouse(showClock) end
-    local anchor = self.clock:IsShown() and self.clock or self.zone
-    self.summary:ClearAllPoints()
-    self.summary:SetPoint("LEFT", anchor, "RIGHT", 16, 0)
-    self.summary:SetPoint("RIGHT", self.frame, "RIGHT", -12, 0)
+    local width = math.max(900, UIParent:GetWidth() - 32)
+    self.frame:SetWidth(compact and WIDTH_COMPACT or width)
+    for _, def in ipairs(FIELDS) do
+        local shown = not compact and (def.key ~= "clock" or showClock)
+        self.segments[def.key]:SetShown(shown)
+        if self[def.key] then self[def.key]:SetShown(shown) end
+    end
+    if compact then
+        -- Compact keeps the old zone + clock reading, with the remainder as one
+        -- hover summary so the band still answers every other field.
+        self.segments.zone:SetShown(true)
+        self.zone:SetShown(true)
+        self.segments.clock:SetShown(showClock)
+        self.clock:SetShown(showClock)
+        self.segments.zone:ClearAllPoints()
+        self.segments.zone:SetPoint("LEFT", 12, 0)
+        self.segments.clock:ClearAllPoints()
+        self.segments.clock:SetPoint("LEFT", 198, 0)
+        self.summary:SetShown(true)
+        self.summary:ClearAllPoints()
+        self.summary:SetPoint("LEFT", showClock and self.segments.clock or self.segments.zone, "RIGHT", 10, 0)
+        self.summary:SetPoint("RIGHT", self.frame, "RIGHT", -12, 0)
+        return
+    end
+
+    self.summary:SetShown(false)
+    -- Full width: readings hug the left and right edges, the zone name owns the
+    -- centre, and the space between is deliberately empty as in the visual target.
+    local left = self.frame
+    for _, key in ipairs(LEFT_ORDER) do
+        local holder = self.segments[key]
+        holder:ClearAllPoints()
+        holder:SetPoint("LEFT", left, left == self.frame and "LEFT" or "RIGHT",
+            left == self.frame and 12 or 8, 0)
+        left = holder
+    end
+    local zone = self.segments.zone
+    zone:ClearAllPoints()
+    zone:SetPoint("CENTER", self.frame, "CENTER", 0, 0)
+    local right = self.frame
+    local order = showClock and RIGHT_ORDER or { "coords", "mail", "guild" }
+    for _, key in ipairs(order) do
+        local holder = self.segments[key]
+        holder:ClearAllPoints()
+        holder:SetPoint("RIGHT", right, right == self.frame and "RIGHT" or "LEFT",
+            right == self.frame and -12 or -8, 0)
+        right = holder
+    end
 end
 
 app:RegisterComponent({ id = "dataStrip", label = "dataStrip",
     Enable = function(self)
         if not self.frame then
             local frame = CreateFrame("Frame", "LumaUIDataStrip", UIParent, "BackdropTemplate")
-            frame:SetSize(WIDTH_FULL, HEIGHT)
+            local fullWidth = math.max(900, UIParent:GetWidth() - 32)
+            frame:SetSize(fullWidth, HEIGHT)
             frame:EnableMouse(false)
             self.frame = frame
-            self.zone = app.Type:Text(frame, "body")
-            self.zone:SetPoint("LEFT", 12, 0)
-            self.zone:SetWidth(180)
-            self.clock = app.Type:Text(frame, "body")
-            self.clock:SetPoint("LEFT", 198, 0)
-            self.performance = app.Type:Text(frame, "label")
-            self.performance:SetPoint("LEFT", 258, 0)
-            self.money = app.Type:Text(frame, "body")
-            self.money:SetPoint("RIGHT", -12, 0)
-            -- The strip and the experience bar share one top-centre group, so
-            -- the pair moves as one layout item.
-            local screenHeight = UIParent:GetHeight()
-            app.Layout:Join("topInfo", "dataStrip", frame, 0, screenHeight / 2 - 30,
-                { label = app.L.topInfoGroup, x = 0, y = screenHeight / 2 - 47, width = WIDTH_FULL, height = 59 })
-
             self.segments = self.segments or {}
-            local zone = segment(self, "zone")
-            zone:SetPoint("LEFT", self.zone, "LEFT", -8, 0)
-            zone:SetPoint("RIGHT", self.zone, "RIGHT", 8, 0)
-            hover(zone, function(reports, owner) reports:ShowZone(owner) end)
-            local clock = segment(self, "clock")
-            clock:SetPoint("LEFT", self.clock, "LEFT", -8, 0)
-            clock:SetPoint("RIGHT", self.clock, "RIGHT", 40, 0)
-            hover(clock, function(reports, owner) reports:ShowRaid(owner) end)
-            local performance = segment(self, "performance")
-            performance:SetPoint("LEFT", self.performance, "LEFT", -6, 0)
-            performance:SetPoint("RIGHT", self.performance, "RIGHT", 6, 0)
-            hover(performance, function(reports, owner) reports:ShowPerformance(owner) end)
-            local money = segment(self, "money")
-            money:SetPoint("LEFT", self.money, "LEFT", -8, 0)
-            money:SetPoint("RIGHT", self.money, "RIGHT", 8, 0)
-            hover(money, function(reports, owner) reports:ShowMoney(owner) end)
-            -- Compact keeps the values but not the ink: the free space to the
-            -- right of the clock reports everything the strip used to print.
+
+            for _, def in ipairs(FIELDS) do buildField(self, def) end
+
+            -- The strip is a bottom bar in the Pearl target, not a second top
+            -- row: it owns one layout group so moving it never touches the XP
+            -- bar group.
+            local screenHeight = UIParent:GetHeight()
+            app.Layout:Join("bottomBar", "dataStrip", frame, 0, -screenHeight / 2 + HEIGHT,
+                { label = app.L.bottomBar, x = 0, y = -screenHeight / 2 + HEIGHT,
+                    width = fullWidth, height = HEIGHT })
+
             local summary = segment(self, "summary")
             summary:SetHeight(HEIGHT - 8)
             summary:SetPoint("TOP", frame, "TOP", 0, -2)
@@ -165,19 +341,25 @@ app:RegisterComponent({ id = "dataStrip", label = "dataStrip",
             hover(summary, function(reports, owner) reports:ShowSummary(owner) end)
             self.summary = summary
         end
+        app.Surface:Plate(self.frame, "hud")
         relayout(self)
         self.frame:Show()
         self:Listen("PLAYER_MONEY", update)
         self:Listen("PLAYER_ENTERING_WORLD", update)
         self:Listen("ZONE_CHANGED_NEW_AREA", update)
+        self:Listen("BAG_UPDATE_DELAYED", update)
+        self:Listen("UPDATE_INVENTORY_DURABILITY", update)
+        self:Listen("GUILD_ROSTER_UPDATE", update)
+        self:Listen("FRIENDLIST_UPDATE", update)
+        self:Listen("UPDATE_PENDING_MAIL", update)
+        self:Listen("DISPLAY_SIZE_CHANGED", function(current) relayout(current) end)
+        self:Listen("UI_SCALE_CHANGED", function(current) relayout(current) end)
         self:Every(1, update)
         update(self)
     end,
     Refresh = function(self)
         if not self.frame then return end
         relayout(self)
-        -- A HUD support uses the HUD role: it lets the world through instead of
-        -- repeating the window surface behind combat information.
         app.Surface:Plate(self.frame, "hud")
         update(self)
     end,

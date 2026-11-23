@@ -1,15 +1,16 @@
 local _, app = ...
 local Theme = {
+    -- The Pearl palette measured from agent_flow/screenshots: deep navy panels,
+    -- warm ivory text and one amber-gold accent. Blue stays available as an
+    -- option but is no longer the default chrome colour.
     colors = {
-        surface = { 0.045, 0.075, 0.115 }, raised = { 0.075, 0.12, 0.17 },
-        -- A quiet step up from the window colour, used inside a window instead
-        -- of drawing a border around every row.
+        surface = { 0.035, 0.055, 0.085 }, raised = { 0.055, 0.085, 0.125 },
         -- Three deliberate steps: a window/panel, a raised element on top of it,
-        -- and a recessed well inside it. "embedded" used to sit within a hair of
-        -- "raised", so an inset region and a button read as the same material;
-        -- it is now clearly darker than the panel, which is what "inset" means.
-        embedded = { 0.030, 0.050, 0.078 },
-        line = { 0.22, 0.32, 0.40 }, text = { 0.91, 0.96, 0.98 }, muted = { 0.58, 0.70, 0.77 },
+        -- and a recessed well inside it. "embedded" is clearly darker than the
+        -- panel, which is what "inset" means.
+        embedded = { 0.020, 0.032, 0.052 },
+        line = { 0.32, 0.30, 0.27 }, text = { 0.96, 0.94, 0.89 }, muted = { 0.62, 0.62, 0.58 },
+        pearl = { 0.95, 0.82, 0.55 },
         ocean = { 0.37, 0.86, 0.83 }, ember = { 1, 0.68, 0.32 },
         friendly = { 0.20, 0.82, 0.38 }, neutral = { 0.93, 0.78, 0.25 },
         hostile = { 0.88, 0.24, 0.20 }, tapped = { 0.55, 0.55, 0.55 },
@@ -58,6 +59,19 @@ Theme.textRoles = TEXT_ROLES
 
 -- Spacing comes from one short scale instead of per-module magic numbers.
 Theme.spacing = { xs = 4, sm = 8, md = 12, lg = 20, xl = 28 }
+-- Shared component measurements taken from the Pearl visual target. Modules
+-- read these instead of repeating their own magic numbers, so tightening a row
+-- once moves every HUD element that uses it.
+Theme.units = {
+    width = 200, nameSize = 11, health = 18, power = 3,
+    cast = 12, aura = 16, auraStep = 18,
+    nameRow = 15, healthGap = 1, powerGap = 2, castGap = 4, auraGap = 4,
+}
+Theme.party = {
+    width = 190, height = 30, gap = 3, icon = 22,
+    nameSize = 10, health = 7, power = 2, textInset = 26,
+}
+Theme.strip = { height = 30, width = 876, rowGap = 18 }
 Theme.edge = { thin = 1, normal = 2 }
 Theme.focus = { width = 1 }
 -- Reserved: a soft outer shadow needs a nine-slice edge that has not been

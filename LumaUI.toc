@@ -16,6 +16,7 @@ UI\Pixel.lua
 UI\Theme.lua
 UI\Type.lua
 UI\Surface.lua
+UI\ActionButtonSkin.lua
 UI\Transitions.lua
 UI\Layout.lua
 UI\Controls.lua
@@ -51,5 +52,7 @@ Modules\CombatText.lua
 Modules\Nameplates.lua
 Modules\ActionPanel.lua
 Modules\ActionButtons.lua
+Modules\ActionBars.lua
+Modules\CooldownViewer.lua
 Modules\ClickCast.lua
 Core\Startup.lua

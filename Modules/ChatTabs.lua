@@ -128,18 +128,19 @@ local function applyLook(entry)
     local accent = app.Theme:Accent()
     local selected = entry.selected == true
     local unread = entry.unread == true
-    local bg = selected and colors.raised or colors.surface
-    decor.bg:SetColorTexture(bg[1] * 2.1, bg[2] * 2.1, bg[3] * 2.1, selected and 0.55 or 0)
+    -- Pearl tabs are text with one amber underline, never pills: the backing
+    -- stays transparent and only the selected/unread rule carries state.
+    decor.bg:SetColorTexture(0, 0, 0, 0)
     decor.bg:Show()
     local rule = selected and accent or colors.line
     decor.rule:SetHeight(app.Pixel:Pixels(1, tab))
-    decor.rule:SetColorTexture(rule[1], rule[2], rule[3], selected and 1 or (unread and 0.85 or 0))
+    decor.rule:SetColorTexture(rule[1], rule[2], rule[3], selected and 1 or (unread and 0.7 or 0))
     decor.rule:SetShown(selected or unread == true)
-    decor.hover:SetColorTexture(colors.line[1], colors.line[2], colors.line[3], entry.hovering and 0.3 or 0)
+    decor.hover:SetColorTexture(colors.line[1], colors.line[2], colors.line[3], entry.hovering and 0.18 or 0)
     decor.hover:SetShown(entry.hovering == true and not selected)
     local font = entry.font
     if font then
-        local color = selected and colors.text or colors.muted
+        local color = selected and accent or (unread and colors.text or colors.muted)
         font:SetTextColor(color[1], color[2], color[3])
     end
 end

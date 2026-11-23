@@ -115,10 +115,12 @@ function SettingsUI:BuildGeneral(page)
     y = y - 74
     section(body, L.sectionAccent, y)
     y = y - 22
-    local ocean = settingsControl(page, Controls:Button(body, L.ocean, 150, function() set("accent", "ocean") end))
-    ocean:SetPoint("TOPLEFT", 0, y)
-    local ember = settingsControl(page, Controls:Button(body, L.ember, 150, function() set("accent", "ember") end))
-    ember:SetPoint("TOPLEFT", 164, y)
+    local pearl = settingsControl(page, Controls:Button(body, L.pearl, 140, function() set("accent", "pearl") end))
+    pearl:SetPoint("TOPLEFT", 0, y)
+    local ocean = settingsControl(page, Controls:Button(body, L.ocean, 140, function() set("accent", "ocean") end))
+    ocean:SetPoint("TOPLEFT", 148, y)
+    local ember = settingsControl(page, Controls:Button(body, L.ember, 140, function() set("accent", "ember") end))
+    ember:SetPoint("TOPLEFT", 296, y)
     y = y - 40
     updates[#updates + 1] = settingsControl(page,
         Controls:Toggle(body, L.tooltipQuality, y, function() return get("tooltipQuality") end,

@@ -47,7 +47,7 @@ test("malformed persisted values are normalized", function()
     H.Fire("PLAYER_LOGIN")
     local profile = app.Store:Profile()
     eq(profile.appearance.scale, 1.5)
-    eq(profile.appearance.opacity, 0.9)
+    eq(profile.appearance.opacity, 0.92)
     eq(profile.appearance.motion, true)
     eq(profile.appearance.tooltipQuality, true)
     eq(profile.modules.dataStrip, true)
@@ -196,7 +196,8 @@ test("component failures do not stop healthy modules", function()
 end)
 
 test("unsupported capabilities disable only that component", function()
-    local app = H.Load({ profiles = { Default = { modules = { questList = true } } } })
+    local app = H.Load({ migrations = { pearlBatch = true },
+        profiles = { Default = { modules = { questList = true } } } })
     C_Container = nil; C_QuestLog = nil; H.Fire("PLAYER_LOGIN")
     eq(app.components.inventory.status, "unsupported")
     eq(app.components.questList.status, "unsupported")
@@ -216,16 +217,20 @@ test("optional extension switches survive while their addon is absent", function
     eq(app.Settings.pages.modules.rows.externalWidget ~= nil, true)
 end)
 
-test("old profiles enable the default quest list only once", function()
-    local app = H.Load({ schema = 1, profiles = { Default = { modules = { questList = false } } } })
+test("the Pearl batch retires the custom quest panel only once", function()
+    local app = H.Load({ schema = 1,
+        profiles = { Default = { modules = { questList = true } } } })
     H.Fire("PLAYER_LOGIN")
+    eq(app.Store:Profile().modules.questList, false)
+    eq(app.components.questList.running, nil)
+    eq(LumaUIDB.migrations.pearlBatch, true)
+    -- A deliberate opt-in after the migration is the player's choice and is
+    -- carried forward by a reload.
+    app.Store:Set("modules", "questList", true)
     eq(app.Store:Profile().modules.questList, true)
-    eq(app.components.questList.running, true)
-    eq(LumaUIDB.migrations.questListDefault, true)
-    app.Store:Set("modules", "questList", false)
-    eq(app.Store:Profile().modules.questList, false)
-    app.Store:Open("Tester - Realm")
-    eq(app.Store:Profile().modules.questList, false)
+    local saved = LumaUIDB
+    local again = H.Load(saved); H.Fire("PLAYER_LOGIN")
+    eq(again.Store:Profile().modules.questList, true)
     eq(#app.errors, 0)
 end)
 
@@ -439,7 +444,7 @@ test("restricted player identity never enters profile keys", function()
     eq(#app.errors, 0)
 end)
 
-test("minimap frame follows native visibility and quest titles use level colors", function()
+test("minimap frame follows native visibility and quest titles use the Pearl accent", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local minimap = app.components.minimap
     eq(minimap.running, true)
@@ -455,7 +460,7 @@ test("minimap frame follows native visibility and quest titles use level colors"
     eq(MinimapCluster.BorderTop:IsShown(), false)
     eq(Minimap.maskTexture, "Interface\\Buttons\\WHITE8X8")
     eq(minimap.edge:IsShown(), true)
-    eq(MinimapZoneText.textColor[1], 0.91)
+    eq(MinimapZoneText.textColor[1], 0.96)
     eq(MinimapCluster.MinimapContainer.PlayerCoords:IsShown(), false)
     Minimap:Hide()
     eq(minimap.panel:IsShown(), false)
@@ -473,19 +478,20 @@ test("minimap frame follows native visibility and quest titles use level colors"
     eq(tracker.running, true)
     eq(tracker.panel, nil)
     local blocks = QuestObjectiveTracker.usedBlocks[1]
-    eq(blocks[101].HeaderText.textColor[1], 0.5)
-    eq(blocks[102].HeaderText.textColor[1], 1)
+    local accent = app.Theme:Accent()
+    eq(blocks[101].HeaderText.textColor[1], accent[1])
+    eq(blocks[102].HeaderText.textColor[1], accent[1])
     -- Campaign quests come from a separate module enumerated without usedBlocks.
-    eq(H.campaignBlock.HeaderText.textColor[1], 0)
-    eq(H.campaignBlock.HeaderText.textColor[2], 1)
+    eq(H.campaignBlock.HeaderText.textColor[1], accent[1])
+    eq(H.campaignBlock.HeaderText.textColor[2], accent[2])
     H.Fire("PLAYER_LEVEL_UP")
-    eq(H.campaignBlock.HeaderText.textColor[2], 1)
+    eq(H.campaignBlock.HeaderText.textColor[2], accent[2])
     blocks[101].isHighlighted = true
     blocks[101]:UpdateHighlight()
     eq(blocks[101].HeaderText.textColor[1], 1)
     blocks[101].isHighlighted = false
     blocks[101]:UpdateHighlight()
-    eq(blocks[101].HeaderText.textColor[1], 0.5)
+    eq(blocks[101].HeaderText.textColor[1], accent[1])
     local added = H.NewFrame(nil, QuestObjectiveTracker)
     added.id = 103
     added.isHighlighted = false
@@ -495,14 +501,14 @@ test("minimap frame follows native visibility and quest titles use level colors"
     QuestObjectiveTracker.usedBlocks[1][103] = added
     H.questLevels[103] = 7
     ObjectiveTrackerFrame:Update()
-    eq(added.HeaderText.textColor[1], 0.5)
+    eq(added.HeaderText.textColor[1], accent[1])
     app.Store:Set("modules", "questTracker", false)
     eq(blocks[101].HeaderText.textColor[1], 1)
     eq(blocks[101].HeaderText.textColor[2], 0.82)
     eq(H.campaignBlock.HeaderText.textColor[2], 0.82)
     app.Store:Set("modules", "questTracker", true)
-    eq(blocks[101].HeaderText.textColor[1], 0.5)
-    eq(H.campaignBlock.HeaderText.textColor[2], 1)
+    eq(blocks[101].HeaderText.textColor[1], accent[1])
+    eq(H.campaignBlock.HeaderText.textColor[2], accent[2])
     app.Store:Set("modules", "minimap", false)
     eq(minimap.panel:IsShown(), false)
     eq(minimap.edge:IsShown(), false)
@@ -525,7 +531,7 @@ test("minimap card follows the HUD theme and screen scale without rebuilding", f
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local minimap = app.components.minimap
     local plate, edge, rule = minimap.panel.lumaPlate, minimap.edge, minimap.rule
-    eq(plate.vertexColor[4], 0.62)
+    eq(plate.vertexColor[4], 0.80)
     eq(minimap.clock.lumaTypeRole, "micro")
     eq(minimap.coords.lumaTypeRole, "micro")
     eq(minimap.clock.point[1], "BOTTOMLEFT")
@@ -804,9 +810,11 @@ test("chat tabs replace native art and mark the active window", function()
     end
     eq(first.tab:GetAlpha(), 1)
     eq(first.decor.rule:IsShown(), true)
-    local activeColor = first.decor.bg.color
-    local inactiveColor = second.decor.bg.color
-    eq(activeColor[2] > inactiveColor[2], true)
+    -- Pearl tabs have no pill: both backings are transparent, and only the
+    -- selected rule carries the accent.
+    eq(first.decor.bg.color[4], 0)
+    eq(second.decor.bg.color[4], 0)
+    eq(first.decor.rule.color[2] > second.decor.rule.color[2], true)
     eq(second.decor.rule:IsShown(), false)
     eq(second.fontColor ~= nil, true)
     -- The client re-shows its own selected-tab art on dock updates; the next
@@ -961,6 +969,7 @@ test("quest folds persist per profile and sanitize damaged saves", function()
     -- Fold state follows the selected profile: a blank profile expands, the
     -- folded profile collapses again.
     reloaded.Store:Create("Clean", false)
+    reloaded.Store:Set("modules", "questList", true)
     eq(findRow(restored.rows, "Slay 8 boars") ~= nil, true)
     reloaded.Store:Select("Default")
     eq(findRow(restored.rows, "Slay 8 boars"), nil)
@@ -968,9 +977,10 @@ test("quest folds persist per profile and sanitize damaged saves", function()
     eq(findRow(restored.rows, "Slay 8 boars") ~= nil, true)
 
     -- Damaged saves are normalized away; rows start expanded.
-    local broken = H.Load({ profiles = { Default = { ui = { questFolds = {
-        groups = { ["Campaign"] = "yes", [string.rep("x", 200)] = true, [7] = true },
-        quests = { ["101"] = 1, ["bad\nkey"] = true } } } } } })
+    local broken = H.Load({ migrations = { pearlBatch = true },
+        profiles = { Default = { modules = { questList = true }, ui = { questFolds = {
+            groups = { ["Campaign"] = "yes", [string.rep("x", 200)] = true, [7] = true },
+            quests = { ["101"] = 1, ["bad\nkey"] = true } } } } } })
     H.Fire("PLAYER_LOGIN")
     local clean = broken.Store:Profile().ui.questFolds
     eq(next(clean.groups), nil)
@@ -1733,7 +1743,7 @@ test("unit frames keep running when cast, aura and mark APIs are missing", funct
     eq(frame.castTime, nil)
     eq(frame.auraIcons, nil)
     eq(frame.mark, nil)
-    eq(frame:GetHeight(), 66)
+    eq(frame:GetHeight(), 38)
     -- Unavailable parts registered no events, so their events stay inert.
     H.Fire("UNIT_AURA", "target")
     H.Fire("RAID_TARGET_UPDATE")
@@ -1754,7 +1764,7 @@ test("unit frames keep auras and marks without the cast API", function()
     eq(units.parts.marks.available, true)
     local frame = units.frames.target
     eq(frame.cast, nil)
-    eq(frame:GetHeight(), 92)
+    eq(frame:GetHeight(), 64)
     H.unitAuras.target = { helpful = { { icon = "buff1" } } }
     H.Fire("UNIT_AURA", "target")
     eq(frame.auraIcons[1]:IsShown(), true)
@@ -1775,7 +1785,7 @@ test("unit frames keep cast and marks without the aura API", function()
     eq(units.parts.marks.available, true)
     local frame = units.frames.target
     eq(frame.auraIcons, nil)
-    eq(frame:GetHeight(), 80)
+    eq(frame:GetHeight(), 54)
     H.cast.target = { name = "Fireball", startTime = 0, endTime = 2500 }
     H.Fire("UNIT_SPELLCAST_START", "target")
     eq(frame.cast:IsShown(), true)
@@ -1790,8 +1800,8 @@ test("unit frame height follows parts and disable releases everything", function
     app.Store:Set("modules", "unitFrames", true)
     local units = app.components.unitFrames
     local frame = units.frames.target
-    eq(frame:GetWidth(), 246)
-    eq(frame:GetHeight(), 106)
+    eq(frame:GetWidth(), 200)
+    eq(frame:GetHeight(), 80)
     eq(frame.watched, true)
     -- Hover shows the unit tooltip through the interaction part.
     frame.scripts.OnEnter(frame)
@@ -1814,7 +1824,7 @@ test("unit frame height follows parts and disable releases everything", function
     eq(frame.events.events["UNIT_SPELLCAST_START"], "target")
     eq(frame.events.events["UNIT_AURA"], "target")
     eq(frame.events.events["RAID_TARGET_UPDATE"], true)
-    eq(frame:GetHeight(), 106)
+    eq(frame:GetHeight(), 80)
     eq(frame.cast:IsShown(), false)
     eq(#app.errors, 0)
 end)
@@ -1826,13 +1836,13 @@ test("unit bars keep names and values above compact health and power", function(
     for _, unit in ipairs({ "player", "target" }) do
         local frame = app.components.unitFrames.frames[unit]
         eq(frame.name.point[1], "TOPLEFT")
-        eq(frame.name.point[3], -9)
+        eq(frame.name.point[3], 0)
         eq(frame.value.point[1], "TOPRIGHT")
-        eq(frame.value.point[3], -9)
-        eq(frame.health:GetHeight(), 9)
+        eq(frame.value.point[3], 0)
+        eq(frame.health:GetHeight(), 18)
         eq(frame.power:GetHeight(), 3)
         eq(frame.powerValue.point[1], "TOPRIGHT")
-        eq(frame.powerValue.point[3], -45)
+        eq(frame.powerValue.point[3], -36)
     end
     eq(#app.errors, 0)
 end)
@@ -1841,8 +1851,8 @@ test("party bars leave a row beneath them for the native private auras", functio
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "partyFrames", true)
     local frame = app.components.partyFrames.frames.party1
-    eq(frame.health:GetHeight(), 8)
-    eq(frame.power:GetHeight(), 3)
+    eq(frame.health:GetHeight(), 7)
+    eq(frame.power:GetHeight(), 2)
     local id = frame.lumaPrivateAnchors[1]
     local anchor = H.privateAnchors.live[id].iconInfo.iconAnchor
     eq(anchor.offsetY, 3)
@@ -1921,7 +1931,7 @@ test("unit frame preview preserves native frames and cast bars", function()
     eq(units.takeover.cast, false)
     eq(units:Describe():find(app.L.nativeAwaitingValidation, 1, true) ~= nil, true)
     -- The secure frame height moves through the queued job and is applied.
-    eq(units.frames.player:GetHeight(), 106)
+    eq(units.frames.player:GetHeight(), 80)
     -- The preview never suppresses a client re-show.
     PlayerFrame:Show()
     eq(PlayerFrame:IsShown(), true)
@@ -2082,7 +2092,7 @@ test("unit frames include the target's target with parts, watch and events", fun
     eq(frame ~= nil, true)
     eq(frame:GetAttribute("unit"), "targettarget")
     eq(frame.watched, true)
-    eq(frame:GetHeight(), 106)
+    eq(frame:GetHeight(), 80)
     eq(frame.events.events["UNIT_HEALTH"], "targettarget")
     eq(frame.events.events["RAID_TARGET_UPDATE"], true)
     eq(_G.LumaUIUnit_targettarget:IsShown(), true)
@@ -2105,7 +2115,7 @@ test("unit frames include the target's target with parts, watch and events", fun
     eq(#app.errors, 0)
 end)
 
-test("public unit values abbreviate through the client formatter, secrets keep the engine path", function()
+test("health prints a percent, power abbreviates, secrets keep the engine path", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "unitFrames", true)
     local frame = app.components.unitFrames.frames.target
@@ -2113,23 +2123,24 @@ test("public unit values abbreviate through the client formatter, secrets keep t
     _G.UnitHealth = function() return 1487600 end
     _G.UnitPower = function() return 234560 end
     H.Fire("UNIT_HEALTH", "target")
-    eq(frame.value:GetText(), "149万")
+    eq(frame.value:GetText(), "42.0%")
     eq(frame.powerValue:GetText(), "23万")
-    -- Losing the client formatter keeps the plain "%d" text.
+    -- Losing the client formatter keeps the plain "%d" power text; the health
+    -- percent is engine formatted and does not depend on it.
     _G.AbbreviateLargeNumbers = nil
     H.Fire("UNIT_HEALTH", "target")
-    eq(frame.value:GetText(), "1487600")
+    eq(frame.value:GetText(), "42.0%")
     eq(frame.powerValue:GetText(), "234560")
     -- Restricted values never reach the formatter or any Lua arithmetic.
     _G.AbbreviateLargeNumbers = function(value) if value >= 10000 then return string.format("%.0f万", value / 10000) end return tostring(value) end
     _G.UnitHealth, _G.UnitPower = originalHealth, originalPower
     H.Fire("UNIT_HEALTH", "target")
-    eq(frame.value:GetText(), "42")
+    eq(frame.value:GetText(), "42.0%")
     eq(frame.powerValue:GetText(), "10")
     eq(#app.errors, 0)
 end)
 
-test("party frames watch units while preserving the native frame", function()
+test("party frames watch units and take over the native frame", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     eq(app.components.partyFrames.status, "disabled")
     eq(PartyFrame:IsShown(), true)
@@ -2143,23 +2154,25 @@ test("party frames watch units while preserving the native frame", function()
     eq(first:GetAttribute("*type2"), "togglemenu")
     eq(first.watched, true)
     eq(first:IsShown(), true)
-    -- Native visibility stays under the client's control.
-    eq(PartyFrame:IsShown(), true)
+    -- Full coverage takes the native display down; a client Show is re-hidden
+    -- by the same suppression hook until coverage drops.
+    eq(PartyFrame:IsShown(), false)
     PartyFrame:Show()
-    eq(PartyFrame:IsShown(), true)
+    eq(PartyFrame:IsShown(), false)
     -- A unit event redraws that member's bar with its reaction pair.
     H.unitInfo.party1 = { isPlayer = false, reaction = 5 }
     H.Fire("UNIT_HEALTH", "party1")
     eq(first.health:GetStatusBarTexture().gradient.lo[1], app.Theme.colors.friendly[1] * 0.45)
     eq(first.name:GetText() ~= "", true)
-    -- Roster changes leave native visibility alone.
+    -- Losing every member restores the native frame; the next covered roster
+    -- takes it down again.
     local originalExists = UnitExists
     _G.UnitExists = function() return false end
     H.Fire("GROUP_ROSTER_UPDATE")
     eq(PartyFrame:IsShown(), true)
     _G.UnitExists = originalExists
     H.Fire("GROUP_ROSTER_UPDATE")
-    eq(PartyFrame:IsShown(), true)
+    eq(PartyFrame:IsShown(), false)
     -- Disabling releases the watches, hides the buttons and restores the
     -- native frame.
     app.Store:Set("modules", "partyFrames", false)
@@ -2180,7 +2193,7 @@ test("party frames defer building in combat and tolerate a missing native frame"
     H.Combat(false)
     eq(party.running, true)
     eq(party.frames.party1 ~= nil, true)
-    eq(PartyFrame:IsShown(), true)
+    eq(PartyFrame:IsShown(), false)
     -- A client without the centralized party frame keeps working.
     local bare = H.Load()
     _G.PartyFrame = nil
@@ -3884,7 +3897,7 @@ test("action panel repaints cached panels when the profile changes", function()
     local panel = app.components.actionPanel.panels[MainActionBar]
     eq(panel ~= nil, true)
     -- The action panel is a HUD support, so it follows the HUD opacity role.
-    eq(panel.backgroundColor[4], 0.62)
+    eq(panel.backgroundColor[4], 0.80)
     app.Store:Set("appearance", "hudOpacity", 0.5)
     -- A cached panel must follow the new value instead of keeping the old one.
     eq(panel.backgroundColor[4], 0.5)
@@ -4052,7 +4065,7 @@ test("group takeovers need our own visible buttons", function()
     eq(#app.errors, 0)
 end)
 
-test("preview enable cycles do not install native suppression hooks", function()
+test("party enable cycles install one native suppression hook", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     -- QuestTracker hooks the tracker for its text colors; the preview must not
     -- add suppression hooks when cycled.
@@ -4079,7 +4092,7 @@ test("preview enable cycles do not install native suppression hooks", function()
         app.Store:Set("modules", "partyFrames", true)
         app.Store:Set("modules", "partyFrames", false)
     end
-    eq(PartyFrame.hookCount or 0, 0)
+    eq(PartyFrame.hookCount or 0, 1)
     -- The unit preview leaves client visibility alone after repeated cycles.
     app.Store:Set("modules", "unitFrames", true)
     eq(PlayerFrame:IsShown(), true)
@@ -4269,11 +4282,11 @@ end)
 test("appearance role opacities default, clamp and keep the legacy value", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local appearance = app.Store:Profile().appearance
-    eq(appearance.opacity, 0.9)
-    eq(appearance.windowOpacity, 0.96)
-    eq(appearance.hudOpacity, 0.62)
-    eq(appearance.chatOpacity, 0.25)
-    eq(appearance.chatActiveOpacity, 0.75)
+    eq(appearance.opacity, 0.92)
+    eq(appearance.windowOpacity, 0.92)
+    eq(appearance.hudOpacity, 0.80)
+    eq(appearance.chatOpacity, 0.82)
+    eq(appearance.chatActiveOpacity, 0.90)
     -- A damaged profile keeps the legacy value but never reaches a role beyond
     -- its own range.
     local broken = H.Load({ profiles = { Default = { appearance = {
@@ -4282,15 +4295,15 @@ test("appearance role opacities default, clamp and keep the legacy value", funct
     H.Fire("PLAYER_LOGIN")
     local a = broken.Store:Profile().appearance
     eq(a.opacity, 0.5)
-    eq(a.windowOpacity, 0.96)
+    eq(a.windowOpacity, 0.92)
     eq(a.hudOpacity, 1)
     eq(a.chatOpacity, 0)
-    eq(a.chatActiveOpacity, 0.75)
+    eq(a.chatActiveOpacity, 0.90)
     -- An old profile without the new fields receives the defaults, not the
     -- legacy value, so nothing turns transparent on the first login.
     local old = H.Load({ profiles = { Default = { appearance = { opacity = 0.5 } } } })
     H.Fire("PLAYER_LOGIN")
-    eq(old.Store:Profile().appearance.windowOpacity, 0.96)
+    eq(old.Store:Profile().appearance.windowOpacity, 0.92)
     eq(old.Store:Profile().appearance.opacity, 0.5)
     eq(#old.errors, 0)
 end)
@@ -4303,13 +4316,13 @@ test("theme surface roles keep window, embedded, button, HUD and chat apart", fu
     eq(window.backdrop.bgFile, theme.media.panel)
     eq(window.backdrop.edgeFile, theme.white)
     eq(window.backdrop.edgeSize, 1)
-    eq(window.backgroundColor[4], 0.96)
+    eq(window.backgroundColor[4], 0.92)
     eq(window.lumaSurfaceRole, "window")
     local embedded = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(embedded, "embedded")
     eq(embedded.backdrop.edgeFile, nil)
     eq(embedded.backdrop.bgFile, theme.media.inset)
-    eq(embedded.backgroundColor[4], 0.96)
+    eq(embedded.backgroundColor[4], 0.92)
     eq(embedded.backgroundColor[1], theme.colors.embedded[1] * 2.1)
     local button = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(button, "button")
@@ -4320,13 +4333,13 @@ test("theme surface roles keep window, embedded, button, HUD and chat apart", fu
     local hud = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(hud, "hud")
     eq(hud.backdrop.edgeFile, nil)
-    eq(hud.backgroundColor[4], 0.62)
+    eq(hud.backgroundColor[4], 0.80)
     local chat = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(chat, "chat")
-    eq(chat.backgroundColor[4], 0.25)
+    eq(chat.backgroundColor[4], 0.82)
     local active = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(active, "chatActive")
-    eq(active.backgroundColor[4], 0.75)
+    eq(active.backgroundColor[4], 0.90)
     eq(active.backdrop.bgFile, theme.white)
     -- The window and the embedded region differ in colour and edge, and the
     -- button is the brightest of the three.
@@ -4390,7 +4403,7 @@ test("legacy panel and text APIs keep their old contract", function()
     -- The legacy opacity does not leak into the semantic roles.
     local hud = H.NewFrame(nil, UIParent, "BackdropTemplate")
     theme:PaintSurface(hud, "hud")
-    eq(hud.backgroundColor[4], 0.62)
+    eq(hud.backgroundColor[4], 0.80)
     eq(#app.errors, 0)
 end)
 
@@ -4407,16 +4420,16 @@ test("settings window, HUD strips, chat and roles repaint from their tokens", fu
     eq(app.Settings.navigation.modules.lumaSurfaceRole, "button")
     -- HUD supports use the HUD role instead of the window opacity.
     eq(app.components.dataStrip.frame.lumaSurfaceRole, "hud")
-    eq(app.components.dataStrip.frame.lumaPlate.vertexColor[4], 0.62)
+    eq(app.components.dataStrip.frame.lumaPlate.vertexColor[4], 0.80)
     eq(app.components.dataStrip.zone.lumaTypeRole, "body")
     eq(app.components.experience.frame.lumaSurfaceRole, "hud")
     -- Chat: quiet support while reading, stronger backdrop while typing.
     local chat = app.components.chat.windows[1]
     eq(chat.background.lumaSurfaceRole, "chat")
-    eq(chat.background.lumaPlate.vertexColor[4], 0.25)
+    eq(chat.background.lumaPlate.vertexColor[4], 0.82)
     ChatFrame1EditBox:Show()
     eq(chat.editBackground.lumaSurfaceRole, "chatActive")
-    eq(chat.editBackground.lumaPlate.vertexColor[4], 0.75)
+    eq(chat.editBackground.lumaPlate.vertexColor[4], 0.90)
     ChatFrame1EditBox:Hide()
     -- Profile changes repaint the cached surfaces from their own token.
     app.Store:Set("appearance", "windowOpacity", 0.8)
@@ -5178,7 +5191,7 @@ test("general page exposes role opacities and reduced motion", function()
     -- Dragging only commits on release, so the stored value stays until then.
     windowRow.slider.scripts.OnMouseDown(windowRow.slider)
     windowRow.slider:SetValue(0.75)
-    eq(app.Store:Profile().appearance.windowOpacity, 0.96)
+    eq(app.Store:Profile().appearance.windowOpacity, 0.92)
     windowRow.slider.scripts.OnMouseUp(windowRow.slider)
     eq(app.Store:Profile().appearance.windowOpacity, 0.75)
     local reduceRow = find(app.L.reduceMotion)
@@ -5713,7 +5726,7 @@ test("the button sample and the bar panel stay independent", function()
     app.Store:Set("modules", "actionButtons", true)
     -- The bar frame art and the panel background are not part of this sample.
     eq(barArt.alpha, artAlpha)
-    eq(panel.backgroundColor[4], 0.62)
+    eq(panel.backgroundColor[4], 0.80)
     app.Store:Set("modules", "actionButtons", false)
     eq(panel:IsShown(), true)
     eq(#app.errors, 0)
@@ -5812,14 +5825,14 @@ test("party frames are one layout group item", function()
     eq(member.member, true)
     eq(member.groupId, "party")
     eq(member.frame.parent, group.frame)
-    -- The container default is the centre of the old absolute block.
-    eq(group.x, -270)
-    eq(group.y, -375)
+    -- Pearl puts the party block on the left edge, level with the unit bars.
+    eq(group.x, -530)
+    eq(group.y, -120)
     eq(group.frame:GetWidth(), 190)
     eq(group.frame:GetHeight(), 196)
     eq(member.rx, 0)
     eq(member.ry, 75)
-    eq(app.Layout.entries.party_party3.ry, -25)
+    eq(app.Layout.entries.party_party3.ry, -23)
     -- Moving the group moves every member with it.
     app.Store:SetPosition("party", 120, -40)
     app.Layout:ApplyAll()
@@ -5841,34 +5854,35 @@ test("old absolute party positions convert once into group offsets", function()
     H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "partyFrames", true)
     local member = app.Layout.entries.party_party2
-    -- -200 - (-270) = 70 ; -320 - (-375) = 55
-    eq(member.rx, 70)
-    eq(member.ry, 55)
+    -- -200 - (-530) = 330 ; -320 - (-120) = -200
+    eq(member.rx, 330)
+    eq(member.ry, -200)
     -- The old absolute key stays; the migration offset is persisted next to it.
     eq(app.Store:Profile().positions.party_party2.x, -200)
-    eq(app.Store:Profile().positions["party|party_party2"].x, 70)
+    eq(app.Store:Profile().positions["party|party_party2"].x, 330)
     app.Store:SetPosition("party", 0, 0)
     app.Layout:ApplyAll()
-    eq(member.frame.point[4], 70)
-    eq(member.frame.point[5], 55)
+    eq(member.frame.point[4], 330)
+    eq(member.frame.point[5], -200)
     eq(#app.errors, 0)
 end)
 
-test("the information strip and experience bar share one top group", function()
+test("the information strip owns the bottom bar while experience stays on top", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
-    local group = app.Layout.entries.topInfo
+    local group = app.Layout.entries.bottomBar
     eq(group.group, true)
-    eq(group.label, app.L.topInfoGroup)
+    eq(group.label, app.L.bottomBar)
     local strip = app.Layout.entries.dataStrip
     local xp = app.Layout.entries.experience
     eq(strip.member, true)
-    eq(strip.groupId, "topInfo")
+    eq(strip.groupId, "bottomBar")
     eq(xp.groupId, "topInfo")
     eq(strip.rx, 0)
-    eq(strip.ry, 17)
+    eq(strip.ry, 0)
     eq(xp.ry, -17)
     eq(strip.frame.parent, group.frame)
-    eq(xp.frame.parent, group.frame)
+    local top = app.Layout.entries.topInfo
+    eq(xp.frame.parent, top.frame)
     for _, id in ipairs(app.Layout:IDs()) do
         eq(id ~= "dataStrip", true)
         eq(id ~= "experience", true)
@@ -5878,17 +5892,17 @@ end)
 
 test("a missing group container falls back to absolute positions", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
-    local member = app.Layout.entries.dataStrip
+    local member = app.Layout.entries.experience
     local group = app.Layout.entries.topInfo
     group.frame = nil
-    app.Store:SetPosition("dataStrip", 40, 60)
+    app.Store:SetPosition("experience", 40, 60)
     eq(pcall(app.Layout.ApplyAll, app.Layout), true)
     eq(member.frame.point[1], "CENTER")
     eq(member.frame.point[2], UIParent)
     eq(member.frame.point[4], 40)
     eq(member.frame.point[5], 60)
     -- A missing member frame is skipped instead of failing the pass.
-    app.Layout.entries.experience.frame = nil
+    app.Layout.entries.dataStrip.frame = nil
     eq(pcall(app.Layout.ApplyAll, app.Layout), true)
     eq(#app.errors, 0)
 end)
@@ -5996,8 +6010,8 @@ test("combat preset keeps unit frames close to the action area on wide screens",
     local playerOverlay = app.Layout.presetOverlays.unit_player
     local targetOverlay = app.Layout.presetOverlays.unit_target
     local firstX = playerOverlay.point[4]
-    eq(firstX, -409)
-    eq(targetOverlay.point[4], 409)
+    eq(firstX, -386)
+    eq(targetOverlay.point[4], 386)
     UIParent:SetSize(3440, 1440)
     H.Fire("DISPLAY_SIZE_CHANGED")
     eq(playerOverlay.point[4], firstX)
@@ -6409,8 +6423,8 @@ test("party buttons reserve one native private aura anchor per aura index", func
             eq(args.iconInfo.iconHeight, 12)
         end
     end
-    -- Allocated anchors do not establish encounter parity.
-    eq(PartyFrame:IsShown(), true)
+    -- Complete anchor coverage takes the native display down.
+    eq(PartyFrame:IsShown(), false)
     -- A member leaving releases only that member's slots; the rest stay.
     local saved = UnitExists
     _G.UnitExists = function(token) return token ~= "party2" end
@@ -6693,7 +6707,7 @@ test("private auras stay a documented gap instead of guessed anchors", function(
     eq(#app.errors, 0)
 end)
 
-test("both native party displays stay available", function()
+test("both native party displays are taken over while covered", function()
     local app = H.Load()
     local native = H.NewFrame("CompactPartyFrame", UIParent)
     native:Show()
@@ -6701,11 +6715,11 @@ test("both native party displays stay available", function()
     eq(native:IsShown(), true)
     app.Store:Set("modules", "partyFrames", true)
     -- Raid-style party frames live on CompactPartyFrame, not PartyFrame.
-    eq(native:IsShown(), true)
-    eq(PartyFrame:IsShown(), true)
-    -- The client retains control of its visibility.
+    eq(native:IsShown(), false)
+    eq(PartyFrame:IsShown(), false)
+    -- A client Show is re-hidden while coverage holds.
     native:Show()
-    eq(native:IsShown(), true)
+    eq(native:IsShown(), false)
     app.Store:Set("modules", "partyFrames", false)
     eq(native:IsShown(), true)
     eq(PartyFrame:IsShown(), true)
@@ -6748,7 +6762,7 @@ test("exactly one clock shows and the choice survives a reload", function()
     eq(minimap.clock:IsShown(), false)
     app.Store:Set("ui", "clock", "minimap")
     eq(strip.clock:IsShown(), false)
-    eq(strip.segments.clock:IsShown() ~= false, true)
+    eq(strip.segments.clock:IsShown(), false)
     eq(minimap.clock:IsShown(), true)
     eq(minimap.clock:GetText(), "12:34")
     app.Store:Set("ui", "clock", "off")
@@ -6772,6 +6786,10 @@ end)
 test("the compact strip prints only the zone and time and reports the rest", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local strip = app.components.dataStrip
+    -- The full Pearl strip is the default; compact is a deliberate opt-in.
+    eq(app.Store:Profile().ui.stripCompact, false)
+    eq(strip.performance:IsShown(), true)
+    app.Store:Set("ui", "stripCompact", true)
     eq(app.Store:Profile().ui.stripCompact, true)
     eq(strip.zone:IsShown(), true)
     eq(strip.clock:IsShown(), true)
@@ -6979,6 +6997,9 @@ test("the settings page writes the one clock and strip mode through", function()
     end
     local compact = button(app.L.stripCompact)
     eq(compact ~= nil, true)
+    H.Click(compact)
+    eq(app.Store:Profile().ui.stripCompact, true)
+    eq(app.components.dataStrip.performance:IsShown(), false)
     H.Click(compact)
     eq(app.Store:Profile().ui.stripCompact, false)
     eq(app.components.dataStrip.performance:IsShown(), true)
@@ -8498,6 +8519,238 @@ test("the style sheet builds once, repaints and reuses its frame", function()
     eq(#app.errors, 0)
 end)
 
+
+test("Pearl is the default accent and one migration moves old profiles", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.Store:Profile().appearance.accent, "pearl")
+    local legacy = H.Load({ profiles = { Default = {
+        appearance = { accent = "ocean", hudOpacity = 0.62 },
+        ui = { stripCompact = true } } } })
+    H.Fire("PLAYER_LOGIN")
+    eq(legacy.Store:Profile().appearance.accent, "pearl")
+    eq(legacy.Store:Profile().appearance.hudOpacity, 0.80)
+    eq(legacy.Store:Profile().ui.stripCompact, false)
+    eq(legacy.Store:Profile().modules.unitFrames, true)
+    eq(legacy.Store:Profile().modules.actionBars, true)
+    eq(legacy.Store:Profile().ui.takeoverUnitFrames, true)
+    eq(LumaUIDB.migrations.pearlBatch, true)
+    eq(LumaUIDB.migrations.actionBars, true)
+    local again = H.Load(LumaUIDB); H.Fire("PLAYER_LOGIN")
+    eq(again.Store:Profile().appearance.accent, "pearl")
+    eq(#again.errors, 0)
+end)
+
+test("surface aliases resolve to the one Theme role table", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local card = app.Surface:Role("card")
+    local window = app.Theme.surfaceRoles.window
+    eq(card.color, window.color)
+    eq(card.opacity, window.opacity)
+    local inset, resolved = app.Surface:Role("embedded")
+    eq(resolved, "inset")
+    eq(inset.color, "embedded")
+    eq(inset.opacity, "windowOpacity")
+    eq(#app.errors, 0)
+end)
+
+test("the Pearl visual replacements are on for a fresh profile", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    H.Fire("PLAYER_LOGIN")
+    local profile = app.Store:Profile()
+    eq(profile.modules.unitFrames, true)
+    eq(profile.modules.partyFrames, true)
+    eq(profile.modules.nameplates, true)
+    eq(profile.modules.actionBars, true)
+    eq(profile.ui.takeoverUnitFrames, true)
+    eq(app.components.unitFrames.running, true)
+    eq(app.components.partyFrames.running, true)
+    eq(app.components.nameplates.running, true)
+    eq(app.components.actionBars.running, true)
+    eq(app.components.unitFrames.takeover.units, true)
+    eq(PlayerFrame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("action bars stack at the centre and restore on disable", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2.actionButtons = { H.NewFrame("MultiBarBottomLeftButton1", bar2) }
+    local bar3 = H.NewFrame("MultiBarBottomRight", UIParent)
+    bar3.actionButtons = { H.NewFrame("MultiBarBottomRightButton1", bar3) }
+    local button = MainActionBar.actionButtons[1]
+    local countdown = H.NewFrame(nil, button)
+    countdown:SetFont("Fonts/Mock.ttf", 10)
+    local cooldown = H.NewFrame(nil, button)
+    cooldown.GetCountdownFontString = function() return countdown end
+    cooldown.SetHideCountdownNumbers = function(self, hide) self.hideNumbers = hide end
+    button.cooldown = cooldown
+    H.Fire("PLAYER_LOGIN")
+
+    eq(MainActionBar.point[1], "BOTTOM")
+    eq(MainActionBar.point[2], UIParent)
+    eq(MainActionBar.point[4], 0)
+    eq(MainActionBar.point[5], 56)
+    eq(bar2.point[1], "BOTTOM")
+    eq(bar2.point[2], MainActionBar)
+    eq(bar2.point[4], 0)
+    eq(bar2.point[5], 4)
+    eq(bar3.point[2], bar2)
+    eq(MainActionBar.alpha, 0)
+    eq(bar2.alpha, 0)
+    eq(bar3.alpha, 0)
+    eq(cooldown.hideNumbers, false)
+    eq(countdown.fontSize, 13)
+    eq(countdown.point[1], "CENTER")
+    eq(countdown.point[2], button)
+
+    _G.MouseIsOver = function() return true end
+    H.Advance(0.35)
+    eq(MainActionBar.alpha > 0.5, true)
+    _G.MouseIsOver = function() return false end
+    H.now = H.now + 2
+    H.Advance(1.6)
+    eq(MainActionBar.alpha < 0.1, true)
+    _G.MouseIsOver = nil
+
+    app.Store:Set("modules", "actionBars", false)
+    eq(MainActionBar.alpha, 1)
+    eq(MainActionBar.point, nil)
+    eq(countdown.fontSize, 10)
+    eq(#app.errors, 0)
+end)
+
+test("action bars skin every bar once and hand the buttons back on disable", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    local button2 = H.NewFrame("MultiBarBottomLeftButton1", bar2)
+    button2.icon = H.NewFrame(nil, button2)
+    button2.NormalTexture = H.NewFrame(nil, button2)
+    button2.SlotBackground = H.NewFrame(nil, button2)
+    button2.SlotArt = H.NewFrame(nil, button2)
+    button2.HotKey = H.NewFrame(nil, button2)
+    button2.Count = H.NewFrame(nil, button2)
+    bar2.actionButtons = { button2 }
+    local button = MainActionBar.actionButtons[1]
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.actionBars
+    eq(button.lumaActionBarSkin ~= nil, true)
+    eq(button2.lumaActionBarSkin ~= nil, true)
+    eq(component.skins[button], button.lumaActionBarSkin)
+    local entry = button.lumaActionBarSkin
+    -- A second layout must reuse the recorded entry instead of stacking one.
+    component:Refresh()
+    eq(button.lumaActionBarSkin, entry)
+    app.Store:Set("modules", "actionBars", false)
+    eq(button.lumaActionBarSkin, nil)
+    eq(button.icon.texCoord[1], 0)
+    eq(button.NormalTexture:GetAlpha(), 1)
+    eq(next(component.skins), nil)
+    eq(#app.errors, 0)
+end)
+
+test("the single-bar sample keeps the bar skin out of its way", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local sample = app.components.actionButtons
+    H.Fire("PLAYER_LOGIN")
+    local button = MainActionBar.actionButtons[1]
+    local component = app.components.actionBars
+    eq(button.lumaActionBarSkin ~= nil, true)
+    app.Store:Set("modules", "actionButtons", true)
+    eq(sample.running, true)
+    eq(button.lumaActionBarSkin, nil)
+    eq(button.lumaActionSkin ~= nil, true)
+    eq(next(component.skins), nil)
+    app.Store:Set("modules", "actionButtons", false)
+    eq(button.lumaActionSkin.border:IsShown(), false)
+    eq(app.components.actionBars.running, true)
+    eq(button.lumaActionBarSkin ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the cooldown manager viewers are stacked above the bars and put back", function()
+    local app = H.Load()
+    local essential = H.NewFrame("EssentialCooldownViewer", UIParent)
+    essential:SetPoint("CENTER", UIParent, "CENTER", 111, 222)
+    local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
+    utility:Hide()
+    local buffs = H.NewFrame("BuffIconCooldownViewer", UIParent)
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.cooldownViewer
+    eq(component.running, true)
+    -- Bottom to top: skill rows hug the bars, the tracked buff icons on top.
+    eq(essential.point[1], "BOTTOM")
+    eq(essential.point[2], _G.MultiBarBottomRight or MainActionBar)
+    eq(essential.point[5], 4)
+    eq(utility.point[2], essential)
+    eq(_G.BuffBarCooldownViewer.point[2], utility)
+    eq(buffs.point[2], _G.BuffBarCooldownViewer)
+    -- A viewer that was hidden for the player is shown while the component runs.
+    eq(utility:IsShown(), true)
+
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(essential.point[1], "CENTER")
+    eq(essential.point[4], 111)
+    eq(essential.lumaCooldownViewerOriginal, nil)
+    eq(utility:IsShown(), false)
+    eq(#app.errors, 0)
+    -- These globals outlive one H.Load; drop them so the next case starts from
+    -- a client without cooldown viewers.
+    _G.EssentialCooldownViewer, _G.UtilityCooldownViewer = nil, nil
+    _G.BuffIconCooldownViewer, _G.BuffBarCooldownViewer = nil, nil
+end)
+
+test("the cooldown manager placement stays off without native viewers", function()
+    local app = H.Load()
+    -- A client build without the Cooldown Manager has none of these globals.
+    _G.EssentialCooldownViewer, _G.UtilityCooldownViewer = nil, nil
+    _G.BuffIconCooldownViewer, _G.BuffBarCooldownViewer = nil, nil
+    H.Fire("PLAYER_LOGIN")
+    eq(app.components.cooldownViewer.running == true, false)
+    eq(app.components.cooldownViewer.status, "unsupported")
+    eq(#app.errors, 0)
+end)
+
+test("a target change cannot bring a suppressed native frame back", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    eq(app.components.unitFrames.takeover.units, true)
+    eq(TargetFrame:IsShown(), false)
+    -- The client re-shows TargetFrame on every target change; the OnShow hook
+    -- must keep the replacement single.
+    TargetFrame:Show()
+    eq(TargetFrame:IsShown(), false)
+    app.Store:Set("ui", "takeoverUnitFrames", false)
+    TargetFrame:Show()
+    eq(TargetFrame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("bottom strip reads durability and bag counts on its own tick", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local strip = app.components.dataStrip
+    H.durability = { [1] = { 40, 100 }, [16] = { 90, 100 } }
+    H.Fire("UPDATE_INVENTORY_DURABILITY")
+    eq(strip.durability:GetText():find("40%", 1, true) ~= nil, true)
+    eq(strip.bags:GetText():find("6/12", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
 
 print(string.format("%d/%d tests passed", passed, total))
 if passed ~= total then os.exit(1) end

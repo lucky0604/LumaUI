@@ -3,9 +3,9 @@ local StyleSheet = {}
 app.StyleSheet = StyleSheet
 
 -- One card that paints every surface role, type role, bar role and control state
--- side by side. Restyling real components before looking at this would be guessing:
--- the whole point is to compare the palette, the corners and the type scale against
--- a reference screenshot on a single frame, then decide numbers once.
+-- side by side. It is the in-client proof of the Pearl tokens: the palette,
+-- corners and type scale are adjusted here once, then every component reads the
+-- same role instead of comparing itself to an external screenshot.
 local WIDTH, HEIGHT, PAD = 660, 580, 18
 local COLUMNS = 3
 

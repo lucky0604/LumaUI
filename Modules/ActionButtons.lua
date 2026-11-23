@@ -211,6 +211,11 @@ end
 local function skinButton(self, button)
     if not accessible(button) or type(button.CreateTexture) ~= "function" or type(button.HookScript) ~= "function" then return false end
     if not accessible(button.icon) then return false end
+    -- Release a skin another LumaUI component may already own so the values
+    -- recorded below are the client's own, not a predecessor's leftovers.
+    if app.ActionButtonSkin and button.lumaActionBarSkin then
+        pcall(app.ActionButtonSkin.Restore, app.ActionButtonSkin, button)
+    end
     local entry = record(self.originals, button)
     if not entry.icon then
         self.originals[button] = nil

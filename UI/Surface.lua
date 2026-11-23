@@ -26,17 +26,31 @@ Surface.media = MEDIA
 
 -- Surface roles name a purpose, never a colour: the colour token and the opacity
 -- token are resolved on every paint so a theme or profile change needs no rebuild.
--- Only "card" carries a shadow; a shadow on everything is what turns a layout into
--- a pile of floating boxes.
-local ROLES = {
-    card = { color = "surface", opacity = "windowOpacity", shadow = true },
-    raised = { color = "raised", opacity = "windowOpacity" },
-    inset = { color = "embedded", opacity = "windowOpacity" },
-    hud = { color = "surface", opacity = "hudOpacity" },
-    chat = { color = "surface", opacity = "chatOpacity" },
-    chatActive = { color = "raised", opacity = "chatActiveOpacity" },
+-- Both surface APIs now read the same role table in Theme; the old backdrop names
+-- are aliases instead of a second palette. Only "card" carries a shadow; a shadow
+-- on everything is what turns a layout into a pile of floating boxes.
+local ALIASES = {
+    card = "window", raised = "button", inset = "embedded",
+    hud = "hud", chat = "chat", chatActive = "chatActive",
 }
+local ROLES = {}
+for name, alias in pairs(ALIASES) do
+    local spec = app.Theme.surfaceRoles[alias]
+    ROLES[name] = {
+        color = spec.color,
+        opacity = spec.opacity,
+        shadow = name == "card",
+    }
+end
 Surface.roles = ROLES
+Surface.aliases = ALIASES
+local CANONICAL = { window = "card", button = "raised", embedded = "inset" }
+Surface.canonical = CANONICAL
+
+function Surface:Role(name)
+    local resolved = CANONICAL[name] or name
+    return ROLES[resolved] or ROLES.card, resolved
+end
 
 -- Feature test once per session. The slice API is the one capability the whole
 -- surface language rests on, so it is probed on a real texture rather than assumed
@@ -108,7 +122,8 @@ end
 -- away from the rest of the UI. Returns true when the shape is a real nine-slice.
 function Surface:ApplyPlate(texture, roleName)
     if not texture then return false end
-    local name = ROLES[roleName] and roleName or "card"
+    local resolved = CANONICAL[roleName] or roleName
+    local name = ROLES[resolved] and resolved or "card"
     local role = ROLES[name]
     local sliced = false
     if self:CanSlice() then
@@ -138,7 +153,8 @@ end
 
 function Surface:Plate(frame, roleName)
     if not frame or type(frame.CreateTexture) ~= "function" then return frame end
-    local name = ROLES[roleName] and roleName or "card"
+    local resolved = CANONICAL[roleName] or roleName
+    local name = ROLES[resolved] and resolved or "card"
     local role = ROLES[name]
 
     if role.shadow and self:CanSlice() then

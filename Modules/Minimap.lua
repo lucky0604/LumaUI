@@ -39,6 +39,7 @@ end
 local function setShown(self, shown)
     if self.panel then self.panel:SetShown(shown) end
     if self.edge then self.edge:SetShown(shown) end
+    if self.zonePlate then self.zonePlate:SetShown(shown) end
 end
 
 local function style(self)
@@ -86,11 +87,11 @@ local function style(self)
 end
 
 local function updateInfo(self)
-    -- One clock for the whole UI. The strip owns it unless this profile asked
-    -- for the minimap panel; with "off" neither LumaUI surface prints the time
-    -- and the native calendar entry stays the only clock.
-    local placement = app.Store:Profile().ui.clock
-    local showClock = placement == "minimap"
+    -- Pearl keeps the minimap itself clean by default: time and coordinates
+    -- live on the bottom strip, and the panel carries only the zone label. The
+    -- explicit "minimap" clock choice still brings the small readout back.
+    local profile = app.Store and app.Store:Profile()
+    local showClock = profile ~= nil and profile.ui.clock == "minimap"
     if self.clock then
         local hour, minute = GetGameTime()
         self.clock:SetFormattedText("%02d:%02d", hour, minute)
@@ -108,8 +109,6 @@ local function updateInfo(self)
         y = app.Capabilities.Plain(y, "number")
         if x and y then
             self.coords:SetFormattedText("%.0f, %.0f", x * 100, y * 100)
-            self.coords:Show()
-            return
         end
     end
     self.coords:Hide()
@@ -141,6 +140,18 @@ local function build(self)
     self.rule = panel:CreateTexture(nil, "ARTWORK")
     self.rule:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 6, 3)
     self.rule:SetWidth(24)
+
+    -- The zone name sits on its own quiet band under the square map, as in the
+    -- visual target; the native FontString keeps the text and its click target.
+    if _G.MinimapZoneText then
+        local zonePlate = CreateFrame("Frame", "LumaUIMinimapZone", UIParent, "BackdropTemplate")
+        zonePlate:SetFrameStrata("LOW")
+        zonePlate:EnableMouse(false)
+        zonePlate:SetPoint("TOPLEFT", MinimapZoneText, "TOPLEFT", -10, 5)
+        zonePlate:SetPoint("BOTTOMRIGHT", MinimapZoneText, "BOTTOMRIGHT", 10, -5)
+        app.Surface:Plate(zonePlate, "hud")
+        self.zonePlate = zonePlate
+    end
 
     local edge = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
     edge:SetFrameStrata("MEDIUM")
@@ -193,6 +204,7 @@ module = app:RegisterComponent({ id = "minimap", label = "minimap",
             compass:Hide()
         end
         if self.useCoords then hideNativeCoords(self) end
+        if self.zonePlate then self.zonePlate:Show() end
         style(self)
         updateInfo(self)
         self:Every(1, updateInfo)

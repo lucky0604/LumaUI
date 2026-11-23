@@ -8,14 +8,6 @@ local module
 
 local TRACKERS = { "QuestObjectiveTracker", "CampaignQuestObjectiveTracker" }
 
-local function levelOf(questID)
-    local log = _G.C_QuestLog
-    if type(log) ~= "table" or type(log.GetQuestDifficultyLevel) ~= "function" then return nil end
-    local ok, level = pcall(log.GetQuestDifficultyLevel, questID)
-    if not ok then return nil end
-    return app.Capabilities.Plain(level, "number")
-end
-
 local function eachBlock(visit)
     for _, name in ipairs(TRACKERS) do
         local tracker = _G[name]
@@ -45,11 +37,11 @@ local function styleBlock(self, block)
     if not self.running or type(block) ~= "table" then return end
     local header = block.HeaderText
     if not header or block.isHighlighted then return end
-    local questID = app.Capabilities.Plain(block.id, "number")
-    if not questID then return end
-    local red, green, blue = app.Theme:QuestColor(levelOf(questID))
-    if not red then return end
-    header:SetTextColor(red, green, blue)
+    -- Pearl uses one amber-gold for every quest title; difficulty still comes
+    -- from the level number and the native objective text, not a rainbow of
+    -- header colours.
+    local accent = app.Theme:Accent()
+    header:SetTextColor(accent[1], accent[2], accent[3])
     if not block.lumaStyled and type(block.UpdateHighlight) == "function" and type(hooksecurefunc) == "function" then
         -- Native hover repaints the header white; leaving it should return to
         -- the difficulty color instead of the default header color.
@@ -90,11 +82,7 @@ local function install(self)
 end
 
 module = app:RegisterComponent({ id = "questTracker", label = "questTracker",
-    Supported = function()
-        return _G.ObjectiveTrackerFrame ~= nil
-            and type(_G.C_QuestLog) == "table"
-            and type(_G.C_QuestLog.GetQuestDifficultyLevel) == "function"
-    end,
+    Supported = function() return _G.ObjectiveTrackerFrame ~= nil end,
     Enable = install,
     Refresh = paint,
     Disable = restore,

@@ -67,17 +67,42 @@ local function writeValue(control, value)
     control:SetFormattedText("%d", value)
 end
 
+-- The Pearl target prints a percentage instead of a raw health number. The
+-- client evaluates UnitHealthPercent and may return a secret; the value goes
+-- straight into SetFormattedText, never through Lua arithmetic or comparison.
+local function writeHealthPercent(control, unit)
+    if not control then return end
+    if type(UnitHealthPercent) ~= "function" then
+        control:SetText("")
+        return
+    end
+    local curve = type(CurveConstants) == "table" and CurveConstants.ScaleTo100 or nil
+    local ok, percent = pcall(UnitHealthPercent, unit, true, curve)
+    if not ok then
+        control:SetText("")
+        return
+    end
+    -- Check secrecy before any comparison: a secret may not be tested against nil.
+    if not app.Capabilities.IsSecret(percent) and percent == nil then
+        control:SetText("")
+        return
+    end
+    local written = pcall(control.SetFormattedText, control, "%.1f%%", percent)
+    if not written then control:SetText("") end
+end
+
 local bars = {
     id = "bars",
     available = barsAvailable,
     events = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_NAME_UPDATE",
         "UNIT_DISPLAYPOWER", "UNIT_FLAGS", "UNIT_CONNECTION" },
     create = function(frame)
+        local U = app.Theme.units
         frame.name = app.Type:Text(frame, "body")
-        frame.name:SetPoint("TOPLEFT", 10, -9)
-        frame.name:SetWidth(138)
+        frame.name:SetPoint("TOPLEFT", 0, 0)
+        frame.name:SetWidth(U.width - 72)
         frame.name:SetWordWrap(false)
-        frame.name:SetFont(app.Type:Face(), 12, "OUTLINE")
+        frame.name:SetFont(app.Type:Face(), U.nameSize, "OUTLINE")
         -- Without a panel behind it the name floats over the world; a shadow
         -- keeps it readable on bright ground.
         if type(frame.name.SetShadowOffset) == "function" then
@@ -86,27 +111,42 @@ local bars = {
         if type(frame.name.SetShadowColor) == "function" then
             pcall(frame.name.SetShadowColor, frame.name, 0, 0, 0, 0.85)
         end
-        frame.health = app.Theme:Bar(frame, 9)
-        frame.health:SetPoint("TOPLEFT", 10, -26)
-        frame.health:SetPoint("TOPRIGHT", -10, -26)
         frame.value = app.Type:Text(frame, "body")
-        frame.value:SetFont(app.Type:Face(), 11, "OUTLINE")
-        frame.value:SetPoint("TOPRIGHT", -10, -9)
-        frame.value:SetWidth(72)
+        frame.value:SetFont(app.Type:Face(), U.nameSize, "OUTLINE")
+        frame.value:SetPoint("TOPRIGHT", 0, 0)
+        frame.value:SetWidth(64)
         frame.value:SetJustifyH("RIGHT")
         frame.value:SetWordWrap(false)
+        frame.health = app.Theme:Bar(frame, U.health)
+        frame.health:SetPoint("TOPLEFT", 0, -U.nameRow)
+        frame.health:SetPoint("TOPRIGHT", 0, -U.nameRow)
+        -- A one-pixel Pearl edge keeps the health strip readable over bright
+        -- world textures without turning the whole unit frame into a card.
+        frame.healthEdge = CreateFrame("Frame", nil, frame.health, "BackdropTemplate")
+        frame.healthEdge:SetPoint("TOPLEFT", -1, 1)
+        frame.healthEdge:SetPoint("BOTTOMRIGHT", 1, -1)
+        frame.healthEdge:EnableMouse(false)
+        frame.healthEdge:SetBackdrop({
+            edgeFile = app.Theme.white,
+            edgeSize = app.Pixel:Pixels(1, frame.healthEdge),
+        })
+        frame.healthEdge:SetBackdropBorderColor(0.02, 0.03, 0.05, 0.78)
         -- Death and disconnection are part of the native frame; the preview says
         -- so on the bar instead of silently showing a full health bar.
-        frame.statusText = app.Theme:Text(frame.health, 11)
+        frame.statusText = app.Theme:Text(frame.health, 9)
         frame.statusText:SetPoint("CENTER")
         frame.statusText:SetText("")
-        frame.power = app.Theme:Bar(frame, 3)
-        frame.power:SetPoint("TOPLEFT", 10, -39)
-        frame.power:SetPoint("TOPRIGHT", -10, -39)
+        frame.power = app.Theme:Bar(frame, U.power)
+        frame.power:SetPoint("TOPLEFT", 0, -(U.nameRow + U.health + U.powerGap))
+        frame.power:SetPoint("TOPRIGHT", 0, -(U.nameRow + U.health + U.powerGap))
         frame.power:SetStatusBarColor(0.40, 0.58, 0.84)
         frame.powerValue = app.Type:Text(frame, "micro")
-        frame.powerValue:SetFont(app.Type:Face(), 10, "OUTLINE")
-        frame.powerValue:SetPoint("TOPRIGHT", -10, -45)
+        frame.powerValue:SetFont(app.Type:Face(), 9, "OUTLINE")
+        frame.powerValue:SetPoint("TOPRIGHT", 0, -(U.nameRow + U.health + U.powerGap + 1))
+        frame.powerValue:SetText("")
+        -- The Pearl frames show health percent only; the power number stays
+        -- available for diagnostics but does not add a second line of ink.
+        frame.powerValue:Hide()
     end,
     draw = function(frame)
         local unit = frame.unitToken
@@ -115,7 +155,7 @@ local bars = {
         -- Secret values go straight to native drawing methods, without Lua arithmetic.
         frame.health:SetMinMaxValues(0, UnitHealthMax(unit))
         frame.health:SetValue(UnitHealth(unit))
-        writeValue(frame.value, UnitHealth(unit))
+        writeHealthPercent(frame.value, unit)
         -- Health fills with the unit's class or reaction pair; the power bar
         -- with its power type's pair. Both bases come from public unit
         -- identity APIs, never from the secret health or power values.
@@ -176,22 +216,22 @@ end
 
 local function readCast(unit)
     if type(UnitCastingInfo) == "function" then
-        local ok, name, _, _, startTime, endTime, _, _, notInterruptible, spellID =
+        local ok, name, _, texture, startTime, endTime, _, _, notInterruptible, spellID =
             pcall(UnitCastingInfo, unit)
         if ok and name then
             return {
-                name = name, startTime = startTime, endTime = endTime,
+                name = name, texture = texture, startTime = startTime, endTime = endTime,
                 notInterruptible = notInterruptible, channel = false,
                 empowered = isEmpoweredSpell(spellID),
             }
         end
     end
     if type(UnitChannelInfo) == "function" then
-        local ok, name, _, _, startTime, endTime, _, notInterruptible, _, isEmpowered =
+        local ok, name, _, texture, startTime, endTime, _, notInterruptible, _, isEmpowered =
             pcall(UnitChannelInfo, unit)
         if ok and name then
             return {
-                name = name, startTime = startTime, endTime = endTime,
+                name = name, texture = texture, startTime = startTime, endTime = endTime,
                 notInterruptible = notInterruptible, channel = true,
                 empowered = app.Capabilities.Plain(isEmpowered, "boolean") == true,
             }
@@ -202,7 +242,7 @@ end
 local cast = {
     id = "cast",
     available = castAvailable,
-    height = 14,
+    height = 16,
     events = {
         "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_DELAYED",
         "UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_FAILED_QUIET",
@@ -211,12 +251,18 @@ local cast = {
         "UNIT_SPELLCAST_EMPOWER_START", "UNIT_SPELLCAST_EMPOWER_UPDATE", "UNIT_SPELLCAST_EMPOWER_STOP",
     },
     create = function(frame)
-        frame.cast = app.Theme:Bar(frame, 6)
-        frame.cast:SetPoint("TOPLEFT", 10, -62)
-        frame.cast:SetPoint("TOPRIGHT", -10, -62)
-        frame.castName = app.Theme:Text(frame.cast, 10)
-        frame.castName:SetPoint("LEFT", 4, 0)
-        frame.castTime = app.Theme:Text(frame.cast, 10)
+        local U = app.Theme.units
+        local y = -(U.nameRow + U.health + U.power + U.castGap)
+        frame.cast = app.Theme:Bar(frame, U.cast)
+        frame.cast:SetPoint("TOPLEFT", 0, y)
+        frame.cast:SetPoint("TOPRIGHT", 0, y)
+        frame.castIcon = frame.cast:CreateTexture(nil, "OVERLAY")
+        frame.castIcon:SetSize(U.cast, U.cast)
+        frame.castIcon:SetPoint("LEFT", 1, 0)
+        frame.castIcon:SetTexture(app.Theme.white)
+        frame.castName = app.Theme:Text(frame.cast, 9)
+        frame.castName:SetPoint("LEFT", U.cast + 3, 0)
+        frame.castTime = app.Theme:Text(frame.cast, 9)
         frame.castTime:SetPoint("RIGHT", -4, 0)
         frame.cast:Hide()
     end,
@@ -237,6 +283,14 @@ local cast = {
         if not info then hideCast(); return end
         -- Even a restricted spell name is only ever sent to SetText.
         frame.castName:SetText(info.name)
+        if frame.castIcon then
+            if info.texture and not app.Capabilities.IsSecret(info.texture) then
+                frame.castIcon:SetTexture(info.texture)
+                frame.castIcon:Show()
+            else
+                frame.castIcon:Hide()
+            end
+        end
         -- Progress and remaining time are public cast times; restricted or
         -- missing numbers leave the bar empty with only the spell name.
         local startValue = app.Capabilities.Plain(info.startTime, "number")
@@ -428,12 +482,17 @@ local auras = {
     events = { "UNIT_AURA" },
     create = function(frame)
         frame.auraIcons = {}
+        local U = app.Theme.units
         -- Below the cast bar when that part exists, otherwise below power.
-        local anchor = frame.cast and -72 or -62
+        local anchor = -(U.nameRow + U.health + U.power + U.auraGap)
+        if frame.cast then anchor = anchor - U.cast - U.castGap end
+        -- The whole row is centred under the bars, as in the Pearl target,
+        -- instead of growing from the left edge.
+        local startX = (U.width - (AURA_LIMIT - 1) * U.auraStep - U.aura) / 2
         for index = 1, AURA_LIMIT do
             local icon = frame:CreateTexture(nil, "ARTWORK")
-            icon:SetSize(16, 16)
-            icon:SetPoint("TOPLEFT", 12 + (index - 1) * 18, anchor)
+            icon:SetSize(U.aura, U.aura)
+            icon:SetPoint("TOPLEFT", startX + (index - 1) * U.auraStep, anchor)
             icon:SetTexture(app.Theme.white)
             icon:Hide()
             -- A border frame in the debuff's dispel colour, hidden by default.

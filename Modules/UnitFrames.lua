@@ -1,14 +1,16 @@
 local _, app = ...
--- The target-of-target preview sits below the target preview.
+local U = app.Theme.units
+-- Pearl layout: one compact bar pair flanking the action buttons, with the
+-- target-of-target directly under the target and focus/pet kept out of the way.
 local specs = {
-    { unit = "player", x = -270, y = -185, native = "PlayerFrame" },
-    { unit = "target", x = 270, y = -185, native = "TargetFrame" },
-    { unit = "targettarget", x = 270, y = -300, native = nil },
-    { unit = "focus", x = 420, y = 60, native = "FocusFrame" },
-    { unit = "pet", x = -270, y = -268, native = "PetFrame" },
+    { unit = "player", x = -250, y = -120, native = "PlayerFrame" },
+    { unit = "target", x = 250, y = -120, native = "TargetFrame" },
+    { unit = "targettarget", x = 250, y = -205, native = nil },
+    { unit = "focus", x = 420, y = 40, native = "FocusFrame" },
+    { unit = "pet", x = -250, y = -196, native = "PetFrame" },
 }
 
-local BASE_HEIGHT = 66
+local BASE_HEIGHT = U.nameRow + U.health + U.power + U.powerGap
 -- Part availability is diagnostic only; it does not prove native parity.
 local REPLACEMENT_PARTS = { "bars", "cast", "auras" }
 local FRAME_EVENTS = { "PLAYER_ENTERING_WORLD", "PLAYER_TARGET_CHANGED", "PLAYER_FOCUS_CHANGED", "UNIT_PET" }
@@ -59,7 +61,7 @@ end
 local function create(spec)
     local frame = CreateFrame("Button", "LumaUIUnit_" .. spec.unit, UIParent, "SecureUnitButtonTemplate,BackdropTemplate")
     frame:Hide()
-    frame:SetSize(246, BASE_HEIGHT)
+    frame:SetSize(U.width, BASE_HEIGHT)
     frame.unitToken = spec.unit
     frame.partsCreated = {}
     frame.events = CreateFrame("Frame")
@@ -139,11 +141,10 @@ local function activePartIds(parts)
     return set
 end
 
--- Capability probes establish what the preview can draw, but they do not
--- establish parity with the native frame (including private encounter auras).
--- The takeover switch is an explicit per-profile choice (/luma takeover), never
--- a default: hiding native unit frames is opt-in and reversible, and a missing
--- replacement part always wins back the native frame regardless of the switch.
+-- Capability probes establish what the replacement can draw. The Pearl batch
+-- enables the takeover by default; the per-profile switch stays reversible
+-- (/luma takeover), and a missing replacement part or private-aura API always
+-- wins the native frame back instead of leaving two copies on screen.
 local TAKEOVER_FRAMES = { "PlayerFrame", "TargetFrame", "FocusFrame", "PetFrame", "TargetFrameToT" }
 
 local function nativeFrameOf(name)
@@ -162,7 +163,31 @@ local function suppressNativeFrames(self)
         self.nativeShown = {}
         for _, name in ipairs(TAKEOVER_FRAMES) do
             local frame = nativeFrameOf(name)
-            if frame then self.nativeShown[name] = { shown = frameShown(frame) } end
+            if frame then
+                self.nativeShown[name] = { shown = frameShown(frame) }
+                -- Target/player frames are re-shown by the client on target
+                -- changes. A one-shot Hide leaves a second copy behind; the
+                -- hook keeps them down until takeover is switched off.
+                if not frame.lumaUnitHideHook and type(frame.HookScript) == "function" then
+                    frame.lumaUnitHideHook = true
+                    pcall(frame.HookScript, frame, "OnShow", function(shownFrame)
+                        local owner = component
+                        if not (owner and owner.running and owner.takeover
+                            and owner.takeover.units == true) then return end
+                        local function hide()
+                            if owner.running and owner.takeover
+                                and owner.takeover.units == true then
+                                pcall(shownFrame.Hide, shownFrame)
+                            end
+                        end
+                        if type(InCombatLockdown) == "function" and InCombatLockdown() then
+                            app.Queue:Run("unitFrames/native", hide)
+                        else
+                            hide()
+                        end
+                    end)
+                end
+            end
         end
     end
     self.nativeSuppressed = true
@@ -197,9 +222,9 @@ end
 local function applyTakeover(self)
     local missing = missingParts(self.parts)
     -- The switch reads the profile every evaluation, so /luma takeover applies
-    -- without an enable cycle. Parts missing or the private-aura anchor API
-    -- unavailable keep every native frame regardless of the switch: without
-    -- anchors an encounter's private auras would have nowhere to draw.
+    -- without an enable cycle. Missing parts or an unavailable private-aura
+    -- anchor API keep every native frame: without anchors an encounter's
+    -- private auras would have nowhere to draw.
     -- The native buff/debuff frames keep drawing the player's private auras;
     -- the client anchors them to PlayerFrame.unit, not to anything this
     -- preview draws, so hiding the player frame does not orphan them.
@@ -213,13 +238,27 @@ local function applyTakeover(self)
     else
         restoreNativeFrames(self)
     end
+    -- When takeover was requested but a part or the private-aura API is
+    -- missing, the preview must step aside instead of drawing a second set of
+    -- unit frames next to the native ones.
+    for _, frame in pairs(self.frames or {}) do
+        if wanted and not units then
+            if frame.lumaUnitWatched then
+                pcall(UnregisterUnitWatch, frame)
+                frame.lumaUnitWatched = nil
+            end
+            if frame:IsShown() then pcall(frame.Hide, frame) end
+        elseif not frame.lumaUnitWatched then
+            frame.lumaUnitWatched = pcall(RegisterUnitWatch, frame) or nil
+        end
+    end
     if #missing > 0 and not self.warnedMissing then
         self.warnedMissing = true
         app:Print(string.format(app.L.unitTakeoverKept, table.concat(missing, ", ")))
     end
 end
 
-component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames",
+component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", defaultEnabled = true,
     Supported = function(_, caps) return caps.units end,
     Enable = function(self)
         self.parts = app.UnitParts.Build()
@@ -234,7 +273,7 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames",
             end
             ensureParts(self.parts, frame)
             attachEvents(self.parts, frame, spec.unit)
-            RegisterUnitWatch(frame)
+            frame.lumaUnitWatched = pcall(RegisterUnitWatch, frame) or nil
             drawFrame(frame)
             applyHeight(self, frame)
         end
@@ -267,6 +306,7 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames",
         for _, frame in pairs(self.frames or {}) do
             frame.events:UnregisterAllEvents()
             UnregisterUnitWatch(frame)
+            frame.lumaUnitWatched = nil
             hidePartControls(frame)
             frame:Hide()
         end

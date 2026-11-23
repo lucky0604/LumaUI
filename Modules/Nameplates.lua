@@ -40,10 +40,44 @@ local function isForbidden(object)
     return ok and forbidden == true
 end
 
+-- A dark track and one hairline make the native bar read as a Pearl element
+-- without resizing or reparenting the plate. Both belong to the bar we record,
+-- and are hidden again when the target or the component goes away.
+local function decorate(bar)
+    local bg = bar.lumaNameplateBg
+    if not bg then
+        bg = bar:CreateTexture(nil, "BACKGROUND", nil, -7)
+        bar.lumaNameplateBg = bg
+    end
+    bg:ClearAllPoints()
+    bg:SetPoint("TOPLEFT", bar, "TOPLEFT", -2, 2)
+    bg:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 2, -2)
+    local color = app.Theme.colors.surface
+    bg:SetColorTexture(color[1], color[2], color[3], 0.82)
+    bg:Show()
+
+    local edge = bar.lumaNameplateEdge
+    if not edge then
+        edge = CreateFrame("Frame", nil, bar, "BackdropTemplate")
+        edge:SetPoint("TOPLEFT", bar, "TOPLEFT", -2, 2)
+        edge:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 2, -2)
+        edge:EnableMouse(false)
+        bar.lumaNameplateEdge = edge
+    end
+    edge:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, edge) })
+    local line = app.Theme.colors.line
+    edge:SetBackdropBorderColor(line[1], line[2], line[3], 0.9)
+    edge:Show()
+end
+
 -- Repaints the target plate's bar with the unit's gradient pair.
 local function paint(bar)
     if not bar then return end
+    if type(bar.SetStatusBarTexture) == "function" then
+        pcall(bar.SetStatusBarTexture, bar, app.Theme.media.bar)
+    end
     app.Theme:PaintBar(bar, app.Theme:UnitColor("target"))
+    decorate(bar)
 end
 
 local function remember(self, bar)
@@ -74,6 +108,8 @@ local function restore(self, bar)
         pcall(bar.SetStatusBarColor, bar, original.color[1], original.color[2],
             original.color[3], original.color[4])
     end
+    if bar.lumaNameplateBg then bar.lumaNameplateBg:Hide() end
+    if bar.lumaNameplateEdge then bar.lumaNameplateEdge:Hide() end
 end
 
 local function restoreAll(self)
@@ -99,7 +135,7 @@ local function apply(self)
     self.active = bar
 end
 
-component = app:RegisterComponent({ id = "nameplates", label = "nameplates", defaultEnabled = false,
+component = app:RegisterComponent({ id = "nameplates", label = "nameplates", defaultEnabled = true,
     Supported = function()
         local api = _G.C_NamePlate
         return type(api) == "table" and type(api.GetNamePlateForUnit) == "function"

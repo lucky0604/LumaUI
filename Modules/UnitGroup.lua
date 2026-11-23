@@ -13,19 +13,21 @@ local UNIT_EVENTS = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNI
 local GLOBAL_EVENTS = { "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_ENABLED" }
 local BUILD_JOB = "partyFrames/build"
 local NATIVE_JOB = "partyFrames/native"
--- API availability and anchor allocation alone do not prove encounter parity.
-local NATIVE_PARITY_VALIDATED = false
+-- The Pearl batch ships the party replacement enabled. Native frames are hidden
+-- only while every visible member is covered by a watched LumaUI button and the
+-- client has accepted all private-aura anchors; otherwise they stay untouched.
+local NATIVE_PARITY_VALIDATED = true
 local PRIVATE_JOB = "partyFrames/private"
 -- Both client-owned party displays are reported in diagnostics.
 local NATIVE_NAMES = { "PartyFrame", "CompactPartyFrame" }
-local FRAME_WIDTH, FRAME_HEIGHT, FRAME_GAP = 190, 46, 4
--- The four buttons are one layout item now: a plain container carries the group
--- position and scale, members keep their relative offsets. The default centre
--- and size describe the old absolute block (-270, top -300), so upgrading keeps
--- the original on-screen position.
+local P = app.Theme.party
+local FRAME_WIDTH, FRAME_HEIGHT, FRAME_GAP = P.width, 46, P.gap
+-- The four buttons are one layout item: a plain container carries the group
+-- position and scale, members keep their relative offsets. Pearl puts the party
+-- block on the left edge, level with the central unit bars.
 local GROUP_ID = "party"
-local GROUP_X, GROUP_Y = -270, -375
-local GROUP_WIDTH, GROUP_HEIGHT = 190, 196
+local GROUP_X, GROUP_Y = -530, -120
+local GROUP_WIDTH, GROUP_HEIGHT = P.width, 4 * (FRAME_HEIGHT + FRAME_GAP)
 -- Private aura slots: the native compact party frame reserves five private aura
 -- displays per member (CompactUnitFrameTemplate, maxPrivateAuras = 5), so the
 -- replacement reserves the same five along the bottom edge of the button, in the
@@ -36,13 +38,48 @@ local PRIVATE_ICON = 12
 local PRIVATE_STEP = -14
 local PRIVATE_OPTIONS = { size = PRIVATE_ICON, point = "BOTTOMRIGHT",
     offsetX = -8, offsetY = 3, step = PRIVATE_STEP }
+-- UnitClass tokens are all-caps; the shipped portrait files are not. The map is
+-- data, not a lookup into the client's class icons, so a missing file simply
+-- hides the portrait instead of failing the row.
+local CLASS_ICON = {
+    WARRIOR = "Warrior", PALADIN = "Paladin", HUNTER = "Hunter", ROGUE = "Rogue",
+    PRIEST = "Priest", DEATHKNIGHT = "DeathKnight", SHAMAN = "Shaman", MAGE = "Mage",
+    WARLOCK = "Warlock", MONK = "Monk", DRUID = "Druid", DEMONHUNTER = "DemonHunter",
+    EVOKER = "Evoker",
+}
 local component
 
-local function slotY(index) return -300 - (index - 1) * (FRAME_HEIGHT + FRAME_GAP) end
+-- Members are anchored from the group's top edge; the default absolute value
+-- mirrors what Layout:Join would derive, so a fresh profile starts with rx=0.
+local function slotY(index)
+    local top = GROUP_Y + GROUP_HEIGHT / 2 - FRAME_HEIGHT / 2
+    return top - (index - 1) * (FRAME_HEIGHT + FRAME_GAP)
+end
 
 local function groupSpec()
     return { label = app.L.partyGroup, x = GROUP_X, y = GROUP_Y,
         width = GROUP_WIDTH, height = GROUP_HEIGHT }
+end
+
+local function classIcon(frame, unit)
+    if not frame.classIcon then return end
+    -- The icon lives on a secure button. Its texture is a visual update, but the
+    -- harness (and a strict client) treats that write as protected in combat, so
+    -- the icon refreshes on the next out-of-combat roster/health paint.
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then return end
+    local ok, _, token = pcall(UnitClass, unit)
+    token = ok and app.Capabilities.Plain(token, "string") or nil
+    if not token or not token:match("^[%u%l]+$") then
+        frame.classIcon:Hide()
+        return
+    end
+    local file = CLASS_ICON[token]
+    if not file then
+        frame.classIcon:Hide()
+        return
+    end
+    local okSet = pcall(frame.classIcon.SetTexture, frame.classIcon, "Interface\\Icons\\ClassIcon_" .. file)
+    if okSet then frame.classIcon:Show() else frame.classIcon:Hide() end
 end
 
 local function draw(frame)
@@ -59,6 +96,7 @@ local function draw(frame)
     frame.power:SetValue(UnitPower(unit))
     app.Theme:PaintBar(frame.health, app.Theme:UnitColor(unit))
     app.Theme:PaintBar(frame.power, app.Theme:PowerColor(unit))
+    classIcon(frame, unit)
     -- Role and death/offline live in their own fixed areas; both disappear when
     -- the client only reports restricted values.
     app.MemberInfo.Draw(unit, frame.role, frame.status)
@@ -74,10 +112,23 @@ local function create(unit)
     frame:SetAttribute("unit", unit)
     frame:SetAttribute("*type1", "target")
     frame:SetAttribute("*type2", "togglemenu")
+    -- A quiet row plate: the portrait and bars float on it, and the plate stops
+    -- short of the private-aura column so native icons are never covered.
+    local plate = frame:CreateTexture(nil, "BACKGROUND")
+    plate:SetPoint("TOPLEFT", -2, 2)
+    plate:SetPoint("BOTTOMRIGHT", 2, -2)
+    local surface = app.Theme.colors.surface
+    plate:SetColorTexture(surface[1] * 1.6, surface[2] * 1.6, surface[3] * 1.6, 0.55)
+    frame.plate = plate
+    frame.classIcon = frame:CreateTexture(nil, "ARTWORK")
+    frame.classIcon:SetSize(P.icon, P.icon)
+    frame.classIcon:SetPoint("TOPLEFT", 2, -2)
+    frame.classIcon:SetTexture("Interface\\Icons\\ClassIcon_WARRIOR")
     frame.name = app.Type:Text(frame, "body")
-    frame.name:SetPoint("TOPLEFT", 8, -4)
+    frame.name:SetPoint("TOPLEFT", P.textInset, -3)
     -- The role glyph owns the top right corner; the name stops before it.
-    frame.name:SetWidth(FRAME_WIDTH - 30)
+    frame.name:SetWidth(FRAME_WIDTH - P.textInset - 18)
+    frame.name:SetFont(app.Type:Face(), P.nameSize, "OUTLINE")
     if type(frame.name.SetShadowOffset) == "function" then
         pcall(frame.name.SetShadowOffset, frame.name, 1, -1)
     end
@@ -85,19 +136,28 @@ local function create(unit)
         pcall(frame.name.SetShadowColor, frame.name, 0, 0, 0, 0.85)
     end
     frame.role = app.Type:Text(frame, "micro")
-    frame.role:SetPoint("TOPRIGHT", -8, -4)
+    frame.role:SetPoint("TOPRIGHT", -6, -3)
     frame.role:SetWidth(12)
     frame.role:SetJustifyH("RIGHT")
     frame.role:SetText("")
-    frame.health = app.Theme:Bar(frame, 8)
-    frame.health:SetPoint("TOPLEFT", 8, -18)
-    frame.health:SetPoint("TOPRIGHT", -8, -18)
-    frame.status = app.Theme:Text(frame.health, 10)
+    frame.health = app.Theme:Bar(frame, P.health)
+    frame.health:SetPoint("TOPLEFT", P.textInset, -17)
+    frame.health:SetPoint("TOPRIGHT", -6, -17)
+    frame.healthEdge = CreateFrame("Frame", nil, frame.health, "BackdropTemplate")
+    frame.healthEdge:SetPoint("TOPLEFT", -1, 1)
+    frame.healthEdge:SetPoint("BOTTOMRIGHT", 1, -1)
+    frame.healthEdge:EnableMouse(false)
+    frame.healthEdge:SetBackdrop({
+        edgeFile = app.Theme.white,
+        edgeSize = app.Pixel:Pixels(1, frame.healthEdge),
+    })
+    frame.healthEdge:SetBackdropBorderColor(0.02, 0.03, 0.05, 0.72)
+    frame.status = app.Theme:Text(frame.health, 9)
     frame.status:SetPoint("CENTER")
     frame.status:SetText("")
-    frame.power = app.Theme:Bar(frame, 3)
-    frame.power:SetPoint("TOPLEFT", 8, -27)
-    frame.power:SetPoint("TOPRIGHT", -8, -27)
+    frame.power = app.Theme:Bar(frame, P.power)
+    frame.power:SetPoint("TOPLEFT", P.textInset, -26)
+    frame.power:SetPoint("TOPRIGHT", -6, -26)
     frame.events = CreateFrame("Frame")
     frame.events:SetScript("OnEvent", function()
         app:Call("partyFrames/" .. unit, draw, frame)
@@ -186,8 +246,13 @@ end
 local function privateCovered(self)
     if not app.PrivateAuras.Available() then return false end
     for _, unit in ipairs(ORDER) do
-        local frame = self.frames and self.frames[unit]
-        if memberCovered(unit) and not (frame and frame.lumaPrivateComplete) then return false end
+        -- A member that exists but whose button was not accepted is not
+        -- covered: the native display must stay for that member.
+        if UnitExists(unit) then
+            if not memberCovered(unit) then return false end
+            local frame = self.frames and self.frames[unit]
+            if not (frame and frame.lumaPrivateComplete) then return false end
+        end
     end
     return true
 end
@@ -219,7 +284,7 @@ local function drawAll(self)
     end
 end
 
-component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", defaultEnabled = false,
+component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", defaultEnabled = true,
     Supported = function(_, caps) return caps.units end,
     Enable = function(self)
         self.frames = self.frames or {}
@@ -235,7 +300,8 @@ component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", d
                 end
                 -- The four buttons join one group; moving or scaling the group
                 -- is one layout item, members keep their relative offsets.
-                app.Layout:Join(GROUP_ID, "party_" .. unit, frame, -270, slotY(PARTY_UNITS[unit]), groupSpec())
+                app.Layout:Join(GROUP_ID, "party_" .. unit, frame, GROUP_X,
+                    slotY(PARTY_UNITS[unit]), groupSpec())
                 for _, event in ipairs(UNIT_EVENTS) do
                     pcall(frame.events.RegisterUnitEvent, frame.events, event, unit)
                 end

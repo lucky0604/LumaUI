@@ -26,6 +26,11 @@ function Frame:GetWidth() return self.width or 100 end
 function Frame:GetHeight() return self.height or 30 end
 function Frame:SetPoint(...) restricted(self); self.point = { ... } end
 function Frame:ClearAllPoints() restricted(self); self.point = nil end
+function Frame:GetPoint(index)
+    if (index or 1) == 1 and self.point then return unpack(self.point) end
+end
+function Frame:GetParent() return self.parent end
+function Frame:SetParent(parent) restricted(self); self.parent = parent end
 function Frame:SetAllPoints() end
 function Frame:GetCenter()
     local point = self.point
@@ -318,7 +323,22 @@ function H.Load(saved)
     H.addons = {
         { name = "LumaUI", title = "LumaUI", loadable = true, reason = "", security = "INSECURE", loaded = true },
     }
-    _G.LumaUIDB = saved
+    -- The legacy quest-panel tests drive the component directly, so the shared
+    -- fixture opts in explicitly. The production default (off) is asserted by
+    -- its own test instead of being implied by this fixture.
+    _G.LumaUIDB = saved or {
+        schema = 1,
+        profiles = { Default = {
+            -- The stock fixture stays on the pre-Pearl baseline so individual
+            -- tests can opt into the visual replacements explicitly; the
+            -- default-on policy is covered by its own test.
+            modules = { questList = true, unitFrames = false, partyFrames = false,
+                nameplates = false, actionBars = false },
+            ui = { takeoverUnitFrames = false },
+        } },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    }
     _G.unpack = table.unpack or unpack
     _G.WOW_PROJECT_ID, _G.WOW_PROJECT_MAINLINE = 1, 1
     _G.UISpecialFrames, _G.SlashCmdList = {}, {}
@@ -359,6 +379,12 @@ function H.Load(saved)
     MinimapCluster.MinimapContainer = { PlayerCoords = H.NewFrame(nil, MinimapCluster) }
     _G.MainActionBar = H.NewFrame("MainActionBar", UIParent)
     MainActionBar.actionButtons = {}
+    -- The client's Cooldown Manager viewers exist on the supported builds; the
+    -- placement component only moves them.
+    _G.EssentialCooldownViewer = H.NewFrame("EssentialCooldownViewer", UIParent)
+    _G.UtilityCooldownViewer = H.NewFrame("UtilityCooldownViewer", UIParent)
+    _G.BuffIconCooldownViewer = H.NewFrame("BuffIconCooldownViewer", UIParent)
+    _G.BuffBarCooldownViewer = H.NewFrame("BuffBarCooldownViewer", UIParent)
     MainActionBar.BorderArt = H.NewFrame("MainActionBarBorderArt", MainActionBar)
     local endCaps = H.NewFrame("MainActionBarEndCaps", MainActionBar)
     endCaps.LeftEndCap = H.NewFrame("MainActionBarLeftEndCap", endCaps)
@@ -528,6 +554,7 @@ function H.Load(saved)
     ObjectiveTrackerFrame.modules[3] = WorldQuestObjectiveTracker
     ObjectiveTrackerFrame.modules[4] = ScenarioObjectiveTracker
     _G.EditModeManagerFrame = H.NewFrame("EditModeManagerFrame", UIParent)
+    EditModeManagerFrame:Hide()
     _G.ShowUIPanel = function(frame) H.shownPanel = frame end
     _G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, text) H.messages[#H.messages + 1] = text end }
     _G.GameFontNormal = H.NewFrame("GameFontNormal")
@@ -635,6 +662,7 @@ function H.Load(saved)
     _G.UnitName = function() return H.Secret("Unit") end
     _G.UnitHealth = function() return H.Secret(42) end
     _G.UnitHealthMax = function() return H.Secret(100) end
+    _G.UnitHealthPercent = function() return H.Secret(42) end
     _G.UnitPower = function() return H.Secret(10) end
     _G.UnitPowerMax = function() return H.Secret(100) end
     _G.RegisterUnitWatch = function(frame) restricted(frame); frame.watched = true; frame:Show() end
