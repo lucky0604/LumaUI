@@ -485,22 +485,13 @@ function Layout:Central()
     return central
 end
 
--- The unit boundary follows the skill rows, not the widest tracked-buff row: a
--- buff bar can appear or disappear without moving the player/target frames.
--- When neither skill row is present the widest remaining row is used, and an
--- empty stack falls back to the mockup width.
+-- The unit boundary follows the widest visible row. A tracked-buff row can be
+-- wider than the skill rows; using only the skills let the icons overlap the
+-- player/target frames in game. An empty stack falls back to the mockup width.
 local function contentRowWidth(rows)
     local width = 0
     for _, row in ipairs(rows) do
-        if (row.id == "essential" or row.id == "utility")
-            and row.width and row.width > width then
-            width = row.width
-        end
-    end
-    if width <= 0 then
-        for _, row in ipairs(rows) do
-            if row.width and row.width > width then width = row.width end
-        end
+        if row.width and row.width > width then width = row.width end
     end
     return width
 end
@@ -528,10 +519,10 @@ function Layout:CentralRows(entries)
     central.rows = rows
     central.cooldown.top = #rows > 0 and rows[#rows].top or central.cooldown.bottom
     central.mainRow = rows[1]
-    -- The skill rows define the block the unit frames flank. Storing the width
-    -- here keeps the unit boundary and the stack from two measurements; the
-    -- caller publishes after placing the rows so this pass does not re-enter
-    -- itself. No readable row falls back to the mockup width again.
+    -- The widest visible row defines the block the unit frames flank. Storing
+    -- the width here keeps the unit boundary and the stack from two
+    -- measurements; the caller publishes after placing the rows so this pass
+    -- does not re-enter itself. No readable row falls back to the mockup width.
     local contentWidth = contentRowWidth(rows)
     local contentChanged = storeContentWidth(self, contentWidth > 0 and contentWidth or nil)
     local content = self:ContentWidth()

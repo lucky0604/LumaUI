@@ -374,6 +374,19 @@ local function updateDefaults(self)
             end
             rows[spec.unit] = { x = x, top = top, width = width, height = height }
             app.Layout:SetEntryDefault(id, x, top - height / 2)
+            -- A preset writes positions, but the main bars are driven by the
+            -- measured block. Follow a new boundary only while the saved centre
+            -- still equals the previous automatic one, so a deliberate drag
+            -- keeps precedence over the geometry.
+            if spec.style == "main" then
+                local previous = frame.lumaAutoX
+                frame.lumaAutoX = x
+                local saved = app.Store:Profile().positions[id]
+                if previous and saved and not app.Store.readonly
+                    and math.abs(saved.x - previous) < 0.5 and math.abs(x - previous) >= 0.5 then
+                    app.Store:SetPosition(id, x, saved.y)
+                end
+            end
         end
     end
     for _, spec in ipairs(specs) do

@@ -4,8 +4,26 @@ local _, app = ...
 -- presentation only: the sampler lives in Capabilities and is shared with the
 -- bottom strip and the report tooltips, so running both readouts never doubles
 -- the client queries or shows two different numbers on the same beat. The
--- component owns one FontString and one one-second ticker; disabling it hides
--- the reading and releases the ticker through the component runtime.
+-- component owns one narrow capsule and one one-second ticker; disabling it
+-- hides the capsule and releases the ticker through the component runtime.
+
+-- A fixed capsule keeps a ticking number from resizing the band; the text is
+-- centred inside it and both readings still share one line.
+local WIDTH, HEIGHT = 118, 18
+
+local function build(self)
+    if self.frame then return end
+    local frame = CreateFrame("Frame", "LumaUITopPerformance", UIParent, "BackdropTemplate")
+    frame:SetSize(WIDTH, HEIGHT)
+    frame:SetPoint("TOP", UIParent, "TOP", 0, -8)
+    app.Theme:PaintSurface(frame, "hud")
+    local text = app.Type:Text(frame, "micro")
+    text:SetPoint("CENTER")
+    text:SetJustifyH("CENTER")
+    local accent = app.Theme:Accent()
+    text:SetTextColor(accent[1], accent[2], accent[3])
+    self.frame, self.text = frame, text
+end
 
 local function update(self)
     if not self.text then return end
@@ -15,21 +33,11 @@ local function update(self)
     if fps then parts[#parts + 1] = app.L.fps .. " " .. math.floor(fps + 0.5) end
     if latency then parts[#parts + 1] = app.L.latency .. " " .. latency end
     if #parts == 0 then
-        self.text:Hide()
+        self.frame:Hide()
         return
     end
     self.text:SetText(table.concat(parts, "   "))
-    self.text:Show()
-end
-
-local function build(self)
-    if self.text then return end
-    local text = app.Type:Text(UIParent, "micro")
-    text:SetPoint("TOP", UIParent, "TOP", 0, -6)
-    text:SetJustifyH("CENTER")
-    local accent = app.Theme:Accent()
-    text:SetTextColor(accent[1], accent[2], accent[3])
-    self.text = text
+    self.frame:Show()
 end
 
 app:RegisterComponent({
@@ -44,6 +52,6 @@ app:RegisterComponent({
         update(self)
     end,
     Disable = function(self)
-        if self.text then self.text:Hide() end
+        if self.frame then self.frame:Hide() end
     end,
 })

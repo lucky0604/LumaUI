@@ -16,7 +16,11 @@ local ROW_HEIGHT = HEIGHT - 6
 local PAD, FIELD_GAP, ZONE_WIDTH = 12, 8, 200
 
 local FIELDS = {
-    { key = "money", width = 120, icon = "Interface\\Icons\\INV_Misc_Coin_01" },
+    -- The client's money string carries gold, silver and copper (and, on some
+    -- builds, inline coin icons), so the reading needs more room than the
+    -- numeric part alone. A wider fixed minimum keeps it from running into the
+    -- durability field when the amount grows.
+    { key = "money", width = 150, icon = "Interface\\Icons\\INV_Misc_Coin_01" },
     { key = "durability", width = 92, icon = "Interface\\Icons\\Trade_BlackSmithing" },
     { key = "performance", width = 100, icon = "Interface\\Icons\\Spell_Arcane_Arcane04" },
     { key = "bags", width = 88, icon = "Interface\\Icons\\INV_Misc_Bag_08" },

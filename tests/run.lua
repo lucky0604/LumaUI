@@ -6177,7 +6177,7 @@ test("the bottom strip spans the screen, spreads its readings and keeps a saved 
     eq(strip.segments.money.point[1], "LEFT")
     eq(strip.segments.money.point[2], strip.frame)
     eq(strip.segments.money.point[4], 12)
-    eq(strip.segments.money:GetWidth(), 224)
+    eq(strip.segments.money:GetWidth(), 246.5)
     eq(strip.segments.zone:GetWidth(), 200)
     eq(strip.segments.zone.point[4], 0)
     eq(strip.segments.clock.point[1], "RIGHT")
@@ -6186,7 +6186,7 @@ test("the bottom strip spans the screen, spreads its readings and keeps a saved 
     -- A smaller screen shrinks the slack and moves the flush centre with it.
     UIParent:SetSize(1600, 900); H.Fire("DISPLAY_SIZE_CHANGED")
     eq(strip.frame:GetWidth(), 1600)
-    eq(strip.segments.money:GetWidth(), 184)
+    eq(strip.segments.money:GetWidth(), 206.5)
     eq(group.frame:GetWidth(), 1600)
     eq(group.frame.point[5], -435)
     -- A deliberate position survives a resize, while the default stays flush.
@@ -9189,15 +9189,16 @@ test("the measured cooldown block moves the unit frames beside it", function()
     eq(central.contentChanged, true)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
     eq(player.point[4], -304)
-    -- A wider tracked-buff row must not drag the unit frames outward; only the
-    -- skill rows define the block the bars flank.
+    -- A wider tracked-buff row also defines the block: the icons must not
+    -- overlap the frames the block flanks.
     local buff = H.NewFrame("BuffBarCooldownViewer", UIParent)
     buff:SetSize(500, 20)
     local again = app.Layout:CentralRows({
         { frame = viewer, id = "essential" }, { frame = buff, id = "buffBar" } })
-    eq(again.content.width, 360)
-    eq(again.contentChanged, nil)
-    eq(player.point[4], -304)
+    eq(again.content.width, 500)
+    eq(again.contentChanged, true)
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    eq(player.point[4], -374)
     -- No readable viewer returns to the fallback instead of keeping a stale
     -- block width; the units follow in the same pass. The placement component
     -- is off first so it cannot re-measure the 360-wide fixture afterwards.
@@ -9206,6 +9207,30 @@ test("the measured cooldown block moves the unit frames beside it", function()
     eq(app.Layout:ContentWidth(), 300)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
     eq(player.point[4], -274)
+    eq(#app.errors, 0)
+end)
+
+test("a preset centre follows the measured block until it is dragged", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local player = app.components.unitFrames.frames.player
+    -- The preset stores the centre it was applied with.
+    app.Layout:ApplyPreset("combat")
+    eq(player.point[4], -274)
+    eq(app.Store:Profile().positions.unit_player.x, -274)
+    -- A wider tracked-buff row moves the stored centre with the frame, so the
+    -- icons cannot overlap the player bar after a preset.
+    local viewer = H.NewFrame("BuffBarCooldownViewer", UIParent)
+    viewer:SetSize(500, 20)
+    app.Layout:CentralRows({ { frame = viewer, id = "buffBar" } })
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    eq(player.point[4], -374)
+    eq(app.Store:Profile().positions.unit_player.x, -374)
+    -- A deliberate drag wins: the next boundary change keeps the saved centre.
+    app.Store:SetPosition("unit_player", -120, -230)
+    app.Layout:CentralRows({ { frame = viewer, id = "buffBar" } })
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    eq(player.point[4], -120)
     eq(#app.errors, 0)
 end)
 
@@ -9375,11 +9400,13 @@ test("top performance shares the strip sample and releases its ticker", function
     local top = app.components.topPerformance
     eq(top.running, true)
     eq(top.status, "running")
-    eq(top.text:IsShown(), true)
-    eq(top.text.point[1], "TOP")
-    eq(top.text.point[2], UIParent)
-    eq(top.text.point[4], 0)
-    eq(top.text.point[5], -6)
+    eq(top.frame:IsShown(), true)
+    eq(top.frame.point[1], "TOP")
+    eq(top.frame.point[2], UIParent)
+    eq(top.frame.point[4], 0)
+    eq(top.frame.point[5], -8)
+    -- A fixed capsule: a wider number must not resize the band.
+    eq(top.frame:GetWidth(), 118)
     eq(top.text:GetText(), app.L.fps .. " 120   " .. app.L.latency .. " 40")
     -- The strip and the top reading update on the same beat; the shared cache
     -- means one guarded client query, not one per component.
@@ -9397,7 +9424,7 @@ test("top performance shares the strip sample and releases its ticker", function
     eq(calls, 2)
     -- With both disabled there is no performance timer left.
     app.Store:Set("modules", "topPerformance", false)
-    eq(top.text:IsShown(), false)
+    eq(top.frame:IsShown(), false)
     local before = calls
     H.Advance(2)
     eq(calls, before)
@@ -9412,16 +9439,16 @@ test("the top reading falls back to the values this client can report", function
     _G.GetFramerate = nil
     H.Advance(1)
     eq(top.text:GetText(), app.L.latency .. " 40")
-    eq(top.text:IsShown(), true)
-    -- Nothing readable: the text hides instead of printing stale numbers.
+    eq(top.frame:IsShown(), true)
+    -- Nothing readable: the capsule hides instead of printing stale numbers.
     _G.GetNetStats = nil
     H.Advance(1)
-    eq(top.text:IsShown(), false)
+    eq(top.frame:IsShown(), false)
     -- A recovered client brings the reading back on the next beat.
     _G.GetFramerate, _G.GetNetStats = framerate, netstats
     H.Advance(1)
     eq(top.text:GetText(), app.L.fps .. " 120   " .. app.L.latency .. " 40")
-    eq(top.text:IsShown(), true)
+    eq(top.frame:IsShown(), true)
     eq(#app.errors, 0)
 end)
 
@@ -9430,14 +9457,14 @@ test("the top reading keeps the default on an old or read-only database", functi
     local old = H.Load({ schema = 1, profiles = { Default = { modules = {} } } })
     H.Fire("PLAYER_LOGIN")
     eq(old.components.topPerformance.running, true)
-    eq(old.components.topPerformance.text:IsShown(), true)
+    eq(old.components.topPerformance.frame:IsShown(), true)
     -- A newer-schema database is read-only: the reading still runs and refuses
     -- the write instead of silently turning itself off.
     local readonly = H.Load({ schema = 99 })
     H.Fire("PLAYER_LOGIN")
     eq(readonly.Store.readonly, true)
     eq(readonly.components.topPerformance.running, true)
-    eq(readonly.components.topPerformance.text:IsShown(), true)
+    eq(readonly.components.topPerformance.frame:IsShown(), true)
     eq(readonly.Store:Set("modules", "topPerformance", false), false)
     eq(readonly.components.topPerformance.running, true)
     eq(#old.errors, 0)
