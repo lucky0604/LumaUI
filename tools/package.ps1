@@ -38,3 +38,5 @@ try {
     $stream.Dispose()
 }
 Write-Output $archivePath
+$hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Output "$hash  $archivePath"

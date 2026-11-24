@@ -130,7 +130,17 @@ local function backgroundFor(entry, key)
     if not background then
         -- UIParent keeps these decorations independent from the chat frame's own
         -- locked/docked state; they never intercept mouse input or chat text.
-        background = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+        -- A global name puts the plate in `/luma hud` (and `/fstack`) under the
+        -- same chat family as the native frame it backs.
+        local name
+        if type(entry.frame.GetName) == "function" then
+            local ok, frameName = pcall(entry.frame.GetName, entry.frame)
+            frameName = ok and app.Capabilities.Plain(frameName, "string") or nil
+            if frameName then
+                name = "LumaUI" .. frameName .. (key == "editBackground" and "Edit" or "") .. "Plate"
+            end
+        end
+        background = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
         background:SetFrameStrata("BACKGROUND")
         background:EnableMouse(false)
         entry[key] = background
@@ -455,6 +465,46 @@ local function attach(self)
     end
 end
 
+-- Explicit Pearl chat-size trial (010 phase 08): 320 × 140 UI, inside the
+-- 300–325 × 125–145 target. The native chat frame's size belongs to the
+-- client's chat settings, so this never runs on its own — the player asks with
+-- `/luma chat`, every readable size is recorded before the first write, and
+-- asking again (or disabling the component) restores it. Combat refuses,
+-- because a docked chat frame is protected.
+local TRIAL_WIDTH, TRIAL_HEIGHT = 320, 140
+
+local function setTrialSize(self, wanted)
+    if self.running ~= true then return false end
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then
+        app:Print(app.L.layoutCombat)
+        return false
+    end
+    self.trialSizes = self.trialSizes or {}
+    for _, entry in pairs(self.windows or {}) do
+        local frame = entry.frame
+        if frame and type(frame.GetSize) == "function" and type(frame.SetSize) == "function" then
+            local recorded = self.trialSizes[frame]
+            if wanted then
+                if not recorded then
+                    local ok, width, height = pcall(frame.GetSize, frame)
+                    width = ok and app.Capabilities.Plain(width, "number") or nil
+                    height = ok and app.Capabilities.Plain(height, "number") or nil
+                    if width and height then
+                        self.trialSizes[frame] = { width, height }
+                        pcall(frame.SetSize, frame, TRIAL_WIDTH, TRIAL_HEIGHT)
+                    end
+                end
+            elseif recorded then
+                pcall(frame.SetSize, frame, recorded[1], recorded[2])
+                self.trialSizes[frame] = nil
+            end
+            refreshEntry(entry)
+        end
+    end
+    self.trialSize = wanted == true or nil
+    return true
+end
+
 module = app:RegisterComponent({ id = "chat", label = "chat",
     Enable = function(self)
         attach(self)
@@ -464,9 +514,21 @@ module = app:RegisterComponent({ id = "chat", label = "chat",
     end,
     Refresh = attach,
     Disable = function(self)
+        -- The trial size is this component's write, so stopping it takes the
+        -- frame back to the client's own size before the plates come off.
+        for frame, size in pairs(self.trialSizes or {}) do
+            if frame and type(frame.SetSize) == "function" then
+                pcall(frame.SetSize, frame, size[1], size[2])
+            end
+        end
+        self.trialSizes, self.trialSize = nil, nil
         for _, entry in pairs(self.windows or {}) do detachEntry(entry) end
     end,
 })
+
+function module:SetTrialSize(wanted)
+    return setTrialSize(self, wanted)
+end
 
 -- Which of the four states one chat window is in. Exposed so a diagnostic (and a
 -- test) can ask the same question the backing asks, instead of re-deriving it.

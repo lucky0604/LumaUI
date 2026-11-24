@@ -502,11 +502,30 @@ function Layout:Central()
     central.anchor.y = central.cooldown.bottom
     central.anchor.centreY = central.cooldown.bottomY
     -- A stable row interface before any viewer is measured. CentralRows
-    -- replaces these with the actual main row once the component runs.
+    -- replaces these with the actual main row once the component runs, and the
+    -- last applied rows are merged back in below so every consumer (resource
+    -- rail, unit frames, presets, report) reads one applied result.
     central.units.rowTop = central.cooldown.bottom
     central.units.rowCenter = central.cooldown.bottom
     central.units.rowTopY = central.cooldown.bottomY
     central.units.rowCenterY = central.cooldown.bottomY
+    -- `Central()` rebuilds a fresh table (the action area can move at any
+    -- time), and only `CentralRows` measures the real skill-block top. Without
+    -- this merge the cooldown top would always equal the block bottom here, so
+    -- a rail anchored to it landed inside the first skill row (010 plan P0).
+    local applied = self.appliedRows
+    if applied and applied.top and applied.top > central.cooldown.top then
+        central.cooldown.top = applied.top
+        central.cooldown.topY = applied.top - screenHeight / 2
+        central.cooldown.rows = applied.rows
+        central.cooldown.applied = true
+        -- The top of the main skill rows (essential/utility), which the main
+        -- unit bars align their health top with.
+        central.cooldown.mainTop = applied.mainTop
+        local rowTop = applied.rowTop or applied.top
+        central.units.rowTop = rowTop
+        central.units.rowTopY = rowTop - screenHeight / 2
+    end
     return central
 end
 
@@ -555,6 +574,7 @@ function Layout:CentralRows(entries)
     end
     central.rows = rows
     central.cooldown.top = #rows > 0 and rows[#rows].top or central.cooldown.bottom
+    central.cooldown.topY = central.cooldown.top - central.screen.height / 2
     central.mainRow = rows[1]
     -- Main rows (essential and utility skills) define the block the unit frames
     -- flank. An auxiliary row above them may be wider without pushing the health
@@ -594,9 +614,56 @@ function Layout:CentralRows(entries)
     central.units.rowCenter = rows[1] and rows[1].center or central.cooldown.bottom
     central.units.rowTopY = rowTop - halfHeight
     central.units.rowCenterY = central.units.rowCenter - halfHeight
+    -- The applied result every later `Central()` read merges in. A change of
+    -- the block top (a same-width row getting taller, a row joining or falling
+    -- back) is a geometry change for the rail and the report even when the
+    -- content width did not move, so it is reported separately from
+    -- `contentChanged`. The comparison is against the previous *planned* top:
+    -- a refused row keeps its native anchor, and comparing the planned top with
+    -- that corrected value would publish again on every beat.
+    local previous = self.appliedRows
+    local plannedTop = central.cooldown.top
+    local topChanged = previous == nil or previous.top == nil
+        or math.abs((previous.plannedTop or previous.top) - plannedTop) >= 0.5
+    self.appliedRows = {
+        rows = rows, top = plannedTop, plannedTop = plannedTop,
+        -- The placer's final top is carried across passes; without it a refused
+        -- row would read as a new change on every beat and publish forever.
+        finalTop = previous and previous.finalTop or nil,
+        rowTop = rowTop,
+        mainTop = mainTop, mainBottom = mainBottom, mainCount = mainCount,
+        width = central.content.width,
+    }
+    central.topChanged = topChanged or nil
     -- Kept for `/luma hud` only; layout always recomputes from live frames.
     self.lastCentral = central
     return central
+end
+
+-- The placer's correction to the applied top: a refused anchor collapses its
+-- row, so the stack the player sees can end below the planned top. Returns
+-- true when the final applied top moved, which the caller publishes as a
+-- geometry change. The comparison is against the previous final top, so a
+-- settled refusal costs nothing.
+function Layout:SetAppliedTop(top)
+    top = plainNumber(top)
+    if not top then return false end
+    local applied = self.appliedRows
+    if not applied then return false end
+    local previous = applied.finalTop
+    if previous ~= nil and math.abs(previous - top) < 0.5 then return false end
+    applied.top, applied.finalTop = top, top
+    return true
+end
+
+-- Called when the cooldown component stops: with no applied rows the resource
+-- rail falls back to the reserved baseline above the action area instead of
+-- holding a top edge nothing draws at any more.
+function Layout:ClearAppliedRows()
+    if not self.appliedRows then return false end
+    self.appliedRows = nil
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    return true
 end
 
 -- Centre offset in an entry's own units for a frame that should sit beside the
@@ -972,13 +1039,64 @@ local function regionShown(frame)
     return ok and shown == true
 end
 
+-- Effective visibility, not the raw IsShown flag: the client's IsVisible also
+-- walks the parent chain, and a frame at zero alpha is drawn by nobody even
+-- when it reports shown. A value this Lua cannot read stays nil so a restricted
+-- answer is reported as unknown instead of being flattened to "hidden".
+local function frameAlpha(frame)
+    if type(frame.GetAlpha) ~= "function" then return nil end
+    local ok, value = pcall(frame.GetAlpha, frame)
+    return ok and plainNumber(value) or nil
+end
+
+local function effectiveAlpha(frame)
+    local alpha, current, depth = 1, frame, 0
+    while object(current) and depth < 12 do
+        local value = frameAlpha(current)
+        if value == nil then return nil end
+        alpha = alpha * value
+        if type(current.GetParent) ~= "function" then break end
+        local ok, parent = pcall(current.GetParent, current)
+        current = ok and parent or nil
+        depth = depth + 1
+    end
+    return alpha
+end
+
+local function visibleState(frame)
+    local shown
+    if type(frame.IsVisible) == "function" then
+        local ok, value = pcall(frame.IsVisible, frame)
+        if ok and not app.Capabilities.IsSecret(value) then shown = value == true end
+    end
+    if shown == nil then
+        local ok, value = pcall(frame.IsShown, frame)
+        if ok and not app.Capabilities.IsSecret(value) then shown = value == true end
+    end
+    if shown == nil then return nil end
+    if shown == false then return false end
+    local alpha = effectiveAlpha(frame)
+    if alpha ~= nil and alpha <= 0.01 then return false end
+    return true
+end
+
+-- One region, one owner, one family. A family groups frames that belong to the
+-- same control (`ChatFrame1` and LumaUI's own chat plate both draw the chat
+-- window), so their overlap is design, not a layout conflict. Different owners
+-- under one family still report: two unit frames overlapping is a real bug.
 Layout.regions = {
-    map = { names = { "MinimapCluster", "Minimap" }, owner = "minimap" },
-    tracker = { names = { "ObjectiveTrackerFrame" }, owner = "questTracker" },
-    chat = { names = { "ChatFrame1" }, owner = "chat" },
-    cast = { names = { "PlayerCastingBarFrame" }, owner = "native" },
-    extra = { names = { "ExtraActionButton1" }, owner = "native" },
-    meter = { names = { "LumaUIDamageMeter" }, owner = "damageMeter" },
+    map = { names = { "MinimapCluster", "Minimap" }, owner = "minimap", family = "map" },
+    tracker = { names = { "ObjectiveTrackerFrame" }, owner = "questTracker", family = "tracker" },
+    chat = { names = { "ChatFrame1" }, owner = "chat", family = "chat" },
+    chatPlate = { names = { "LumaUIChatFrame1Plate" }, owner = "chat", family = "chat" },
+    cast = { names = { "PlayerCastingBarFrame" }, owner = "native", family = "cast" },
+    extra = { names = { "ExtraActionButton1" }, owner = "native", family = "extra" },
+    meter = { names = { "LumaUIDamageMeter" }, owner = "damageMeter", family = "meter" },
+    resource = { names = { "LumaUIPlayerResource" }, owner = "playerResource", family = "resource" },
+    unitPlayer = { names = { "LumaUIUnit_player" }, owner = "unitFrames", family = "unitPlayer" },
+    unitTarget = { names = { "LumaUIUnit_target" }, owner = "unitFrames", family = "unitTarget" },
+    questList = { names = { "LumaUIQuestList" }, owner = "questList", family = "questList" },
+    strip = { names = { "LumaUIDataStrip" }, owner = "dataStrip", family = "strip" },
 }
 
 -- Rectangle in UIParent units, or nil when the frame reports none. A frame at a
@@ -999,7 +1117,9 @@ function Layout:Sample(id)
             if scale <= 0 then scale = 1 end
             local sample = {
                 id = id, name = name, frame = frame, owner = region.owner,
-                scale = scale, shown = regionShown(frame),
+                family = region.family or id, reserved = region.reserved == true,
+                scale = scale, shown = regionShown(frame), visible = visibleState(frame),
+                alpha = effectiveAlpha(frame),
             }
             if type(frame.GetRect) == "function" then
                 local ok, left, bottom, width, height = pcall(frame.GetRect, frame)
@@ -1026,15 +1146,28 @@ function Layout:Sample(id)
 end
 
 -- Pairs of owned regions whose measured rectangles intersect. Native-owned
--- samples are excluded: the client is allowed to overlap its own cast bar.
+-- samples are excluded: the client is allowed to overlap its own cast bar, and
+-- a reserved outline is not drawn at all. Two regions of the same control
+-- family (the native chat frame and LumaUI's plate under it) are one surface,
+-- not a conflict; everything else with a real intersection is reported.
 function Layout:Overlaps()
-    local samples, list = {}, {}
-    for id in pairs(self.regions) do
+    -- Sorted ids make the family representative deterministic: "chat" wins over
+    -- "chatPlate" for the chat window, so one control yields one rectangle and
+    -- a real conflict is reported once.
+    local ids = {}
+    for id in pairs(self.regions) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local samples, families = {}, {}
+    for _, id in ipairs(ids) do
         local sample = self:Sample(id)
-        if sample and sample.measured and sample.shown and sample.owner ~= "native" then
+        if sample and sample.measured and sample.visible == true
+            and sample.owner ~= "native" and not sample.reserved
+            and not families[sample.family] then
+            families[sample.family] = true
             samples[#samples + 1] = sample
         end
     end
+    local list = {}
     for index = 1, #samples do
         for other = index + 1, #samples do
             local a, b = samples[index], samples[other]
@@ -1108,6 +1241,12 @@ end
 -- edge layout has to avoid. Everything here is a read; a frame that does not
 -- report a rectangle is printed as unknown instead of being given a guess, and
 -- nothing is walked beyond this fixed list.
+-- Viewer global name to the skin record's id, so the report can show how many
+-- icons of each viewer carry the Pearl skin.
+local VIEWER_IDS = {
+    EssentialCooldownViewer = "essential", UtilityCooldownViewer = "utility",
+    BuffBarCooldownViewer = "buffBar", BuffIconCooldownViewer = "buffIcon",
+}
 local HUD_SAMPLES = {
     { key = "viewer", owner = "cooldownViewer", names = {
         "EssentialCooldownViewer", "UtilityCooldownViewer",
@@ -1117,8 +1256,17 @@ local HUD_SAMPLES = {
     { key = "map", owner = "minimap", names = { "Minimap", "MinimapCluster" } },
     { key = "tracker", owner = "questTracker", names = { "ObjectiveTrackerFrame" } },
     { key = "chat", owner = "chat", names = { "ChatFrame1" } },
+    { key = "chatPlate", owner = "chat", names = { "LumaUIChatFrame1Plate" } },
     { key = "cast", owner = "native", names = { "PlayerCastingBarFrame" } },
+    -- The edit-mode cast outline is reserved space, not a drawn frame: the
+    -- report says so instead of counting it as a hidden bar.
+    { key = "castArea", owner = "layout", reserved = true,
+        names = { "LumaUIPlaceholder_unit_player_cast" } },
     { key = "extra", owner = "native", names = { "ExtraActionButton1", "PersonalResourceDisplayFrame" } },
+    { key = "resource", owner = "playerResource", names = { "LumaUIPlayerResource" } },
+    { key = "unit", owner = "unitFrames", names = { "LumaUIUnit_player", "LumaUIUnit_target" } },
+    { key = "questList", owner = "questList", names = { "LumaUIQuestList" } },
+    { key = "strip", owner = "dataStrip", names = { "LumaUIDataStrip" } },
 }
 
 -- GetRect reports a frame in its own scaled units, so two frames only compare
@@ -1140,6 +1288,15 @@ local function shownText(frame)
     local ok, shown = pcall(frame.IsShown, frame)
     if not ok or app.Capabilities.IsSecret(shown) then return "?" end
     return shown == true and "yes" or "no"
+end
+
+-- Effective visibility: the parent chain and a readable alpha explain a hidden
+-- frame, so an off-screen parent or a faded window is not reported as "LumaUI
+-- hid it". An unreadable answer stays "?" instead of being flattened.
+local function visibleText(frame)
+    local visible = visibleState(frame)
+    if visible == nil then return "?" end
+    return visible and "yes" or "no"
 end
 
 local function activeCount(frame)
@@ -1199,8 +1356,11 @@ function Layout:Diagnose()
     local main = last and last.mainRow
     local profile = app.Store and app.Store:Profile()
     local look = profile and profile.appearance
-    app:Print(string.format("  cooldown: bottom=%.0f rows=%d main=%s slots=%s",
-        central.cooldown.bottom, #rows, main and tostring(main.id or "row1") or "none",
+    -- `top` is the applied skill-block top every consumer reads (the rail sits
+    -- RAIL_GAP above it); `rows` names what this run planned, bottom to top.
+    local topText = central.cooldown.applied and string.format("%.0f", central.cooldown.top) or "?"
+    app:Print(string.format("  cooldown: bottom=%.0f top=%s rows=%d main=%s slots=%s",
+        central.cooldown.bottom, topText, #rows, main and tostring(main.id or "row1") or "none",
         (look and look.perIconSlots == true) and "on" or "off"))
     -- The rows LumaUI actually planned, bottom to top. Two runs (login and an
     -- instance) can be compared line by line instead of by screenshot: a row that
@@ -1214,8 +1374,13 @@ function Layout:Diagnose()
         for _, name in ipairs(sample.names) do
             local frame = _G[name]
             if object(frame) then
-                local line = string.format("  %s %s: shown=%s rect=%s owner=%s",
-                    sample.key, name, shownText(frame), rectText(frame), sample.owner)
+                local line = string.format("  %s %s: shown=%s vis=%s rect=%s owner=%s",
+                    sample.key, name, shownText(frame), visibleText(frame), rectText(frame), sample.owner)
+                local alpha = effectiveAlpha(frame)
+                if alpha ~= nil and alpha < 0.995 then
+                    line = string.format("%s alpha=%.2f", line, alpha)
+                end
+                if sample.reserved then line = line .. " reserved=yes" end
                 if sample.key == "viewer" then
                     local active = activeCount(frame)
                     local blockWidth, blockHeight = iconBlock(frame)
@@ -1223,6 +1388,16 @@ function Layout:Diagnose()
                         and string.format("%.0fx%.0f", blockWidth, blockHeight or 0) or "unknown"
                     line = string.format("%s icons=%s block=%s", line,
                         active and tostring(active) or "?", block)
+                    -- How many of this viewer's visible icons carry the Pearl
+                    -- skin this run, so a native-looking icon has a named
+                    -- cause instead of a screenshot to compare.
+                    local component = app.components and app.components.cooldownViewer
+                    local counts = component and component.skinStats
+                        and component.skinStats[VIEWER_IDS[name]]
+                    if counts then
+                        line = string.format("%s skin=%d/%d", line, counts.applied,
+                            counts.applied + counts.unknown)
+                    end
                 end
                 app:Print(line)
             else

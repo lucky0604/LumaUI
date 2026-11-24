@@ -202,7 +202,10 @@ local function decorate(bar, isTarget)
     chip:ClearAllPoints()
     chip:SetPoint("TOPLEFT", bar, "TOPLEFT", -TRACK, TRACK + 1)
     chip:SetSize(CHIP_WIDTH, 2)
-    chip:SetColorTexture(accent[1], accent[2], accent[3], 0.98)
+    -- The selection cue is warm white, not the amber chrome: it marks the one
+    -- plate the player is acting on, so it must read against every bar colour.
+    local mark = app.Theme.colors.text
+    chip:SetColorTexture(mark[1], mark[2], mark[3], 0.98)
     if isTarget then chip:Show() else chip:Hide() end
     if bar.lumaNameplateHolder then bar.lumaNameplateHolder:Show() end
 end
@@ -220,20 +223,18 @@ local function decorateSafely(bar, isTarget)
     return false
 end
 
--- Repaints a hostile bar with the unit's gradient pair when the previous colour
--- was readable, then always adds the decorations. A friendly bar keeps the
--- client's reaction colour, and a bar whose colour cannot be read keeps its
--- native fill: the record could not put it back.
+-- A confirmed hostile bar gets the Pearl combat fill: one fixed colour with an
+-- 8% vertical light drop instead of the horizontal gradient, which keeps a
+-- short 104–130 wide nameplate bar saturated. The unit's own colour still comes
+-- from the game (class/reaction); the texture replacement is recorded and put
+-- back with the colour on release.
 local function paint(bar, unit, record, isTarget, enemy)
-    if not bar then return end
+    if not bar then return false end
     if enemy and record and record.paintable and type(bar.SetStatusBarColor) == "function"
         and not isForbidden(bar) then
-        if type(bar.SetStatusBarTexture) == "function" then
-            pcall(bar.SetStatusBarTexture, bar, app.Theme.media.bar)
-        end
-        app.Theme:PaintBar(bar, app.Theme:UnitColor(unit))
+        app.Theme:PaintCombatBar(bar, app.Theme:UnitColor(unit))
     end
-    decorateSafely(bar, isTarget)
+    return decorateSafely(bar, isTarget)
 end
 
 -- The snapshot is taken once per bar, before the first write. Only a readable
@@ -312,14 +313,33 @@ local function isTargetUnit(unit)
     return ok and same == true
 end
 
--- Only a confirmed hostile plate is touched. `UnitIsEnemy` is a cheap plain
--- boolean; a restricted answer is not proof of hostility, so the plate keeps its
+-- One classification for the paint gate and the diagnostics. Reaction is the
+-- most precise plain answer (it tells friendly from neutral); the hostile
+-- boolean covers builds that report no reaction. An unreadable answer is
+-- "unknown" and is never treated as hostility, so a restricted plate keeps its
 -- native look.
+local function classify(unit)
+    if type(UnitReaction) == "function" then
+        local ok, reaction = pcall(UnitReaction, unit, "player")
+        reaction = ok and app.Capabilities.Plain(reaction, "number") or nil
+        if reaction then
+            if reaction <= 3 then return "hostile" end
+            if reaction == 4 then return "neutral" end
+            return "friendly"
+        end
+    end
+    if type(UnitIsEnemy) == "function" then
+        local ok, enemy = pcall(UnitIsEnemy, "player", unit)
+        enemy = ok and app.Capabilities.Plain(enemy, "boolean") or nil
+        if enemy == true then return "hostile" end
+        if enemy == false then return "friendly" end
+    end
+    return "unknown"
+end
+
+-- Only a confirmed hostile plate gets its fill replaced.
 local function hostile(unit)
-    if type(UnitIsEnemy) ~= "function" then return false end
-    local ok, enemy = pcall(UnitIsEnemy, "player", unit)
-    enemy = ok and app.Capabilities.Plain(enemy, "boolean") or nil
-    return enemy == true
+    return classify(unit) == "hostile"
 end
 
 local attach, retry
@@ -360,13 +380,19 @@ attach = function(self, unit)
     local record = remember(self, bar)
     local target = isTargetUnit(unit)
     local enemy = hostile(unit)
-    paint(bar, unit, record, target, enemy)
+    local decorated = paint(bar, unit, record, target, enemy)
     self.lastReason = "ok"
     -- A styled plate clears its attempt count, so a later appearance of the same
     -- unit token gets a fresh pair of retries instead of inheriting failures.
     if self.retries then self.retries[unit] = nil end
     self.plates[unit] = {
         unit = unit, bar = bar, source = info.source, target = target, enemy = enemy,
+        class = classify(unit), decorated = decorated == true,
+        -- "painted" means the LumaUI fill really replaced the client's: a
+        -- hostile plate with a readable colour. Everything else kept the
+        -- client's own fill and is reported as such.
+        painted = enemy and record.paintable
+            and type(bar.SetStatusBarColor) == "function",
     }
     return true
 end
@@ -376,9 +402,11 @@ end
 local TRANSIENT = { ["no-plate"] = true, ["no-unit-frame"] = true, ["no-health-bar"] = true }
 
 -- One short retry per unit and plate appearance. The timer is one-shot, checks
--- `running` and whether the plate is already owned, so a discontinued component
--- or a plate that vanished in the meantime costs nothing. The callback runs
--- outside the combat queue: it only reads and decorates, never a protected frame.
+-- `running`, whether the plate is already owned, and that the unit still points
+-- at the same plate the attempt started with, so a discontinued component, a
+-- plate that vanished or a plate recycled for another unit costs nothing. The
+-- callback runs outside the combat queue: it only reads and decorates, never a
+-- protected frame.
 retry = function(self, unit)
     if not self.running or not TRANSIENT[self.lastReason or ""] then return end
     -- Only a real nameplate token is worth a second look. "target" has no plate
@@ -390,8 +418,13 @@ retry = function(self, unit)
     local attempts = self.retries[unit] or 0
     if attempts >= 2 then return end
     self.retries[unit] = attempts + 1
+    local expected = self.last and self.last.plate or nil
     C_Timer.After(0.25, function()
         if not self.running or self.plates[unit] then return end
+        if expected then
+            local plate = plateFor(unit)
+            if plate ~= expected then return end
+        end
         app:Call("nameplates/retry", attach, self, unit)
     end)
 end
@@ -419,6 +452,40 @@ local function scan(self)
     end
 end
 
+-- The target alias only contributes the selection mark (010 phase 06). When the
+-- target's plate is one of the client's own nameplateN tokens — the normal
+-- case — that token owns the bar and the alias never records it, so `target`
+-- and `nameplateN` cannot both hold (and later restore) the same plate. The
+-- alias record exists only for a build that answers the target plate through
+-- the alias alone, and is dropped as soon as the target changes or a real
+-- token takes the bar over.
+local function targetPlate(self)
+    local plate = plateFor("target")
+    if not plate then return nil end
+    for index = 1, 40 do
+        local unit = "nameplate" .. index
+        if plateFor(unit) == plate then
+            if not self.plates[unit] then attach(self, unit) end
+            return unit
+        end
+    end
+    return nil
+end
+
+local function attachTarget(self)
+    local unit = targetPlate(self)
+    local fallback = self.plates["target"]
+    if unit then
+        if fallback then releaseUnit(self, "target") end
+        markTarget(self)
+        return
+    end
+    local info = resolve("target")
+    if fallback and fallback.bar ~= info.bar then releaseUnit(self, "target") end
+    if info.bar then attach(self, "target") end
+    markTarget(self)
+end
+
 component = app:RegisterComponent({ id = "nameplates", label = "nameplates", defaultEnabled = true,
     Supported = function()
         local api = _G.C_NamePlate
@@ -440,22 +507,18 @@ component = app:RegisterComponent({ id = "nameplates", label = "nameplates", def
             if type(unit) == "string" then releaseUnit(current, unit) end
         end)
         self:Listen("PLAYER_TARGET_CHANGED", function(current)
-            attach(current, "target")
-            markTarget(current)
+            attachTarget(current)
         end)
         self:Listen("PLAYER_ENTERING_WORLD", function(current)
             scan(current)
-            attach(current, "target")
-            markTarget(current)
+            attachTarget(current)
         end)
         scan(self)
-        attach(self, "target")
-        markTarget(self)
+        attachTarget(self)
     end,
     Refresh = function(self)
         scan(self)
-        attach(self, "target")
-        markTarget(self)
+        attachTarget(self)
     end,
     Disable = function(self)
         restoreAll(self)
@@ -563,24 +626,52 @@ function component:Diagnose()
         app:Print(string.format("  %s · units=%d · %s=%d", reasonWord(info.reason),
             owned, app.L.nativePlatesPainted, painted))
     end
-    -- Plate inventory, independent of the target: this is the line that answers
-    -- "is there anything on screen to style at all". Three plates are enough to
-    -- tell a field-name mismatch from an empty scene.
+    -- Per-plate inventory and one totals line, independent of the target. This
+    -- is what turns the 17:42 export's `hostile=0` from a mystery into a
+    -- count: it says how many plates exist, how many expose a readable bar, and
+    -- how many were classified each way, so "no plates drawn" and "plates drawn
+    -- but not classified" cannot be confused.
+    local stats = { bases = 0, readable = 0, friendly = 0, neutral = 0,
+        hostile = 0, unknown = 0, decorated = 0, paintedFill = 0, keptFill = 0 }
     local found = {}
     for index = 1, 40 do
         local unit = "nameplate" .. index
-        if plateFor(unit) then found[#found + 1] = unit end
-        if #found >= 3 then break end
+        if plateFor(unit) then
+            stats.bases = stats.bases + 1
+            local unitInfo = resolve(unit)
+            local class = classify(unit)
+            stats[class] = stats[class] + 1
+            local record = self.plates and self.plates[unit]
+            if unitInfo.bar then
+                stats.readable = stats.readable + 1
+                if record and record.decorated then stats.decorated = stats.decorated + 1 end
+                if record and record.painted then stats.paintedFill = stats.paintedFill + 1
+                elseif record then stats.keptFill = stats.keptFill + 1 end
+            end
+            if #found < 5 then
+                found[#found + 1] = { unit = unit, info = unitInfo, class = class, record = record }
+            end
+        end
     end
-    if #found == 0 then
+    app:Print(string.format(
+        "  plates: bases=%d readable=%d friendly=%d neutral=%d hostile=%d unknown=%d decorated=%d painted=%d keptFill=%d",
+        stats.bases, stats.readable, stats.friendly, stats.neutral, stats.hostile,
+        stats.unknown, stats.decorated, stats.paintedFill, stats.keptFill))
+    if stats.bases == 0 then
         app:Print("  " .. app.L.nameplatesNoVisible)
     else
-        for _, unit in ipairs(found) do
-            local unitInfo = resolve(unit)
-            app:Print(string.format("  %s: frame=%s modern=%s legacy=%s bar=%s", unit,
+        for _, entry in ipairs(found) do
+            local unitInfo = entry.info
+            app:Print(string.format(
+                "  %s: class=%s owner=%s frame=%s modern=%s legacy=%s bar=%s decorated=%s fill=%s target=%s",
+                entry.unit, entry.class,
+                entry.record and "luma" or "native",
                 yes(unitInfo.frame ~= nil), stateWord(unitInfo.modern),
                 stateWord(unitInfo.legacy),
-                unitInfo.bar and (unitInfo.source or "ok") or tostring(unitInfo.reason or "?")))
+                unitInfo.bar and (unitInfo.source or "ok") or tostring(unitInfo.reason or "?"),
+                yes(entry.record and entry.record.decorated),
+                entry.record and (entry.record.painted and "luma" or "native") or "-",
+                yes(isTargetUnit(entry.unit))))
         end
     end
     if type(GetCVar) == "function" then

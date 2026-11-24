@@ -54,6 +54,12 @@ function app:WriteDiagnostics()
             self:Print("")
         end
         self.Layout:Diagnose()
+        -- The plate inventory uses the same wording as `/luma plates`, so a
+        -- dump and a chat report can be compared line by line (010 phase 06).
+        local plates = self.components and self.components.nameplates
+        if plates and plates.running and type(plates.Diagnose) == "function" then
+            self:Call("dump/nameplates", plates.Diagnose, plates)
+        end
     end)
     store.data.diagnostics = { version = self.version, lines = lines }
     self:Print(self.L.diagnosticsSaved)

@@ -17,9 +17,11 @@ test("manifest loads, login enables isolated components", function()
     eq(app.components.unitFrames.running, nil)
     eq(#app.errors, 0)
     H.Fire("PLAYER_LOGIN")
-    -- data strip clock, minimap clock, quest list task-time tick, top reading,
-    -- and the cooldown stack's slow re-check of the client's own repacks
-    eq(#H.timers, 5)
+    -- data strip clock, minimap clock, quest list task-time tick and the
+    -- cooldown stack's slow re-check of the client's own repacks. The top
+    -- performance capsule is off by default (010 phase 08), so its ticker is
+    -- not among them.
+    eq(#H.timers, 4)
 end)
 
 test("profiles isolate copies and remember each character", function()
@@ -1873,7 +1875,7 @@ test("unit frame height follows parts and disable releases everything", function
     app.Store:Set("modules", "unitFrames", true)
     local units = app.components.unitFrames
     local frame = units.frames.target
-    eq(frame:GetWidth(), 200)
+    eq(frame:GetWidth(), 180)
     eq(frame:GetHeight(), 80)
     eq(frame.watched, true)
     -- Hover shows the unit tooltip through the interaction part.
@@ -1907,19 +1909,20 @@ test("unit main frames share the health baseline and keep it during part changes
     app.Store:Set("modules", "unitFrames", true)
     local units = app.components.unitFrames
     local player, target = units.frames.player, units.frames.target
-    eq(player:GetWidth(), 200)
-    eq(target:GetWidth(), 200)
+    eq(player:GetWidth(), 180)
+    eq(target:GetWidth(), 180)
     eq(player.health:GetHeight(), 18)
     eq(target.health:GetHeight(), 18)
     local function healthTop(frame)
         return frame.point[5] + frame:GetHeight() / 2 - 15
     end
-    -- 69% of 1080 from the top is -205.2 from the screen centre.
-    eq(math.abs(healthTop(player) + 205.2) < 0.01, true)
+    -- The health top aligns with the applied main skill row: in this fixture the
+    -- utility row ends at 172 above the screen bottom, i.e. -368 from centre.
+    eq(math.abs(healthTop(player) + 368) < 0.01, true)
     eq(math.abs(healthTop(target) - healthTop(player)) < 0.01, true)
-    -- Fallback cooldown block is 300 UI units: centre = 150 + 24 + 100.
-    eq(player.point[4], -255.76)
-    eq(target.point[4], 255.76)
+    -- Fallback cooldown block is 300 UI units: centre = 150 + 5.76 + 90.
+    eq(player.point[4], -245.76)
+    eq(target.point[4], 245.76)
     local playerTop = player.point[5] + player:GetHeight() / 2
     -- Auras sit directly under power; the target cast owns the next row.
     eq(target.auraIcons[1].point[3], -40)
@@ -1967,8 +1970,10 @@ test("auxiliary unit frames are compact and sit in the inner half of their colum
     eq(pet.health.point[3], -13)
     eq(pet.cast, nil)
     eq(pet.auraIcons, nil)
-    eq(pet.point[4], player.point[4] + 50)
-    eq(tot.point[4], target.point[4] - 50)
+    -- A 100-wide auxiliary frame sits centred in the inner half of the
+    -- 180-wide main column: (180 - 100) / 2 = 40 in from its centre.
+    eq(pet.point[4], player.point[4] + 40)
+    eq(tot.point[4], target.point[4] - 40)
     eq(focus.point[4], target.point[4])
     -- Pet sits under the player, focus above the target, both with a 6px gap.
     eq(pet.point[5] + pet:GetHeight() / 2, player.point[5] - player:GetHeight() / 2 - 6)
@@ -1987,7 +1992,7 @@ test("saved unit positions keep their old centre instead of the new default", fu
     eq(units.frames.pet.point[4], 77)
     eq(units.frames.pet.point[5], -88)
     -- An unsaved frame still receives the shared central default.
-    eq(units.frames.target.point[4], 255.76)
+    eq(units.frames.target.point[4], 245.76)
     eq(#app.errors, 0)
 end)
 
@@ -4079,20 +4084,24 @@ test("nameplates paint the target bar and restore it on disable", function()
     eq(app.components.nameplates.status, "disabled")
     app.Store:Set("modules", "nameplates", true)
     local bar = H.targetBar
-    -- The bar is repainted with the target's class/reaction pair.
-    eq(bar.gradient ~= nil, true)
+    -- The bar is repainted with the Pearl combat fill: one fixed colour on the
+    -- matte texture, no horizontal gradient record.
+    eq(bar.gradient, nil)
+    eq(bar.statusFill ~= nil and bar.statusFill.texture, app.Theme.media.combatFill)
     local original = app.components.nameplates.originals[bar]
     eq(original ~= nil, true)
     eq(original.color[1], 0.8)
+    eq(original.texture ~= nil, true)
     -- A target change repaints without stacking records.
     local count = 0
     for _ in pairs(app.components.nameplates.originals) do count = count + 1 end
     eq(count, 1)
     H.Fire("PLAYER_TARGET_CHANGED")
     eq(count, 1)
-    -- Disabling restores the original colour and colour fill.
+    -- Disabling restores the original colour and fill texture.
     app.Store:Set("modules", "nameplates", false)
     eq(bar.barColor[1], 0.8)
+    eq(bar.statusFill.texture, original.texture)
     eq(#app.errors, 0)
 end)
 
@@ -4531,8 +4540,8 @@ test("every hostile plate gets the visible layer and only the target carries the
     local first = addPlate("nameplate1", { 0.5, 0.1, 0.1, 1 })
     local second = addPlate("nameplate2", { 0.2, 0.5, 0.1, 1 })
     -- Both plates are painted from their own snapshot, not only the target.
-    eq(first.gradient ~= nil, true)
-    eq(second.gradient ~= nil, true)
+    eq(first.statusFill.texture, app.Theme.media.combatFill)
+    eq(second.statusFill.texture, app.Theme.media.combatFill)
     eq(first.lumaNameplateBg:IsShown(), true)
     eq(second.lumaNameplateBg:IsShown(), true)
     eq(component.plates.nameplate1 ~= nil, true)
@@ -4691,7 +4700,8 @@ test("the modern nested nameplate bar wins over the legacy field", function()
     H.nameplates.target = H.Plate("both", modern, legacy)
     H.Fire("PLAYER_TARGET_CHANGED")
     -- Only the field the Retail unit frame really uses is painted.
-    eq(modern.gradient ~= nil, true)
+    eq(modern.statusFill.texture, app.Theme.media.combatFill)
+    eq(modern.gradient, nil)
     eq(legacy.gradient, nil)
     eq(legacy.barColor[1], 0.2)
     eq(app.components.nameplates.originals[legacy], nil)
@@ -4725,7 +4735,7 @@ test("a modern nameplate field without a drawing method falls back to the legacy
     local legacy = H.PlainBar({ 0.2, 0.3, 0.4, 1 })
     H.nameplates.target = H.Plate("both", modern, legacy)
     H.Fire("PLAYER_TARGET_CHANGED")
-    eq(legacy.gradient ~= nil, true)
+    eq(legacy.statusFill.texture, app.Theme.media.combatFill)
     eq(app.components.nameplates.originals[legacy] ~= nil, true)
     app.Store:Set("modules", "nameplates", false)
     eq(legacy.barColor[1], 0.2)
@@ -4757,6 +4767,264 @@ test("the nameplate diagnostic names a missing unit frame", function()
     app.components.nameplates:Diagnose()
     local joined = table.concat(H.messages, "\n")
     eq(joined:find("frame=no", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the target's plate is owned by its nameplate token, not the alias", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    local component = app.components.nameplates
+    -- Before the client exposes a token the alias alone holds the plate.
+    eq(component.plates.target ~= nil, true)
+    -- The client now answers the same plate through a real token: the token
+    -- takes ownership and the alias record is released, so one plate is never
+    -- held (and restored) twice.
+    H.nameplates.nameplate7 = H.nameplates.target
+    H.unitInfo.nameplate7 = { reaction = 3 }
+    H.Fire("PLAYER_TARGET_CHANGED")
+    eq(component.plates.target, nil)
+    eq(component.plates.nameplate7 ~= nil, true)
+    eq(component.plates.nameplate7.bar, H.targetBar)
+    eq(component.plates.nameplate7.class, "hostile")
+    local painted = 0
+    for _ in pairs(component.originals) do painted = painted + 1 end
+    eq(painted, 1)
+    -- The token goes away: its bar is restored and no alias record takes over.
+    H.nameplates.nameplate7 = nil
+    H.Fire("NAME_PLATE_UNIT_REMOVED", "nameplate7")
+    eq(component.plates.nameplate7, nil)
+    eq(component.plates.target, nil)
+    eq(H.targetBar.barColor[1], 0.8)
+    eq(#app.errors, 0)
+end)
+
+test("the plate report counts bases, classes and fill outcomes", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    local function addPlate(unit, reaction, plate)
+        H.unitInfo[unit] = { reaction = reaction }
+        H.nameplates[unit] = plate or H.Plate("modern")
+        H.Fire("NAME_PLATE_UNIT_ADDED", unit)
+        return H.nameplates[unit]
+    end
+    addPlate("nameplate1", 2)  -- hostile, painted
+    addPlate("nameplate2", 5)  -- friendly, native fill kept
+    addPlate("nameplate3", 4)  -- neutral, native fill kept
+    local restricted = H.Plate("modern", H.PlainBar({ 0.5, 0.2, 0.2, 1 }))
+    restricted.UnitFrame.HealthBarsContainer.healthBar.forbidden = true
+    addPlate("nameplate4", 2, restricted)  -- hostile, restricted bar
+    -- No readable reaction and no readable hostile answer: class unknown. The
+    -- stub stays active through the report because the report re-classifies on
+    -- the spot instead of trusting the record's snapshot.
+    local bare = H.Plate("modern")
+    H.unitInfo.nameplate5 = {}
+    H.nameplates.nameplate5 = bare
+    local enemy = _G.UnitIsEnemy
+    _G.UnitIsEnemy = function(a, b)
+        if b == "nameplate5" then return H.Secret(true) end
+        return enemy(a, b)
+    end
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate5")
+    H.messages = {}
+    app.components.nameplates:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("plates: bases=5 readable=4 friendly=1 neutral=1 hostile=2 unknown=1", 1, true) ~= nil, true)
+    eq(text:find("decorated=4", 1, true) ~= nil, true)
+    -- Only the one hostile plate with a readable colour gets the LumaUI fill;
+    -- the friendly, neutral and unknown plates keep the client's own.
+    eq(text:find("painted=1", 1, true) ~= nil, true)
+    eq(text:find("keptFill=3", 1, true) ~= nil, true)
+    -- Per-plate lines name the class, the owner and whether the fill is ours.
+    eq(text:find("nameplate2: class=friendly owner=luma", 1, true) ~= nil, true)
+    eq(text:find("nameplate4: class=hostile owner=native", 1, true) ~= nil, true)
+    eq(text:find("nameplate5: class=unknown", 1, true) ~= nil, true)
+    eq(text:find("fill=luma", 1, true) ~= nil, true)
+    eq(text:find("fill=native", 1, true) ~= nil, true)
+    -- `/luma dump` carries the same totals into the saved report.
+    H.messages = {}
+    SlashCmdList.LUMAUI("dump")
+    local saved = table.concat(LumaUIDB.diagnostics.lines, "\n")
+    eq(saved:find("plates: bases=5", 1, true) ~= nil, true)
+    _G.UnitIsEnemy = enemy
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("a retry bound to a recycled plate never decorates the new one", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    local component = app.components.nameplates
+    -- The token appears without a unit frame yet, which schedules the one retry.
+    local bare = H.NewFrame(nil, UIParent)
+    H.nameplates.nameplate9 = bare
+    H.unitInfo.nameplate9 = { reaction = 3 }
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate9")
+    -- The client recycles the token for another plate before the retry fires.
+    local fresh = H.Plate("modern")
+    H.nameplates.nameplate9 = fresh
+    H.Advance(0.3)
+    local bar = fresh.UnitFrame.HealthBarsContainer.healthBar
+    eq(bar.lumaNameplateBg, nil)
+    eq(component.plates.nameplate9, nil)
+    -- A fresh ADDED event styles the new plate normally.
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate9")
+    eq(bar.lumaNameplateBg:IsShown(), true)
+    eq(component.plates.nameplate9.bar, bar)
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("a plate that turns forbidden is released without a write", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    H.unitInfo.nameplate2 = { reaction = 3 }
+    local plate = H.Plate("modern")
+    H.nameplates.nameplate2 = plate
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate2")
+    local bar = plate.UnitFrame.HealthBarsContainer.healthBar
+    local component = app.components.nameplates
+    eq(component.originals[bar] ~= nil, true)
+    bar.forbidden = true
+    H.Fire("NAME_PLATE_UNIT_REMOVED", "nameplate2")
+    -- The record is dropped without writing to the now-restricted bar.
+    eq(component.plates.nameplate2, nil)
+    eq(component.originals[bar], nil)
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("the target chip is warm white and friendly bars keep their fill", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    local text = app.Theme.colors.text
+    eq(H.targetBar.lumaNameplateTarget.color[1], text[1])
+    eq(H.targetBar.lumaNameplateTarget.color[2], text[2])
+    eq(H.targetBar.lumaNameplateTarget.color[3], text[3])
+    -- A friendly plate is decorated but its fill stays the client's own.
+    H.unitInfo.nameplate3 = { reaction = 5 }
+    local plate = H.Plate("modern")
+    H.nameplates.nameplate3 = plate
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate3")
+    local bar = plate.UnitFrame.HealthBarsContainer.healthBar
+    eq(bar.statusFill == nil or bar.statusFill.texture == nil, true)
+    eq(bar.lumaNameplateBg:IsShown(), true)
+    eq(app.components.nameplates.plates.nameplate3.painted, false)
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("region samples separate shown, parent-hidden and alpha-zero", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    ChatFrame1.rect = { left = 32, bottom = 48, width = 514, height = 194 }
+    local sample = app.Layout:Sample("chat")
+    eq(sample.shown, true)
+    eq(sample.visible, true)
+    -- The frame itself is shown but its parent is hidden: nothing is drawn, and
+    -- the report says "not visible" while `shown` stays truthful.
+    UIParent:Hide()
+    sample = app.Layout:Sample("chat")
+    eq(sample.shown, true)
+    eq(sample.visible, false)
+    UIParent:Show()
+    -- Alpha zero draws nothing either.
+    ChatFrame1:SetAlpha(0)
+    sample = app.Layout:Sample("chat")
+    eq(sample.visible, false)
+    eq(sample.alpha, 0)
+    ChatFrame1:SetAlpha(1)
+    eq(app.Layout:Sample("chat").visible, true)
+    eq(#app.errors, 0)
+end)
+
+test("/luma hud covers the resource, unit, chat plate and reserved cast area", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    H.messages = {}
+    app.Layout:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("resource LumaUIPlayerResource:", 1, true) ~= nil, true)
+    eq(text:find("chatPlate LumaUIChatFrame1Plate:", 1, true) ~= nil, true)
+    eq(text:find("unit LumaUIUnit_player:", 1, true) ~= nil, true)
+    eq(text:find("unit LumaUIUnit_target:", 1, true) ~= nil, true)
+    eq(text:find("castArea LumaUIPlaceholder_unit_player_cast:", 1, true) ~= nil, true)
+    eq(text:find("reserved=yes", 1, true) ~= nil, true)
+    eq(text:find("vis=", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the hud report shows the applied skill top the rail follows", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    _G.EssentialCooldownViewer:SetSize(275, 118)
+    H.Fire("PLAYER_LOGIN")
+    H.messages = {}
+    app.Layout:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("cooldown: bottom=104 top=222", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the chat size trial is explicit, reversible and refused in combat", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    ChatFrame1:SetSize(514, 194)
+    H.messages = {}
+    SlashCmdList.LUMAUI("chat")
+    eq(ChatFrame1:GetWidth(), 320)
+    eq(ChatFrame1:GetHeight(), 140)
+    eq(table.concat(H.messages, "\n"):find(app.L.chatSizeOn, 1, true) ~= nil, true)
+    -- The message plate follows the resized frame in the same pass.
+    eq(app.components.chat.windows[1].background:IsShown(), true)
+    -- Combat refuses instead of resizing a docked, protected frame.
+    H.Combat(true)
+    H.messages = {}
+    SlashCmdList.LUMAUI("chat")
+    eq(table.concat(H.messages, "\n"):find(app.L.layoutCombat, 1, true) ~= nil, true)
+    eq(ChatFrame1:GetWidth(), 320)
+    H.Combat(false)
+    -- Asking again restores the recorded size.
+    H.messages = {}
+    SlashCmdList.LUMAUI("chat")
+    eq(ChatFrame1:GetWidth(), 514)
+    eq(ChatFrame1:GetHeight(), 194)
+    eq(table.concat(H.messages, "\n"):find(app.L.chatSizeOff, 1, true) ~= nil, true)
+    -- Turning the component off also gives back any size it still holds.
+    SlashCmdList.LUMAUI("chat")
+    eq(ChatFrame1:GetWidth(), 320)
+    app.Store:Set("modules", "chat", false)
+    eq(ChatFrame1:GetWidth(), 514)
+    eq(#app.errors, 0)
+end)
+
+test("the chat plate and the native chat are one surface, not an overlap", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    ChatFrame1.rect = { left = 32, bottom = 48, width = 514, height = 194 }
+    _G.LumaUIChatFrame1Plate.rect = { left = 30, bottom = 46, width = 518, height = 198 }
+    eq(#app.Layout:Overlaps(), 0)
+    -- The resource rail crossing the chat is a real conflict, reported once for
+    -- the window even though two chat frames are sampled.
+    _G.LumaUIPlayerResource.rect = { left = 40, bottom = 60, width = 200, height = 10 }
+    local list = app.Layout:Overlaps()
+    eq(#list, 1)
+    eq(list[1].a == "chat" or list[1].b == "chat", true)
+    eq(#app.errors, 0)
+end)
+
+test("the unit report names the player cast bar's real owner", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    local line = app.components.unitFrames:Describe()
+    eq(line:find(app.L.nativeTargetCast, 1, true) ~= nil, true)
+    eq(line:find(app.L.playerCastNative, 1, true) ~= nil, true)
+    H.messages = {}
+    app.components.unitFrames:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("cast: owner=native", 1, true) ~= nil, true)
+    eq(text:find("takeover=possible", 1, true) ~= nil, true)
+    -- The native bar is still the one shown; the takeover flag never moves it.
+    eq(PlayerCastingBarFrame:IsShown(), true)
     eq(#app.errors, 0)
 end)
 
@@ -7005,18 +7273,18 @@ test("combat preset keeps unit frames close to the action area on wide screens",
     local playerOverlay = app.Layout.presetOverlays.unit_player
     local targetOverlay = app.Layout.presetOverlays.unit_target
     local firstX = playerOverlay.point[4]
-    eq(firstX, -255.76)
-    eq(targetOverlay.point[4], 255.76)
+    eq(firstX, -245.76)
+    eq(targetOverlay.point[4], 245.76)
     UIParent:SetSize(3440, 1440)
     H.Fire("DISPLAY_SIZE_CHANGED")
     -- The gutter is a screen-width ratio, so it grows from 5.76 to the 8 unit
     -- cap on an ultrawide screen; the block itself stays at the measured 300.
-    eq(playerOverlay.point[4], -258)
-    eq(targetOverlay.point[4], 258)
+    eq(playerOverlay.point[4], -248)
+    eq(targetOverlay.point[4], 248)
     eq(app.Layout.previewName, "combat")
     app.Layout:ApplyPreset("combat")
-    eq(app.components.unitFrames.frames.player.point[4], -258)
-    eq(app.components.unitFrames.frames.target.point[4], 258)
+    eq(app.components.unitFrames.frames.player.point[4], -248)
+    eq(app.components.unitFrames.frames.target.point[4], 248)
     eq(#app.errors, 0)
 end)
 
@@ -9576,6 +9844,46 @@ test("a control draws its hairline only while it has a state to announce", funct
     eq(#app.errors, 0)
 end)
 
+test("Pearl combat fill paints a fixed colour on the matte texture", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.Theme.media.combatFill, "Interface\\AddOns\\LumaUI\\Media\\combat-fill.tga")
+    eq(app.Theme.media.scrim, "Interface\\AddOns\\LumaUI\\Media\\hud-scrim.tga")
+    local bar = app.Theme:Bar(UIParent, 10)
+    app.Theme:PaintCombatBar(bar, { 0.88, 0.24, 0.20 })
+    -- The fill is the matte texture with the bar's own colour; no horizontal
+    -- gradient record, which is what kept short bars saturated.
+    eq(bar.statusFill.texture, app.Theme.media.combatFill)
+    eq(bar.gradient, nil)
+    eq(bar.barColor[1], 0.88)
+    eq(bar.barColor[2], 0.24)
+    eq(bar.barColor[3], 0.20)
+    -- The track is the same colour dimmed, so the empty part still reads.
+    eq(bar.background.color ~= nil, true)
+    -- The legacy gradient painter still chooses its own texture: the two roles
+    -- are independent and existing panels keep their path.
+    local legacy = app.Theme:Bar(UIParent, 12)
+    app.Theme:PaintBar(legacy, { 0.2, 0.8, 0.4 })
+    eq(legacy.gradient ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the text scrim is one local texture per host, reused on repaint", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local host = H.NewFrame(nil, UIParent)
+    local scrim = app.Theme:Scrim(host, 6)
+    eq(scrim ~= nil, true)
+    eq(host.lumaScrim, scrim)
+    eq(scrim.texture, app.Theme.media.scrim)
+    eq(scrim:IsShown(), true)
+    -- Repeated paints reuse the same texture instead of stacking another one.
+    local children = #(host.children or {})
+    eq(app.Theme:Scrim(host, 6), scrim)
+    eq(#(host.children or {}), children)
+    -- A host that cannot parent textures simply draws none.
+    eq(app.Theme:Scrim({}, 4), nil)
+    eq(#app.errors, 0)
+end)
+
 test("surface layers stay inside the client's sublevel range", function()
     local app = H.Load()
     local layers = app.Surface.LAYERS
@@ -9723,9 +10031,11 @@ test("action bars stack at the centre and restore on disable", function()
     local button = MainActionBar.actionButtons[1]
     local countdown = H.NewFrame(nil, button)
     countdown:SetFont("Fonts/Mock.ttf", 10)
+    local cooldownWrites = 0
     local cooldown = H.NewFrame(nil, button)
     cooldown.GetCountdownFontString = function() return countdown end
-    cooldown.SetHideCountdownNumbers = function(self, hide) self.hideNumbers = hide end
+    cooldown.SetHideCountdownNumbers = function(self, hide) cooldownWrites = cooldownWrites + 1; self.hideNumbers = hide end
+    cooldown.SetSwipeColor = function() cooldownWrites = cooldownWrites + 1 end
     button.cooldown = cooldown
     H.Fire("PLAYER_LOGIN")
 
@@ -9741,10 +10051,14 @@ test("action bars stack at the centre and restore on disable", function()
     eq(MainActionBar.alpha, 0)
     eq(bar2.alpha, 0)
     eq(bar3.alpha, 0)
-    eq(cooldown.hideNumbers, false)
-    eq(countdown.fontSize, 13)
-    eq(countdown.point[1], "CENTER")
-    eq(countdown.point[2], button)
+    -- The native cooldown object is never written: in 12.x its update passes
+    -- secret values to SetCooldown and any addon write on it taints that call
+    -- (field report: "Secret values are only allowed during untainted
+    -- execution"). Countdown text keeps the client's own font and anchors too.
+    eq(cooldownWrites, 0)
+    eq(cooldown.hideNumbers, nil)
+    eq(countdown.fontSize, 10)
+    eq(countdown.point, nil)
 
     _G.MouseIsOver = function() return true end
     H.Advance(0.35)
@@ -9990,6 +10304,220 @@ end)
 -- client's own viewer frame, not from how many skills happen to be active: a
 -- HUD that walks in and out on every cooldown is what a player reads as "the
 -- style changed after entering the instance".
+-- An item shaped like the client's cooldown viewer template (see
+-- Blizzard_CooldownViewer/CooldownViewer.xml): an ARTWORK `Icon` texture, a
+-- `Cooldown` frame with SetCountdownFont, `ChargeCount.Current` and the
+-- template's own `cooldownFont` key used to restore the countdown font.
+local function skinnableItem(name, viewer)
+    local button = H.NewFrame(name, viewer)
+    button:SetSize(28, 28)
+    button:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+    button.rect = { left = 810, bottom = 830, width = 28, height = 28 }
+    button.Icon = H.NewFrame(nil, button)
+    local cooldown = H.NewFrame(nil, button)
+    cooldown.SetCountdownFont = function(self, font) self.font = font end
+    button.Cooldown = cooldown
+    local charge = H.NewFrame(nil, button)
+    local current = H.NewFrame(nil, charge)
+    current:SetFont("Fonts/Mock.ttf", 12, "")
+    charge.Current = current
+    button.ChargeCount = charge
+    button.cooldownFont = "GameFontHighlightHugeOutline"
+    return button
+end
+
+local function essentialSkinned(app, items)
+    local viewer = _G.EssentialCooldownViewer
+    viewer:SetSize(300, 40)
+    viewer:Show()
+    viewer.icons = items
+    app.components.cooldownViewer:Refresh()
+    return viewer
+end
+
+test("the cooldown skin crops icons and restores every recorded member", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = skinnableItem("SkinIcon1", _G.EssentialCooldownViewer)
+    essentialSkinned(app, { button })
+    local crop = app.CooldownSkin.crop
+    eq(button.Icon.texCoord[1], crop[1])
+    eq(button.Icon.texCoord[2], crop[2])
+    eq(button.Icon.texCoord[3], crop[3])
+    eq(button.Icon.texCoord[4], crop[4])
+    eq(button.lumaCooldownDecor.bg:IsShown(), true)
+    eq(button.lumaCooldownDecor.border:IsShown(), true)
+    eq(button.lumaCooldownDecor.border.backdrop.edgeSize, 1)
+    -- Timer and charge fonts are the Pearl roles; the native cooldown values
+    -- (swipe, charges, glow) are never written.
+    eq(button.Cooldown.font, app.Theme.fontObjects.iconTimer)
+    eq(button.ChargeCount.Current.fontSize, 11)
+    eq(button.ChargeCount.Current.fontFlags, "OUTLINE")
+    eq(button.Cooldown.cooldownStart, nil)
+    eq(button.Cooldown.cooldownDuration, nil)
+    eq(app.components.cooldownViewer:Describe():find("skin=1/1", 1, true) ~= nil, true)
+    app.Store:Set("modules", "cooldownViewer", false)
+    -- The recorded crop, fonts and decorations all go back.
+    eq(button.Icon.texCoord[1], 0)
+    eq(button.Icon.texCoord[5], 1)
+    eq(button.Icon.texCoord[6], 1)
+    eq(button.Cooldown.font, "GameFontHighlightHugeOutline")
+    eq(button.ChargeCount.Current.fontSize, 12)
+    eq(button.ChargeCount.Current.fontFlags, "")
+    eq(button.lumaCooldownDecor.bg:IsShown(), false)
+    eq(button.lumaCooldownDecor.border:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("a cooldown item without readable members stays native and is counted", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local plain = H.NewFrame("PlainIcon", _G.EssentialCooldownViewer)
+    plain:SetSize(28, 28)
+    plain:SetPoint("TOPLEFT", _G.EssentialCooldownViewer, "TOPLEFT", 40, 0)
+    plain.rect = { left = 850, bottom = 830, width = 28, height = 28 }
+    local good = skinnableItem("SkinIcon2", _G.EssentialCooldownViewer)
+    essentialSkinned(app, { plain, good })
+    eq(plain.lumaCooldownSkin, nil)
+    eq(plain.lumaCooldownDecor, nil)
+    eq(good.lumaCooldownSkin ~= nil, true)
+    local counts = app.components.cooldownViewer.skinStats.essential
+    eq(counts.applied, 1)
+    eq(counts.unknown, 1)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(#app.errors, 0)
+end)
+
+test("a refused icon write rolls that item back and the next icon continues", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local broken = skinnableItem("SkinBroken", _G.EssentialCooldownViewer)
+    local setter = broken.Icon.SetTexCoord
+    broken.Icon.SetTexCoord = function(self, ...) error("refused", 0) end
+    local good = skinnableItem("SkinGood", _G.EssentialCooldownViewer)
+    good.rect = { left = 850, bottom = 830, width = 28, height = 28 }
+    essentialSkinned(app, { broken, good })
+    eq(broken.lumaCooldownSkin, nil)
+    eq(broken.lumaCooldownDecor.bg:IsShown(), false)
+    -- The rollback puts back the template's own countdown font, not the Pearl one.
+    eq(broken.Cooldown.font, "GameFontHighlightHugeOutline")
+    eq(good.Icon.texCoord[1], app.CooldownSkin.crop[1])
+    eq(app.components.cooldownViewer.skinStats.essential.applied, 1)
+    eq(app.components.cooldownViewer.skinStats.essential.unknown, 1)
+    broken.Icon.SetTexCoord = setter
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(#app.errors, 0)
+end)
+
+test("a reused pooled button restores the old members before the new skin", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = skinnableItem("PooledIcon", _G.EssentialCooldownViewer)
+    local oldIcon = button.Icon
+    essentialSkinned(app, { button })
+    eq(oldIcon.texCoord[1], app.CooldownSkin.crop[1])
+    -- The pool hands the frame a new icon; the old one must come back clean.
+    button.Icon = H.NewFrame(nil, button)
+    app.components.cooldownViewer:Refresh()
+    eq(oldIcon.texCoord[1], 0)
+    eq(oldIcon.texCoord[5], 1)
+    eq(button.Icon.texCoord[1], app.CooldownSkin.crop[1])
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(button.Icon.texCoord[1], 0)
+    eq(#app.errors, 0)
+end)
+
+test("a settled cooldown skin writes nothing on later passes", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = skinnableItem("SettledIcon", _G.EssentialCooldownViewer)
+    essentialSkinned(app, { button })
+    local writes = 0
+    local texSet, fontSet, chargeSet = button.Icon.SetTexCoord,
+        button.Cooldown.SetCountdownFont, button.ChargeCount.Current.SetFont
+    button.Icon.SetTexCoord = function(self, ...) writes = writes + 1; return texSet(self, ...) end
+    button.Cooldown.SetCountdownFont = function(self, ...) writes = writes + 1; return fontSet(self, ...) end
+    button.ChargeCount.Current.SetFont = function(self, ...) writes = writes + 1; return chargeSet(self, ...) end
+    local children = #(button.children or {})
+    H.Advance(2)
+    app.components.cooldownViewer:Refresh()
+    eq(writes, 0)
+    eq(#(button.children or {}), children)
+    button.Icon.SetTexCoord = texSet
+    button.Cooldown.SetCountdownFont = fontSet
+    button.ChargeCount.Current.SetFont = chargeSet
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(#app.errors, 0)
+end)
+
+test("/luma hud names the skinned icon count per viewer", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = skinnableItem("ReportIcon", _G.EssentialCooldownViewer)
+    essentialSkinned(app, { button })
+    H.messages = {}
+    app.Layout:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("viewer EssentialCooldownViewer:", 1, true) ~= nil, true)
+    eq(text:find("skin=1/1", 1, true) ~= nil, true)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(#app.errors, 0)
+end)
+
+test("fifteen essential icons stay two centred rows instead of dropping skills", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local viewer = _G.EssentialCooldownViewer
+    viewer:SetSize(300, 80)
+    viewer:Show()
+    viewer.icons = {}
+    for index = 1, 15 do
+        local icon = H.NewFrame("FifteenIcon" .. index, viewer)
+        icon:SetSize(30, 30)
+        icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", (index - 1) * 34, 0)
+        icon.rect = { left = 810 + (index - 1) * 34, bottom = 830, width = 30, height = 30 }
+        viewer.icons[index] = icon
+    end
+    app.components.cooldownViewer:Refresh()
+    -- Nine on the main row (302 wide, first slot -136), six on the centred row
+    -- above it (200 wide, first slot -85). Every one of the fifteen is placed:
+    -- capacity never drops a skill from the list.
+    eq(viewer.icons[1].point[4], -136)
+    eq(viewer.icons[9].point[4], 136)
+    eq(viewer.icons[10].point[4], -85)
+    eq(viewer.icons[15].point[4], 85)
+    eq(viewer.icons[10].point[5], 153)
+    for index = 1, 15 do eq(viewer.icons[index].point[1], "CENTER") end
+    app.Store:Set("modules", "cooldownViewer", false)
+    for index = 1, 15 do _G["FifteenIcon" .. index] = nil end
+    eq(#app.errors, 0)
+end)
+
+test("a viewer re-anchored every beat falls back to the native grid once", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local viewer = _G.EssentialCooldownViewer
+    viewer:SetSize(300, 40)
+    viewer:Show()
+    viewer.icons = {}
+    local icon = H.NewFrame("FlapIcon", viewer)
+    icon:SetSize(30, 30)
+    icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+    icon.rect = { left = 810, bottom = 830, width = 30, height = 30 }
+    viewer.icons[1] = icon
+    local component = app.components.cooldownViewer
+    -- The client keeps putting the pooled button back; the grid must not fight
+    -- it forever.
+    local function clientRepack() icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0) end
+    clientRepack(); component:Refresh()
+    clientRepack(); component:Refresh()
+    clientRepack(); component:Refresh()
+    eq(component.iconFallback[viewer], true)
+    eq(icon.point[1], "TOPLEFT")
+    -- From here the native grid is left alone: LumaUI writes nothing more.
+    local writes = 0
+    local setter = icon.SetPoint
+    icon.SetPoint = function(self, ...) writes = writes + 1; return setter(self, ...) end
+    clientRepack()
+    component:Refresh()
+    eq(writes, 1)
+    icon.SetPoint = setter
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(#app.errors, 1)
+end)
+
 test("the hud report lists each planned central row and the slot mode", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("appearance", "perIconSlots", false)
@@ -10348,6 +10876,172 @@ test("central grid geometry: empty, single, full and overflow rows", function()
     eq(#app.errors, 0)
 end)
 
+-- Plan 010/01 (red light): a 275 x 118 essential viewer puts its real top at
+-- 222 above a 104 block bottom, so the resource rail belongs at 228. Reading a
+-- fresh `Central()` returns `cooldown.top == cooldown.bottom` by construction,
+-- which is how the field screenshot got a rail at 110 crossing the lowest skill
+-- row. This test walks the normal login path and asserts the applied geometry.
+test("the resource rail anchors above the measured skill block, not its bottom", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    _G.EssentialCooldownViewer:SetSize(275, 118)
+    H.Fire("PLAYER_LOGIN")
+    local central = app.Layout:Central()
+    eq(central.cooldown.bottom, 104)
+    eq(central.cooldown.top, 222)
+    eq(app.components.playerResource.rail.point[5], 228)
+    eq(#app.errors, 0)
+end)
+
+test("a same-width height change moves the resource rail", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local viewer = _G.EssentialCooldownViewer
+    viewer:SetSize(275, 30)
+    H.Fire("PLAYER_LOGIN")
+    eq(app.components.playerResource.rail.point[5], 140)
+    -- The width never changes; only the row gets taller. The notification must
+    -- follow the top edge, not just the block width.
+    viewer:SetHeight(118)
+    app.components.cooldownViewer:Refresh()
+    eq(app.Layout:Central().content.width, 275)
+    eq(app.components.playerResource.rail.point[5], 228)
+    eq(#app.errors, 0)
+end)
+
+test("a refused main viewer keeps the rail above the rows that were placed", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local essential = _G.EssentialCooldownViewer
+    essential:SetSize(275, 118)
+    -- This build refuses the re-anchor; the viewer keeps wherever the client
+    -- put it. Its readable rect is the only trustworthy top edge.
+    essential.rect = { left = 800, bottom = 300, width = 275, height = 118 }
+    local original = essential.SetPoint
+    essential.SetPoint = function(self, point, ...)
+        if point == "BOTTOM" then error("refused", 0) end
+        return original(self, point, ...)
+    end
+    H.Fire("PLAYER_LOGIN")
+    eq(essential.point == nil or essential.point[1] ~= "BOTTOM", true)
+    eq(app.components.playerResource.rail.point[5], 424)
+    -- The corrected top is not mistaken for a new plan: a settled stack with a
+    -- refused row publishes nothing on later beats.
+    local published = 0
+    local observer = {}
+    app:Subscribe(observer, "LAYOUT_CENTRAL_CHANGED", function() published = published + 1 end)
+    app.components.cooldownViewer:Refresh()
+    app.components.cooldownViewer:Refresh()
+    eq(published, 0)
+    app:Unsubscribe(observer, "LAYOUT_CENTRAL_CHANGED")
+    -- Without readable geometry the refused row is unknown and the block
+    -- collapses to the reserved baseline instead of reserving a top nothing
+    -- draws at.
+    essential.rect = nil
+    app.Layout:ClearAppliedRows()
+    app.components.playerResource:Refresh()
+    eq(app.components.playerResource.rail.point[5], 110)
+    essential.SetPoint = original
+    app.components.playerResource.rail.point = nil
+    eq(#app.errors, 1)
+end)
+
+test("disabling the cooldown stack returns the rail to the reserved baseline", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    _G.EssentialCooldownViewer:SetSize(275, 118)
+    H.Fire("PLAYER_LOGIN")
+    local rail = app.components.playerResource.rail
+    eq(rail.point[5], 228)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(rail.point[5], 110)
+    eq(#app.errors, 0)
+end)
+
+test("a settled resource rail is not rewritten by the slow layout beat", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    _G.EssentialCooldownViewer:SetSize(275, 118)
+    H.Fire("PLAYER_LOGIN")
+    local rail = app.components.playerResource.rail
+    local writes = 0
+    local setPoint, clearAllPoints, setWidth = rail.SetPoint, rail.ClearAllPoints, rail.SetWidth
+    rail.SetPoint = function(self, ...) writes = writes + 1; return setPoint(self, ...) end
+    rail.ClearAllPoints = function(self) writes = writes + 1; return clearAllPoints(self) end
+    rail.SetWidth = function(self, ...) writes = writes + 1; return setWidth(self, ...) end
+    H.Advance(3)
+    app.components.cooldownViewer:Refresh()
+    app.components.playerResource:Refresh()
+    eq(writes, 0)
+    rail.SetPoint, rail.ClearAllPoints, rail.SetWidth = setPoint, clearAllPoints, setWidth
+    eq(#app.errors, 0)
+end)
+
+test("death knight runes stay native instead of a continuous second rail", function()
+    local app = H.Load()
+    local power, powerMax, powerType = _G.UnitPower, _G.UnitPowerMax, _G.UnitPowerType
+    H.unitInfo.player.class = "DEATHKNIGHT"
+    _G.UnitPowerType = function() return 6, "RUNIC_POWER" end
+    _G.UnitPowerMax = function(unit, kind)
+        if kind == 5 then return 6 end
+        if kind then return 0 end
+        return 100
+    end
+    _G.UnitPower = function(unit, kind) if kind == 5 then return 3 end return 60 end
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.playerResource
+    -- Runes recover one at a time; the generic 0..6 rail would replace that
+    -- recovery with a worse summary, so the native display owns it.
+    eq(component.secondaryNative, "runes")
+    eq(component.secondaryType, nil)
+    eq(component.rail.secondary:IsShown(), false)
+    eq(component.rail:GetHeight(), 6)
+    eq(component:Describe():find(app.L.resourceNative, 1, true) ~= nil, true)
+    H.messages = {}
+    component:Diagnose()
+    eq(table.concat(H.messages, "\n"):find("native=runes", 1, true) ~= nil, true)
+    -- A spec without a native per-rune display gets the summary rail back.
+    H.unitInfo.player.class = "PRIEST"
+    _G.UnitPowerType = function() return 0, "MANA" end
+    component:Refresh()
+    eq(component.secondaryNative, nil)
+    eq(component.secondaryType, 5)
+    eq(component.rail.secondary:IsShown(), true)
+    _G.UnitPower, _G.UnitPowerMax, _G.UnitPowerType = power, powerMax, powerType
+    app.Store:Set("modules", "playerResource", false)
+    eq(#app.errors, 0)
+end)
+
+test("the main health top follows the applied skill row", function()
+    local app = H.Load()
+    for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    _G.EssentialCooldownViewer:SetSize(275, 118)
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local player = app.components.unitFrames.frames.player
+    -- The essential row ends at 222; the frame top carries the 15 unit name row
+    -- above a health bar whose top edge is collinear with the skill block.
+    local healthTop = player.point[5] + player:GetHeight() / 2 - 15
+    eq(math.abs(healthTop - (222 - 540)) < 0.01, true)
+    -- With no applied viewer row the mockup fraction is the baseline again.
+    app.Store:Set("modules", "cooldownViewer", false)
+    local fallback = player.point[5] + player:GetHeight() / 2 - 15
+    eq(math.abs(fallback + 205.2) < 0.01, true)
+    eq(#app.errors, 0)
+end)
+
 test("the player resource rail follows the central block and passes values through", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local component = app.components.playerResource
@@ -10403,14 +11097,14 @@ test("the measured cooldown block moves the unit frames beside it", function()
     app.Store:Set("modules", "unitFrames", true)
     local player = app.components.unitFrames.frames.player
     -- Before any viewer is readable the mockup fallback applies.
-    eq(player.point[4], -255.76)
+    eq(player.point[4], -245.76)
     local viewer = H.NewFrame("EssentialCooldownViewer", UIParent)
     viewer:SetSize(360, 40)
     local central = app.Layout:CentralRows({ { frame = viewer, id = "essential", main = true } })
     eq(central.content.width, 360)
     eq(central.contentChanged, true)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -285.76)
+    eq(player.point[4], -275.76)
     -- An auxiliary row above the skills never widens the block: the buffs sit
     -- above the frames' top edge, so pulling the health bars apart would only
     -- make the centre read worse.
@@ -10422,7 +11116,7 @@ test("the measured cooldown block moves the unit frames beside it", function()
     eq(again.content.mainOnly, true)
     eq(again.contentChanged, nil)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -285.76)
+    eq(player.point[4], -275.76)
     -- A wider main row still owns the block: the unit frames follow the skills.
     local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
     utility:SetSize(500, 40)
@@ -10433,7 +11127,7 @@ test("the measured cooldown block moves the unit frames beside it", function()
     eq(wide.content.width, 500)
     eq(wide.contentChanged, true)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -355.76)
+    eq(player.point[4], -345.76)
     -- No readable viewer returns to the mockup ratio instead of keeping a stale
     -- block width; the units follow in the same pass. The placement component
     -- is off first so it cannot re-measure the 360-wide fixture afterwards.
@@ -10441,7 +11135,7 @@ test("the measured cooldown block moves the unit frames beside it", function()
     app.Layout:CentralRows({})
     eq(app.Layout:ContentWidth(), 167.04)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -189.28)
+    eq(player.point[4], -179.28)
     eq(#app.errors, 0)
 end)
 
@@ -10454,8 +11148,8 @@ test("a preset centre follows the main skill block until it is dragged", functio
     local player = app.components.unitFrames.frames.player
     -- The preset stores the centre it was applied with.
     app.Layout:ApplyPreset("combat")
-    eq(player.point[4], -255.76)
-    eq(app.Store:Profile().positions.unit_player.x, -255.76)
+    eq(player.point[4], -245.76)
+    eq(app.Store:Profile().positions.unit_player.x, -245.76)
     -- A wider tracked-buff row is auxiliary: it sits above the frames' top edge
     -- and must not pull the health bars apart after a preset. The main row here
     -- is the fixture's 300 unit essential viewer.
@@ -10465,15 +11159,15 @@ test("a preset centre follows the main skill block until it is dragged", functio
     app.Layout:CentralRows({
         { frame = essential, id = "essential", main = true }, { frame = buff, id = "buffBar" } })
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -255.76)
+    eq(player.point[4], -245.76)
     -- A wider main row moves the stored centre with the frame.
     local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
     utility:SetSize(500, 40)
     app.Layout:CentralRows({
         { frame = utility, id = "utility", main = true }, { frame = buff, id = "buffBar" } })
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -355.76)
-    eq(app.Store:Profile().positions.unit_player.x, -355.76)
+    eq(player.point[4], -345.76)
+    eq(app.Store:Profile().positions.unit_player.x, -345.76)
     -- A deliberate drag wins: the next boundary change keeps the saved centre.
     app.Store:SetPosition("unit_player", -120, -230)
     app.Layout:CentralRows({ { frame = utility, id = "utility", main = true } })
@@ -10645,6 +11339,10 @@ end)
 
 test("top performance shares the strip sample and releases its ticker", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- The strip owns the readout by default (010 phase 08); the top capsule is
+    -- an explicit opt-in.
+    eq(app.components.topPerformance.running == true, false)
+    app.Store:Set("modules", "topPerformance", true)
     local top = app.components.topPerformance
     eq(top.running, true)
     eq(top.status, "running")
@@ -10681,6 +11379,7 @@ end)
 
 test("the top reading falls back to the values this client can report", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "topPerformance", true)
     local top = app.components.topPerformance
     local framerate, netstats = _G.GetFramerate, _G.GetNetStats
     -- FPS unreadable: the latency survives on its own.
@@ -10700,21 +11399,21 @@ test("the top reading falls back to the values this client can report", function
     eq(#app.errors, 0)
 end)
 
-test("the top reading keeps the default on an old or read-only database", function()
-    -- An old profile without the switch gets the default (on).
+test("the top reading stays off by default on an old or read-only database", function()
+    -- An old profile without the switch gets the new default (off): the bottom
+    -- strip is the one readout unless the player explicitly turns the capsule on.
     local old = H.Load({ schema = 1, profiles = { Default = { modules = {} } } })
     H.Fire("PLAYER_LOGIN")
-    eq(old.components.topPerformance.running, true)
-    eq(old.components.topPerformance.frame:IsShown(), true)
-    -- A newer-schema database is read-only: the reading still runs and refuses
-    -- the write instead of silently turning itself off.
+    eq(old.components.topPerformance.running == true, false)
+    eq(old.components.topPerformance.frame, nil)
+    -- A newer-schema database is read-only: enabling refuses instead of
+    -- silently changing stored data.
     local readonly = H.Load({ schema = 99 })
     H.Fire("PLAYER_LOGIN")
     eq(readonly.Store.readonly, true)
-    eq(readonly.components.topPerformance.running, true)
-    eq(readonly.components.topPerformance.frame:IsShown(), true)
-    eq(readonly.Store:Set("modules", "topPerformance", false), false)
-    eq(readonly.components.topPerformance.running, true)
+    eq(readonly.components.topPerformance.running == true, false)
+    eq(readonly.Store:Set("modules", "topPerformance", true), false)
+    eq(readonly.components.topPerformance.running == true, false)
     eq(#old.errors, 0)
     eq(#readonly.errors, 0)
 end)

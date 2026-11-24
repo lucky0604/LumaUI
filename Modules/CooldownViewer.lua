@@ -289,6 +289,19 @@ local function blockSize(boxes)
     return (maxRight - minLeft) / scale, (maxTop - minBottom) / scale
 end
 
+-- Top edge of a frame that kept its native anchor (a refused write), in the
+-- same UIParent units the stack uses. Unreadable geometry leaves the fallback:
+-- an unknown native position never shrinks the reserved block.
+local function nativeTop(frame, fallback)
+    local left, bottom, width, height = rectOf(frame)
+    if not left or not bottom or not width or not height then return fallback end
+    local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
+    scale = okScale and plain(scale, "number") or nil
+    if not scale or scale <= 0 then return fallback end
+    local top = (bottom + height) / scale
+    return top > fallback and top or fallback
+end
+
 -- The rendered width of a viewer's buttons, free of the Edit Mode frame's empty
 -- area. Returns nil when the build exposes no readable buttons, so the caller
 -- keeps the frame width for progress rows without icons.
@@ -456,6 +469,7 @@ local function placeIcons(self, viewer, plan, boxes, bottom)
     local ratio = frameRatio(viewer)
     if not ratio or ratio <= 0 then ratio = 1 end
     local placed = true
+    local writes = 0
     for index, box in ipairs(boxes) do
         local slot = plan.slots[index]
         if slot then
@@ -468,10 +482,36 @@ local function placeIcons(self, viewer, plan, boxes, bottom)
                     button:SetPoint("CENTER", UIParent, "BOTTOM", x, y)
                 end)
                 if not written then placed = false break end
+                writes = writes + 1
             end
         end
     end
-    if placed then return true end
+    if placed then
+        -- A client that re-anchors the pooled buttons faster than the grid can
+        -- settle would otherwise keep both writers busy forever. Three passes in
+        -- a row that each had to move something mean the anchors are not ours
+        -- to keep: the whole viewer falls back to the native grid, once.
+        if writes == 0 then
+            viewer.lumaSlotStreak = nil
+        else
+            local streak = (viewer.lumaSlotStreak or 0) + 1
+            viewer.lumaSlotStreak = streak
+            if streak >= 3 then
+                restoreIconSlots(viewer)
+                viewer.lumaSlotStreak = nil
+                self.iconFallback[viewer] = true
+                if not self.reanchorWarned then self.reanchorWarned = {} end
+                if not self.reanchorWarned[viewer] then
+                    self.reanchorWarned[viewer] = true
+                    local name = type(viewer.GetName) == "function"
+                        and select(2, pcall(viewer.GetName, viewer)) or nil
+                    app:Report("cooldownViewer/reanchor", tostring(name or "viewer"))
+                end
+                return false
+            end
+        end
+        return true
+    end
     restoreIconSlots(viewer)
     self.iconFallback[viewer] = true
     if not self.refused[viewer] then
@@ -612,6 +652,9 @@ local function pass(self)
                     id = def.id, frame = frame,
                     contentWidth = contentWidth, contentHeight = contentHeight,
                     plan = plan, boxes = plan and boxes or nil,
+                    -- The same visible buttons the skin decorates, captured
+                    -- once so the pass does not walk the pool twice.
+                    buttons = iconButtonsOf(frame),
                     -- Essential and utility skills are the main rows: they own
                     -- the block the unit frames flank. Buffs above them never
                     -- widen that distance.
@@ -622,29 +665,60 @@ local function pass(self)
             end
         end
     end
+    -- Static icon skin per viewer, independent of the slot mode: crop, liner,
+    -- pixel edge, countdown and charge fonts. Every member is recorded before
+    -- the write and a frame that refuses it is put back and left native, so a
+    -- build with different internals simply keeps the client's own icons.
+    local skin = app.CooldownSkin
+    self.skinStats = {}
+    self.skinned = self.skinned or setmetatable({}, { __mode = "k" })
+    for _, item in ipairs(chosen) do
+        local counts = { applied = 0, unknown = 0 }
+        for _, button in ipairs(item.buttons or {}) do
+            if skin and button then
+                if skin:Apply(button) then
+                    counts.applied = counts.applied + 1
+                    self.skinned[button] = true
+                else
+                    counts.unknown = counts.unknown + 1
+                end
+            end
+        end
+        self.skinStats[item.id] = counts
+    end
     local central = app.Layout:CentralRows(chosen)
     self.placedRows = central.rows
     local byFrame = {}
     for _, item in ipairs(chosen) do byFrame[item.frame] = item end
     -- A refused write leaves its old anchor in place; collapse that reserved
     -- row so the rest of the stack stays contiguous instead of leaving a gap.
+    -- The applied top follows the rows that were actually written; a refused
+    -- frame keeps its native anchor, and its own readable rect (when the build
+    -- reports one) still raises the top so the resource rail never crosses it.
     local shift = 0
+    local appliedTop = central.cooldown.bottom
     for _, row in ipairs(central.rows) do
         local bottom = row.bottom - shift
         if not place(self, row.frame, bottom) then
             shift = shift + row.height + central.cooldown.gap
+            appliedTop = math.max(appliedTop, nativeTop(row.frame, appliedTop))
         else
+            appliedTop = math.max(appliedTop, bottom + row.height)
             local item = byFrame[row.frame]
             if item and item.plan and item.boxes then
                 placeIcons(self, row.frame, item.plan, item.boxes, bottom)
             end
         end
     end
+    local appliedChanged = app.Layout:SetAppliedTop(appliedTop)
     -- The unit frames sit beside the visible block. Publish only after the
     -- stack is placed: the width came from this measurement, and re-entering
     -- the layout before the rows were written would leave the first pass half
-    -- applied.
-    if central.contentChanged then app:Publish("LAYOUT_CENTRAL_CHANGED") end
+    -- applied. A height change at the same width, and a collapse after a
+    -- refused write, are geometry changes too.
+    if central.contentChanged or central.topChanged or appliedChanged then
+        app:Publish("LAYOUT_CENTRAL_CHANGED")
+    end
 end
 
 -- A pass must never re-enter itself. The component publishes the content width
@@ -670,12 +744,20 @@ local function restoreAll(self)
         restoreIconSlots(_G[def.name])
     end
     restoreIcons(_G[BUFF_ICON])
+    -- Static icon skin: every recorded crop, font and decoration goes back.
+    if app.CooldownSkin and self.skinned then
+        for button in pairs(self.skinned) do
+            app.CooldownSkin:Restore(button)
+        end
+    end
     self.recorded = {}
     self.refused = {}
     self.plans = {}
     self.iconFallback = {}
     self.placedRows = {}
     self.pending = nil
+    self.skinned = setmetatable({}, { __mode = "k" })
+    self.skinStats = {}
 end
 
 local function apply(self)
@@ -737,8 +819,16 @@ app:RegisterComponent({
     Refresh = function(self) apply(self) end,
     Describe = function(self)
         if not self.running then return nil end
-        return string.format("cooldownViewer: rows=%d slots=%s",
-            #(self.placedRows or {}), slotsWanted() and "on" or "off")
+        local applied, total = 0, 0
+        for _, counts in pairs(self.skinStats or {}) do
+            applied = applied + counts.applied
+            total = total + counts.applied + counts.unknown
+        end
+        -- `skin=applied/total`: every visible icon either carries the Pearl
+        -- crop/liner/fonts or stayed native because this build exposed no
+        -- readable member for it.
+        return string.format("cooldownViewer: rows=%d slots=%s skin=%d/%d",
+            #(self.placedRows or {}), slotsWanted() and "on" or "off", applied, total)
     end,
     Disable = function(self)
         self.pending = nil
@@ -746,9 +836,13 @@ app:RegisterComponent({
             app.Queue:Run(RESTORE_JOB, function()
                 if self.running then return end
                 restoreAll(self)
+                -- With no applied rows the rail falls back to the reserved
+                -- baseline above the action area instead of a stale top edge.
+                app.Layout:ClearAppliedRows()
             end)
         else
             restoreAll(self)
+            app.Layout:ClearAppliedRows()
         end
     end,
 })
