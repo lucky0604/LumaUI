@@ -17,8 +17,9 @@ test("manifest loads, login enables isolated components", function()
     eq(app.components.unitFrames.running, nil)
     eq(#app.errors, 0)
     H.Fire("PLAYER_LOGIN")
-    -- data strip clock, minimap clock, quest list task-time tick, top reading
-    eq(#H.timers, 4)
+    -- data strip clock, minimap clock, quest list task-time tick, top reading,
+    -- and the cooldown stack's slow re-check of the client's own repacks
+    eq(#H.timers, 5)
 end)
 
 test("profiles isolate copies and remember each character", function()
@@ -9244,6 +9245,107 @@ test("the tracked buff viewer is read through its item frame pool", function()
     eq(pool.active[1].point[4], 118)
     eq(pool.active[2].point[4], 152)
     eq(#app.errors, 0)
+end)
+
+test("a tracked buff viewer with no readable height still centres its rows", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer", "BuffBarCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local viewer = _G.BuffIconCooldownViewer
+    viewer:Show()
+    -- The grid sizes itself from its icons on the live client and can report no
+    -- frame height. The rows must still be centred instead of the whole viewer
+    -- being filtered out of the pass.
+    viewer:SetWidth(300)
+    viewer:SetHeight(0)
+    viewer.rect = { left = 810, bottom = 750, width = 300, height = 0 }
+    for index = 1, 2 do
+        local icon = H.NewFrame("NoHeightIcon" .. index, viewer)
+        icon:SetSize(30, 30)
+        icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", (index - 1) * 34, 0)
+        icon.rect = { left = 810 + (index - 1) * 34, bottom = 750, width = 30, height = 30 }
+    end
+    app.components.cooldownViewer:Refresh()
+    -- Two icons span 810..874 (centre 842); the viewer centre is 960.
+    eq(_G.NoHeightIcon1.point[4], 118)
+    eq(_G.NoHeightIcon2.point[4], 152)
+    eq(#app.errors, 0)
+    _G.NoHeightIcon1, _G.NoHeightIcon2 = nil, nil
+end)
+
+test("a client repack is centred again on the next pass", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer", "BuffBarCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local viewer = _G.BuffIconCooldownViewer
+    viewer:SetSize(300, 40)
+    viewer:Show()
+    viewer.rect = { left = 810, bottom = 790, width = 300, height = 40 }
+    local icon = H.NewFrame("RepackIcon", viewer)
+    icon:SetSize(30, 30)
+    icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+    icon.rect = { left = 810, bottom = 800, width = 30, height = 30 }
+    app.components.cooldownViewer:Refresh()
+    eq(icon.point[4], 135)
+    -- The client puts the grid back on the left edge; the next pass must centre
+    -- it again instead of treating the previous write as "already applied".
+    icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+    icon.rect = { left = 810, bottom = 800, width = 30, height = 30 }
+    app.components.cooldownViewer:Refresh()
+    eq(icon.point[4], 135)
+    eq(#app.errors, 0)
+    _G.RepackIcon = nil
+end)
+
+test("icons a pixel apart still share one tracked buff row", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer", "BuffBarCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local viewer = _G.BuffIconCooldownViewer
+    viewer:SetSize(300, 40)
+    viewer:Show()
+    viewer.rect = { left = 810, bottom = 780, width = 300, height = 40 }
+    local first = H.NewFrame("JitterIcon1", viewer)
+    first:SetSize(30, 30)
+    first:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+    first.rect = { left = 810, bottom = 800, width = 30, height = 30 }
+    local second = H.NewFrame("JitterIcon2", viewer)
+    second:SetSize(30, 30)
+    second:SetPoint("TOPLEFT", viewer, "TOPLEFT", 34, -1)
+    second.rect = { left = 844, bottom = 799, width = 30, height = 30 }
+    app.components.cooldownViewer:Refresh()
+    -- One row spans 810..874 (centre 842) against the viewer centre 960. A
+    -- per-icon row key would have centred each icon on its own and destroyed
+    -- the spacing.
+    eq(first.point[4], 118)
+    eq(second.point[4], 152)
+    eq(#app.errors, 0)
+    _G.JitterIcon1, _G.JitterIcon2 = nil, nil
+end)
+
+test("disabling the cooldown viewers puts the tracked icons back", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer", "BuffBarCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local viewer = _G.BuffIconCooldownViewer
+    viewer:SetSize(300, 40)
+    viewer:Show()
+    viewer.rect = { left = 810, bottom = 790, width = 300, height = 40 }
+    local icon = H.NewFrame("RestoreIcon", viewer)
+    icon:SetSize(30, 30)
+    icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+    icon.rect = { left = 810, bottom = 800, width = 30, height = 30 }
+    app.components.cooldownViewer:Refresh()
+    eq(icon.point[4], 135)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(icon.point[1], "TOPLEFT")
+    eq(icon.point[4], 0)
+    eq(#app.errors, 0)
+    _G.RestoreIcon = nil
 end)
 
 test("the measured cooldown block moves the unit frames beside it", function()

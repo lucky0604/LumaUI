@@ -533,6 +533,11 @@ function Layout:CentralRows(entries)
         local measured = type(item) == "table" and item.contentWidth or nil
         measured = plainNumber(measured)
         if measured and measured > 0 and (not width or measured < width) then width = measured end
+        -- A viewer that reports no usable height (a grid that sizes itself from
+        -- its icons) still reserves the rendered height, otherwise its row would
+        -- collapse and the next viewer would overlap it.
+        local rendered = type(item) == "table" and plainNumber(item.contentHeight) or nil
+        if rendered and rendered > 0 and (not height or rendered > height) then height = rendered end
         if frame and height then
             rows[#rows + 1] = {
                 id = id, frame = frame, width = width, height = height,

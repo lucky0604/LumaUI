@@ -13,11 +13,12 @@ local _, app = ...
 -- not reserve space. A viewer whose re-anchor is refused keeps its original
 -- point while the rest of the stack continues.
 
+local BUFF_ICON = "BuffIconCooldownViewer"
 local STACK = {
     { id = "essential", name = "EssentialCooldownViewer" },
     { id = "utility", name = "UtilityCooldownViewer" },
     { id = "buffBar", name = "BuffBarCooldownViewer" },
-    { id = "buffIcon", name = "BuffIconCooldownViewer" },
+    { id = "buffIcon", name = BUFF_ICON },
 }
 local CONTENT_LISTS = { "cooldownButtons", "activeButtons", "itemFrames", "buttons", "icons" }
 local LAYOUT_JOB, RESTORE_JOB = "cooldownViewer/layout", "cooldownViewer/restore"
@@ -90,6 +91,20 @@ local function shownChild(child)
     return value ~= false
 end
 
+-- Direct children as a list. The client returns one value per child; a stub
+-- that hands back the whole list as a single table is accepted too, so a scene
+-- cannot silently see "no children" and skip the scan.
+local function childrenOf(frame)
+    if type(frame.GetChildren) ~= "function" then return nil end
+    local ok, list = pcall(function()
+        local first, second = frame:GetChildren()
+        if type(first) == "table" and second == nil then return first end
+        return { frame:GetChildren() }
+    end)
+    if not ok or type(list) ~= "table" then return nil end
+    return list
+end
+
 -- true: content, false: proven empty, nil: this build exposes nothing readable.
 -- A client build whose viewer fields differ therefore keeps the native frame in
 -- the stack instead of being dropped on a guess.
@@ -105,20 +120,18 @@ local function contentState(frame)
         end
     end
     if known then return false end
-    if type(frame.GetChildren) == "function" then
-        local ok, children = pcall(function() return { frame:GetChildren() } end)
-        if ok and type(children) == "table" then
-            local buttons = 0
-            for _, child in ipairs(children) do
-                local kind = object(child) and type(child.GetObjectType) == "function"
-                    and select(2, pcall(child.GetObjectType, child)) or nil
-                if kind == "Button" then
-                    buttons = buttons + 1
-                    if shownChild(child) then return true end
-                end
+    local children = childrenOf(frame)
+    if children then
+        local buttons = 0
+        for _, child in ipairs(children) do
+            local kind = object(child) and type(child.GetObjectType) == "function"
+                and select(2, pcall(child.GetObjectType, child)) or nil
+            if kind == "Button" then
+                buttons = buttons + 1
+                if shownChild(child) then return true end
             end
-            if buttons > 0 then return false end
         end
+        if buttons > 0 then return false end
     end
     local height = heightState(frame)
     if height and height <= 1 then return false end
@@ -151,9 +164,9 @@ local function iconButtonsOf(frame)
             for button in pool:EnumerateActive() do add(button) end
         end)
     end
-    if #list == 0 and type(frame.GetChildren) == "function" then
-        local ok, children = pcall(function() return { frame:GetChildren() } end)
-        if ok and type(children) == "table" then
+    if #list == 0 then
+        local children = childrenOf(frame)
+        if children then
             for _, child in ipairs(children) do add(child) end
         end
     end
@@ -171,26 +184,109 @@ local function rectOf(frame)
     return left, bottom, width, height
 end
 
-local function shiftRow(row, center)
-    local left, right
-    for _, item in ipairs(row) do
-        left = left and math.min(left, item.left) or item.left
-        right = right and math.max(right, item.right) or item.right
+-- Every icon as a screen rectangle. Rows are rebuilt from these boxes instead
+-- of the client's own grouping: the grid is repacked on each aura change and
+-- the group tables do not follow the rendered layout.
+local function iconBoxesOf(frame)
+    local boxes = {}
+    for _, button in ipairs(iconButtonsOf(frame)) do
+        local left, bottom, width, height = rectOf(button)
+        if left and width and width > 0 then
+            height = height or 0
+            boxes[#boxes + 1] = {
+                button = button, left = left, right = left + width,
+                bottom = bottom, top = bottom + height, height = height,
+            }
+        end
+    end
+    return boxes
+end
+
+-- Groups boxes into rows by their top edge. The tolerance stays well below one
+-- row pitch so two rows are never merged, but wide enough that icons which
+-- differ by a pixel share a row instead of each being centred on its own.
+local function rowsOf(boxes)
+    local sorted = {}
+    for _, box in ipairs(boxes) do sorted[#sorted + 1] = box end
+    table.sort(sorted, function(a, b)
+        if a.top ~= b.top then return a.top > b.top end
+        return a.left < b.left
+    end)
+    local rows, row, rowTop, rowHeight = {}, nil, nil, 0
+    for _, box in ipairs(sorted) do
+        local tolerance = math.max(2, rowHeight * 0.35)
+        if row and math.abs(box.top - rowTop) <= tolerance then
+            row[#row + 1] = box
+            if box.height > rowHeight then rowHeight = box.height end
+        else
+            row = { box }
+            rows[#rows + 1] = row
+            rowTop, rowHeight = box.top, box.height
+        end
+    end
+    return rows
+end
+
+-- Shifts one row as a group. The write is idempotent: a row that is already
+-- centred moves by less than half a pixel and is left alone. Nothing is cached
+-- as "already applied", so a client repack can never leave the rows aligned to
+-- the viewer's left edge for the rest of the session.
+local function shiftRow(row, center, frame)
+    local left, right, members = nil, nil, {}
+    for _, box in ipairs(row) do
+        left = left and math.min(left, box.left) or box.left
+        right = right and math.max(right, box.right) or box.right
+        members[box.button] = true
     end
     if not left or not right or right <= left then return end
     local shift = center - (left + right) / 2
     if math.abs(shift) < 0.5 then return end
-    for _, item in ipairs(row) do
-        local button = item.button
+    local originals = frame.lumaIconOriginals
+    if not originals then
+        originals = {}
+        frame.lumaIconOriginals = originals
+    end
+    for _, box in ipairs(row) do
+        local button = box.button
         local okPoint, point, relative, relativePoint, x, y = pcall(button.GetPoint, button, 1)
         if okPoint and point and type(x) == "number" then
+            -- A button anchored to a sibling of the same row follows that
+            -- sibling; shifting it again would apply the offset twice.
+            local follows = object(relative) and relative ~= frame and members[relative]
             local okScale, scale = pcall(button.GetEffectiveScale, button)
             scale = okScale and plain(scale, "number") or nil
-            if scale and scale > 0 then
-                pcall(button.SetPoint, button, point, relative, relativePoint, x + shift / scale, y)
+            if not follows and scale and scale > 0 then
+                -- The first offset is kept and every later pass aims at the same
+                -- absolute target, so a pass that runs before the client has
+                -- reported the new rect cannot shift the row a second time.
+                local origin = originals[button]
+                if not origin then
+                    origin = { point, relative, relativePoint, x, y }
+                    originals[button] = origin
+                end
+                local targetX = origin[4] + shift / scale
+                if math.abs(x - targetX) >= 0.5 then
+                    pcall(button.SetPoint, button, point, relative, relativePoint, targetX, y)
+                end
             end
         end
     end
+end
+
+-- Rendered block size of the given boxes in UIParent units.
+local function blockSize(boxes)
+    local minLeft, maxRight, minBottom, maxTop
+    for _, box in ipairs(boxes) do
+        minLeft = minLeft and math.min(minLeft, box.left) or box.left
+        maxRight = maxRight and math.max(maxRight, box.right) or box.right
+        minBottom = minBottom and math.min(minBottom, box.bottom) or box.bottom
+        maxTop = maxTop and math.max(maxTop, box.top) or box.top
+    end
+    if not minLeft or not maxRight or maxRight <= minLeft then return nil end
+    local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
+    scale = okScale and plain(scale, "number") or nil
+    if not scale or scale <= 0 then return nil end
+    return (maxRight - minLeft) / scale, (maxTop - minBottom) / scale
 end
 
 -- The rendered width of a viewer's buttons, free of the Edit Mode frame's empty
@@ -213,46 +309,36 @@ local function measure(frame)
 end
 
 -- Centres each visible icon row inside the viewer and returns the rendered
--- width in UIParent units, so the unit-frame boundary follows the icons rather
--- than the viewer's wider Edit Mode frame.
+-- width/height in UIParent units, so the unit-frame boundary and the stack row
+-- follow the icons rather than the viewer's wider Edit Mode frame. A viewer
+-- with no readable rectangle is centred on the screen axis, which is where the
+-- stack puts it anyway.
 local function reflow(frame)
+    local boxes = iconBoxesOf(frame)
+    if #boxes < 1 then return nil end
+    local center
     local left, _, width = rectOf(frame)
-    if not left then return nil end
-    local center = left + width / 2
-    local rows, order = {}, {}
-    for _, button in ipairs(iconButtonsOf(frame)) do
-        local bl, bb, bw, bh = rectOf(button)
-        if bl then
-            local key = math.floor(bb + bh + 0.5)
-            local row = rows[key]
-            if not row then
-                row = {}
-                rows[key] = row
-                order[#order + 1] = key
-            end
-            row[#row + 1] = { button = button, left = bl, right = bl + bw }
-        end
+    if left then
+        center = left + width / 2
+    else
+        local screenLeft, _, screenWidth = rectOf(UIParent)
+        if not screenLeft then return nil end
+        center = screenLeft + screenWidth / 2
     end
-    if #order < 1 then return nil end
-    local minLeft, maxRight
-    for _, key in ipairs(order) do
-        for _, item in ipairs(rows[key]) do
-            minLeft = minLeft and math.min(minLeft, item.left) or item.left
-            maxRight = maxRight and math.max(maxRight, item.right) or item.right
-        end
+    for _, row in ipairs(rowsOf(boxes)) do shiftRow(row, center, frame) end
+    local moved = iconBoxesOf(frame)
+    return blockSize(#moved > 0 and moved or boxes)
+end
+
+-- Puts the icon offsets recorded by the first shift back, so disabling the
+-- component restores the client's own left-aligned grid.
+local function restoreIcons(frame)
+    local originals = frame and frame.lumaIconOriginals
+    if not originals then return end
+    for button, point in pairs(originals) do
+        pcall(button.SetPoint, button, point[1], point[2], point[3], point[4], point[5])
     end
-    local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
-    scale = okScale and plain(scale, "number") or nil
-    if not scale or scale <= 0 then return nil end
-    -- A layout pass can publish the new block width and run again before the
-    -- client has moved the icons. The same rect (same centre, same row span)
-    -- therefore means "already applied" and must not shift twice.
-    local signature = string.format("%d:%d:%d", math.floor(center + 0.5),
-        math.floor((minLeft + maxRight) / 2 + 0.5), #order)
-    if frame.lumaCentred == signature then return (maxRight - minLeft) / scale end
-    frame.lumaCentred = signature
-    for _, key in ipairs(order) do shiftRow(rows[key], center) end
-    return (maxRight - minLeft) / scale
+    frame.lumaIconOriginals = nil
 end
 
 -- Every anchor is recorded once, before the first write. The client may anchor
@@ -285,8 +371,19 @@ local function restoreFrame(frame)
     frame.lumaCooldownViewerOriginal = nil
 end
 
+-- The stack is re-checked on a slow beat, so a write that would not move the
+-- frame is skipped instead of clearing and setting the same anchor again.
+local function atTarget(frame, offset)
+    local ok, point, relative, _, x, y = pcall(frame.GetPoint, frame, 1)
+    if not ok or point ~= "BOTTOM" or (relative ~= nil and relative ~= UIParent) then return false end
+    x = plain(x, "number")
+    y = plain(y, "number")
+    return x ~= nil and y ~= nil and math.abs(x) < 0.5 and math.abs(y - offset) < 0.5
+end
+
 local function place(self, frame, bottom)
     local offset = bottom / frameRatio(frame)
+    if atTarget(frame, offset) then return true end
     local ok, problem = pcall(function()
         frame:ClearAllPoints()
         frame:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, offset)
@@ -307,6 +404,16 @@ end
 -- Bottom to top: skill rows stay closest to the bars, the tracked buff views
 -- sit above them, which is the order of the Pearl mockup's block.
 local function layout(self)
+    -- The tracked-buff grid is centred even when the viewer itself is filtered
+    -- out of the stack: a build that reports no readable height, or whose own
+    -- button tables still point at pooled frames, must not silently keep the
+    -- client's left-aligned grid.
+    local iconViewer = _G[BUFF_ICON]
+    local iconWidth, iconHeight
+    if object(iconViewer) and type(iconViewer.SetPoint) == "function"
+        and shownState(iconViewer) ~= false then
+        iconWidth, iconHeight = reflow(iconViewer)
+    end
     local chosen = {}
     for _, def in ipairs(STACK) do
         local frame = _G[def.name]
@@ -316,14 +423,20 @@ local function layout(self)
             local alpha = alphaState(frame)
             local content = contentState(frame)
             local size = heightState(frame)
-            if shown == true and (alpha == nil or alpha > 0) and content ~= false
-                and size and size > 1 and record(frame) then
+            -- The icon extent is what is rendered; for the tracked grid it
+            -- replaces the viewer's own width and height, so both the stack row
+            -- and the block the unit frames flank follow the visible icons.
+            local contentWidth = def.id == "buffIcon" and iconWidth or measure(frame)
+            local contentHeight = def.id == "buffIcon" and iconHeight or nil
+            local readable = contentWidth ~= nil or contentHeight ~= nil
+            local sized = (size and size > 1) or (contentHeight and contentHeight > 1)
+            if shown == true and (alpha == nil or alpha > 0)
+                and (readable or content ~= false) and sized and record(frame) then
                 self.recorded[frame] = true
-                -- The tracked-buff grid is the row the mockup centres; its icon
-                -- extent also becomes the width the unit frames flank, so the
-                -- viewer's wider Edit Mode frame never reserves empty space.
-                local contentWidth = def.id == "buffIcon" and reflow(frame) or measure(frame)
-                chosen[#chosen + 1] = { id = def.id, frame = frame, contentWidth = contentWidth }
+                chosen[#chosen + 1] = {
+                    id = def.id, frame = frame,
+                    contentWidth = contentWidth, contentHeight = contentHeight,
+                }
             end
         end
     end
@@ -348,6 +461,9 @@ local function restoreAll(self)
     for frame in pairs(self.recorded or {}) do
         restoreFrame(frame)
     end
+    -- The tracked grid is centred even when the viewer stayed out of the stack,
+    -- so its icon offsets are restored on their own.
+    restoreIcons(_G[BUFF_ICON])
     self.recorded = {}
     self.refused = {}
     self.placedRows = {}
@@ -392,6 +508,15 @@ app:RegisterComponent({
         end)
         self:Listen("PLAYER_REGEN_ENABLED", function(current)
             if current.pending then apply(current) end
+        end)
+        -- The client repacks the tracked grid and re-anchors the viewers on its
+        -- own beats, which can happen after the events above. A slow pass keeps
+        -- the stack and the centred rows where the player expects them; every
+        -- write below is idempotent, so a settled layout only costs a few reads.
+        self:Every(1, function(current)
+            -- Combat keeps the queued restore/layout path authoritative, so the
+            -- slow pass stays out of it instead of queueing a job every second.
+            if current.running and not inCombat() then apply(current) end
         end)
         -- 004 moves the reserved action baseline; both stacks follow the one
         -- published geometry instead of reading each other's private state.
