@@ -7238,6 +7238,31 @@ test("a refused native status bar write is reported once and never hides the rea
     eq(#app.errors, 1)
 end)
 
+test("the experience bar draws the rested pool behind the current progress", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local experience = app.components.experience
+    -- The fixture reports 30/100 XP with 25 rested.
+    eq(experience.rested:IsShown(), true)
+    eq(experience.rested.width, 25)
+    eq(experience.rested.point[1], "TOPLEFT")
+    eq(experience.rested.point[4], 30)
+    -- A wider bar scales both the offset and the segment.
+    experience.bar:SetWidth(640)
+    H.Fire("PLAYER_XP_UPDATE")
+    eq(experience.rested.width, 160)
+    eq(experience.rested.point[4], 192)
+    -- Reputation has no rested band, and no pool hides the segment.
+    H.watchedFaction = { name = "Argent Dawn", reaction = 5, minimum = 0, maximum = 21000, current = 15750 }
+    H.Fire("UPDATE_FACTION")
+    eq(experience.rested:IsShown(), false)
+    H.watchedFaction = nil
+    _G.GetXPExhaustion = function() return nil end
+    H.Fire("UPDATE_FACTION")
+    eq(experience.mode, "xp")
+    eq(experience.rested:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
 test("retail watched reputation uses the current API and safe progress ranges", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local experience = app.components.experience
@@ -9377,6 +9402,46 @@ test("top performance shares the strip sample and releases its ticker", function
     H.Advance(2)
     eq(calls, before)
     eq(#app.errors, 0)
+end)
+
+test("the top reading falls back to the values this client can report", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local top = app.components.topPerformance
+    local framerate, netstats = _G.GetFramerate, _G.GetNetStats
+    -- FPS unreadable: the latency survives on its own.
+    _G.GetFramerate = nil
+    H.Advance(1)
+    eq(top.text:GetText(), app.L.latency .. " 40")
+    eq(top.text:IsShown(), true)
+    -- Nothing readable: the text hides instead of printing stale numbers.
+    _G.GetNetStats = nil
+    H.Advance(1)
+    eq(top.text:IsShown(), false)
+    -- A recovered client brings the reading back on the next beat.
+    _G.GetFramerate, _G.GetNetStats = framerate, netstats
+    H.Advance(1)
+    eq(top.text:GetText(), app.L.fps .. " 120   " .. app.L.latency .. " 40")
+    eq(top.text:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the top reading keeps the default on an old or read-only database", function()
+    -- An old profile without the switch gets the default (on).
+    local old = H.Load({ schema = 1, profiles = { Default = { modules = {} } } })
+    H.Fire("PLAYER_LOGIN")
+    eq(old.components.topPerformance.running, true)
+    eq(old.components.topPerformance.text:IsShown(), true)
+    -- A newer-schema database is read-only: the reading still runs and refuses
+    -- the write instead of silently turning itself off.
+    local readonly = H.Load({ schema = 99 })
+    H.Fire("PLAYER_LOGIN")
+    eq(readonly.Store.readonly, true)
+    eq(readonly.components.topPerformance.running, true)
+    eq(readonly.components.topPerformance.text:IsShown(), true)
+    eq(readonly.Store:Set("modules", "topPerformance", false), false)
+    eq(readonly.components.topPerformance.running, true)
+    eq(#old.errors, 0)
+    eq(#readonly.errors, 0)
 end)
 
 print(string.format("%d/%d tests passed", passed, total))

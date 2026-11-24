@@ -192,6 +192,36 @@ local function paintMode(self, mode, faction)
     app.Theme:PaintBar(self.bar, color)
 end
 
+local function restedXP()
+    if type(GetXPExhaustion) ~= "function" then return nil end
+    local ok, value = pcall(GetXPExhaustion)
+    return ok and plain(value, "number") or nil
+end
+
+-- Rested experience is the second colour band on the client's own bar. The
+-- segment starts at the current value and is clipped to the bar end, so a full
+-- rest pool cannot paint past 100%. Reputation has no rested state.
+local function paintRested(self, current, maximum, rested)
+    local texture = self.rested
+    if not texture then return end
+    current, maximum, rested = plain(current, "number"), plain(maximum, "number"), plain(rested, "number")
+    local width = self.bar and plain(self.bar:GetWidth(), "number") or nil
+    if not width or width <= 0 or not current or not maximum or maximum <= 0 or not rested or rested <= 0 then
+        texture:Hide()
+        return
+    end
+    local now = math.max(0, math.min(maximum, current))
+    local segment = math.min(rested, maximum - now)
+    if segment <= 0 then
+        texture:Hide()
+        return
+    end
+    texture:ClearAllPoints()
+    texture:SetPoint("TOPLEFT", self.bar, "TOPLEFT", width * now / maximum, 0)
+    texture:SetSize(width * segment / maximum, self.bar:GetHeight())
+    texture:Show()
+end
+
 local function update(self)
     local faction, watching = watchedFaction()
     local xp = not watching and xpState() or nil
@@ -215,12 +245,14 @@ local function update(self)
         local label = faction.name .. (faction.standing and ("  ·  " .. faction.standing) or "")
         if faction.rewardPending then label = label .. "  ·  " .. app.L.reputationRewardPending end
         self.text:SetFormattedText("%s  %d%%", label, percent)
+        paintRested(self, nil)
     else
         self.mode, self.faction = MODE_XP, nil
         self.bar:SetMinMaxValues(0, xp.maximum)
         self.bar:SetValue(xp.current)
         self.text:SetFormattedText("%s  %d%%", app.L.xp, math.floor(xp.current / xp.maximum * 100))
         self.current, self.maximum = xp.current, xp.maximum
+        paintRested(self, xp.current, xp.maximum, restedXP())
     end
     paintMode(self, self.mode, faction)
 end
@@ -272,6 +304,12 @@ app:RegisterComponent({ id = "experience", label = "experience",
             self.text:SetWidth(630)
             self.text:SetWordWrap(false)
             self.text:SetJustifyH("CENTER")
+            -- The rested pool is the second band on the client's own bar: it
+            -- sits behind the fill and starts at the current value.
+            local rested = self.bar:CreateTexture(nil, "BACKGROUND")
+            rested:SetColorTexture(0.25, 0.55, 1, 0.9)
+            rested:Hide()
+            self.rested = rested
             frame:EnableMouse(true)
             tooltip(frame, self)
             local screenHeight = UIParent:GetHeight()
