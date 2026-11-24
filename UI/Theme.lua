@@ -71,9 +71,17 @@ Theme.units = {
     minorWidth = 100, minorNameRow = 13, minorHealth = 12, minorPower = 2,
     minorPowerGap = 1, minorNameSize = 10,
 }
+-- One party row is a class icon, a name line, a health bar and a power bar. It is
+-- 46 units tall because the client's own compact frame reserves five private
+-- aura displays along the bottom edge, and that band must stay clear of the
+-- power bar. The row height used to be a literal 46 in the module while this
+-- table said 30; both now come from here, so the two cannot drift apart again.
+-- `private` describes that band: one 12 unit icon per slot, five slots running
+-- left from `inset` at `step` intervals, `bottom` units above the row bottom.
 Theme.party = {
-    width = 190, height = 30, gap = 3, icon = 22,
+    width = 190, height = 46, gap = 3, icon = 22,
     nameSize = 10, health = 7, power = 2, textInset = 26,
+    private = { slots = 5, icon = 12, inset = 8, step = 14, bottom = 3 },
 }
 Theme.strip = { height = 30, width = 876, rowGap = 18 }
 Theme.edge = { thin = 1, normal = 2 }

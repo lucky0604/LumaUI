@@ -6066,9 +6066,11 @@ test("party frames are one layout group item", function()
     eq(member.member, true)
     eq(member.groupId, "party")
     eq(member.frame.parent, group.frame)
-    -- Pearl puts the party block on the left edge, level with the unit bars.
-    eq(group.x, -530)
-    eq(group.y, -120)
+    -- Pearl puts the party block on the left edge, level with the unit bars: on
+    -- the 1920x1080 fixture its left edge lands at 15.5% of the width (-567 is
+    -- the centre offset) and the first row's top edge at 48.5% of the height.
+    eq(group.x, -567)
+    eq(group.y, -59)
     eq(group.frame:GetWidth(), 190)
     eq(group.frame:GetHeight(), 196)
     eq(member.rx, 0)
@@ -6095,16 +6097,16 @@ test("old absolute party positions convert once into group offsets", function()
     H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "partyFrames", true)
     local member = app.Layout.entries.party_party2
-    -- -200 - (-530) = 330 ; -320 - (-120) = -200
-    eq(member.rx, 330)
-    eq(member.ry, -200)
+    -- -200 - (-567) = 367 ; -320 - (-59) = -261
+    eq(member.rx, 367)
+    eq(member.ry, -261)
     -- The old absolute key stays; the migration offset is persisted next to it.
     eq(app.Store:Profile().positions.party_party2.x, -200)
-    eq(app.Store:Profile().positions["party|party_party2"].x, 330)
+    eq(app.Store:Profile().positions["party|party_party2"].x, 367)
     app.Store:SetPosition("party", 0, 0)
     app.Layout:ApplyAll()
-    eq(member.frame.point[4], 330)
-    eq(member.frame.point[5], -200)
+    eq(member.frame.point[4], 367)
+    eq(member.frame.point[5], -261)
     eq(#app.errors, 0)
 end)
 
@@ -6776,6 +6778,37 @@ test("party buttons reserve one native private aura anchor per aura index", func
     app.Store:Set("modules", "partyFrames", false)
     eq(anchors.liveCount, 0)
     eq(#anchors.removedIDs, anchors.added - H.privateAnchors.refused)
+    eq(#app.errors, 0)
+end)
+
+test("party rows take their height from the theme and keep the aura band clear", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "partyFrames", true)
+    local frame = app.components.partyFrames.frames.party1
+    -- The module used to hard-code 46 while the theme said 30; the row now reads
+    -- the one number the theme publishes.
+    eq(frame:GetHeight(), app.Theme.party.height)
+    eq(frame:GetWidth(), app.Theme.party.width)
+    eq(frame:GetHeight(), 46)
+    -- The five private aura slots run along the bottom edge: 3 units of inset
+    -- plus a 12 unit icon has to stay below the 2 unit power bar at -26.
+    local private = app.Theme.party.private
+    local band = private.bottom + private.icon
+    eq(46 - 26 - app.Theme.party.power >= band, true)
+    eq(#app.errors, 0)
+end)
+
+test("the party block keeps its mockup place on a narrow screen", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    UIParent:SetSize(1280, 720)
+    app.Store:Set("modules", "partyFrames", true)
+    local group = app.Layout.entries.party
+    -- 15.5% of 1280 puts the left edge at 198 and the 190 wide block's centre at
+    -- 293, which is 347 left of the screen centre.
+    eq(group.x, -347)
+    -- 48.5% of 720 leaves ~11 units above the centre for the first row's top;
+    -- the group centre sits half a block lower.
+    eq(group.y, -64)
     eq(#app.errors, 0)
 end)
 

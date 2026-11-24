@@ -21,23 +21,33 @@ local PRIVATE_JOB = "partyFrames/private"
 -- Both client-owned party displays are reported in diagnostics.
 local NATIVE_NAMES = { "PartyFrame", "CompactPartyFrame" }
 local P = app.Theme.party
-local FRAME_WIDTH, FRAME_HEIGHT, FRAME_GAP = P.width, 46, P.gap
+-- Row height has one owner: the theme's `height`, sized to keep the private-aura
+-- band clear of the power bar. The module used to hard-code 46 while the theme
+-- said 30, so a row measured from one and drawn with the other.
+local FRAME_WIDTH, FRAME_HEIGHT, FRAME_GAP = P.width, P.height, P.gap
 -- The four buttons are one layout item: a plain container carries the group
 -- position and scale, members keep their relative offsets. Pearl puts the party
 -- block on the left edge, level with the central unit bars.
 local GROUP_ID = "party"
-local GROUP_X, GROUP_Y = -530, -120
+-- Mockup proportions: the group's left edge lands at ~15.5% of the screen width
+-- and the first row's top edge at ~48.5% of the screen height. Both are resolved
+-- from the live screen instead of a fixed offset, so the block keeps the same
+-- relative place on a 1920 wide screen and on a narrow window.
+local GROUP_LEFT_RATIO = 0.155
+local GROUP_ROW_TOP_RATIO = 0.485
 local GROUP_WIDTH, GROUP_HEIGHT = P.width, 4 * (FRAME_HEIGHT + FRAME_GAP)
 -- Private aura slots: the native compact party frame reserves five private aura
 -- displays per member (CompactUnitFrameTemplate, maxPrivateAuras = 5), so the
 -- replacement reserves the same five along the bottom edge of the button, in the
 -- client's own priority order. They sit below the power bar; none of their
--- content is read here.
-local PRIVATE_SLOTS = 5
-local PRIVATE_ICON = 12
-local PRIVATE_STEP = -14
+-- content is read here. Sizes come from the theme so the row height and the band
+-- are one decision.
+local PRIVATE = P.private or {}
+local PRIVATE_SLOTS = PRIVATE.slots or 5
+local PRIVATE_ICON = PRIVATE.icon or 12
+local PRIVATE_STEP = -(PRIVATE.step or 14)
 local PRIVATE_OPTIONS = { size = PRIVATE_ICON, point = "BOTTOMRIGHT",
-    offsetX = -8, offsetY = 3, step = PRIVATE_STEP }
+    offsetX = -(PRIVATE.inset or 8), offsetY = PRIVATE.bottom or 3, step = PRIVATE_STEP }
 -- UnitClass tokens are all-caps; the shipped portrait files are not. The map is
 -- data, not a lookup into the client's class icons, so a missing file simply
 -- hides the portrait instead of failing the row.
@@ -49,15 +59,43 @@ local CLASS_ICON = {
 }
 local component
 
+local function screenSize()
+    local okWidth, width = pcall(UIParent.GetWidth, UIParent)
+    local okHeight, height = pcall(UIParent.GetHeight, UIParent)
+    width = okWidth and app.Capabilities.Plain(width, "number") or nil
+    height = okHeight and app.Capabilities.Plain(height, "number") or nil
+    if not width or width <= 0 then width = 1920 end
+    if not height or height <= 0 then height = 1080 end
+    return width, height
+end
+
+-- Whole screen units: a sub-pixel offset would land in saved profiles as a
+-- long decimal and make every later comparison inexact for no visible gain.
+local function whole(value)
+    return math.floor(value + 0.5)
+end
+
+-- Centre offset of the whole group, resolved once per build from the live screen.
+local function groupOrigin()
+    local width, height = screenSize()
+    local x = -width / 2 + width * GROUP_LEFT_RATIO + GROUP_WIDTH / 2
+    -- The first row's centre sits `height * (0.5 - ratio)` above the screen
+    -- centre; the group centre is half a block lower than that.
+    local y = height * (0.5 - GROUP_ROW_TOP_RATIO) - GROUP_HEIGHT / 2 + FRAME_HEIGHT / 2
+    return whole(x), whole(y)
+end
+
 -- Members are anchored from the group's top edge; the default absolute value
 -- mirrors what Layout:Join would derive, so a fresh profile starts with rx=0.
-local function slotY(index)
-    local top = GROUP_Y + GROUP_HEIGHT / 2 - FRAME_HEIGHT / 2
+local function slotY(index, groupY)
+    if not groupY then _, groupY = groupOrigin() end
+    local top = groupY + GROUP_HEIGHT / 2 - FRAME_HEIGHT / 2
     return top - (index - 1) * (FRAME_HEIGHT + FRAME_GAP)
 end
 
 local function groupSpec()
-    return { label = app.L.partyGroup, x = GROUP_X, y = GROUP_Y,
+    local x, y = groupOrigin()
+    return { label = app.L.partyGroup, x = x, y = y,
         width = GROUP_WIDTH, height = GROUP_HEIGHT }
 end
 
@@ -292,6 +330,7 @@ component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", d
         -- the whole job waits for combat to end.
         app.Queue:Run(BUILD_JOB, function()
             if not self.running then return end
+            local groupX, groupY = groupOrigin()
             for _, unit in ipairs(ORDER) do
                 local frame = self.frames[unit]
                 if not frame then
@@ -300,8 +339,8 @@ component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", d
                 end
                 -- The four buttons join one group; moving or scaling the group
                 -- is one layout item, members keep their relative offsets.
-                app.Layout:Join(GROUP_ID, "party_" .. unit, frame, GROUP_X,
-                    slotY(PARTY_UNITS[unit]), groupSpec())
+                app.Layout:Join(GROUP_ID, "party_" .. unit, frame, groupX,
+                    slotY(PARTY_UNITS[unit], groupY), groupSpec())
                 for _, event in ipairs(UNIT_EVENTS) do
                     pcall(frame.events.RegisterUnitEvent, frame.events, event, unit)
                 end
