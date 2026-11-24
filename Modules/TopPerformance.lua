@@ -8,14 +8,15 @@ local _, app = ...
 -- hides the capsule and releases the ticker through the component runtime.
 
 -- A fixed capsule keeps a ticking number from resizing the band; the text is
--- centred inside it and both readings still share one line.
-local WIDTH, HEIGHT = 118, 18
+-- centred inside it and both readings still share one line. The capsule sits
+-- close to the top readout row so the two do not leave an empty gap.
+local WIDTH, HEIGHT = 96, 16
 
 local function build(self)
     if self.frame then return end
     local frame = CreateFrame("Frame", "LumaUITopPerformance", UIParent, "BackdropTemplate")
     frame:SetSize(WIDTH, HEIGHT)
-    frame:SetPoint("TOP", UIParent, "TOP", 0, -8)
+    frame:SetPoint("TOP", UIParent, "TOP", 0, -22)
     app.Theme:PaintSurface(frame, "hud")
     local text = app.Type:Text(frame, "micro")
     text:SetPoint("CENTER")
@@ -36,7 +37,7 @@ local function update(self)
         self.frame:Hide()
         return
     end
-    self.text:SetText(table.concat(parts, "   "))
+    self.text:SetText(table.concat(parts, "  "))
     self.frame:Show()
 end
 

@@ -9176,6 +9176,40 @@ test("central geometry measures the managed action area and exposes unit boundar
     eq(#app.errors, 0)
 end)
 
+test("tracked buff rows centre inside the viewer and size the block", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- Keep the other viewers out of this fixture so the block width comes from
+    -- the icons measured below.
+    _G.EssentialCooldownViewer:Hide()
+    _G.UtilityCooldownViewer:Hide()
+    _G.BuffBarCooldownViewer:Hide()
+    local viewer = _G.BuffIconCooldownViewer
+    viewer:SetSize(300, 80)
+    viewer:Show()
+    viewer.rect = { left = 810, bottom = 780, width = 300, height = 80 }
+    viewer.icons = {}
+    for index = 1, 4 do
+        local icon = H.NewFrame("BuffIconButton" .. index, viewer)
+        icon:SetSize(30, 30)
+        local column = index <= 3 and index or 1
+        local row = index <= 3 and 0 or 1
+        local x = (column - 1) * 34
+        icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", x, -row * 34)
+        icon.rect = { left = 810 + x, bottom = 830 - row * 34, width = 30, height = 30 }
+        viewer.icons[index] = icon
+    end
+    app.components.cooldownViewer:Refresh()
+    -- Row one spans x=810..908, centre 859 against the viewer centre 960.
+    eq(viewer.icons[1].point[4], 101)
+    eq(viewer.icons[2].point[4], 135)
+    eq(viewer.icons[3].point[4], 169)
+    -- The single icon on row two centres on the same axis.
+    eq(viewer.icons[4].point[4], 135)
+    -- The block width follows the icons, not the 300 wide viewer frame.
+    eq(app.Layout:Central().content.width, 98)
+    eq(#app.errors, 0)
+end)
+
 test("the measured cooldown block moves the unit frames beside it", function()
     local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "unitFrames", true)
@@ -9404,10 +9438,10 @@ test("top performance shares the strip sample and releases its ticker", function
     eq(top.frame.point[1], "TOP")
     eq(top.frame.point[2], UIParent)
     eq(top.frame.point[4], 0)
-    eq(top.frame.point[5], -8)
+    eq(top.frame.point[5], -22)
     -- A fixed capsule: a wider number must not resize the band.
-    eq(top.frame:GetWidth(), 118)
-    eq(top.text:GetText(), app.L.fps .. " 120   " .. app.L.latency .. " 40")
+    eq(top.frame:GetWidth(), 96)
+    eq(top.text:GetText(), app.L.fps .. " 120  " .. app.L.latency .. " 40")
     -- The strip and the top reading update on the same beat; the shared cache
     -- means one guarded client query, not one per component.
     local calls = 0
@@ -9447,7 +9481,7 @@ test("the top reading falls back to the values this client can report", function
     -- A recovered client brings the reading back on the next beat.
     _G.GetFramerate, _G.GetNetStats = framerate, netstats
     H.Advance(1)
-    eq(top.text:GetText(), app.L.fps .. " 120   " .. app.L.latency .. " 40")
+    eq(top.text:GetText(), app.L.fps .. " 120  " .. app.L.latency .. " 40")
     eq(top.frame:IsShown(), true)
     eq(#app.errors, 0)
 end)

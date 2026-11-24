@@ -124,6 +124,128 @@ local function contentState(frame)
     if height and height <= 1 then return false end
 end
 
+-- The tracked-buff viewer arrives as a native grid aligned to its left edge.
+-- The Pearl mockup centres every row, so each visible row is shifted as a whole
+-- after the client lays it out. Only the horizontal offsets change: order,
+-- size, spacing, tooltips and the client's tracked list stay native.
+local function iconButtonsOf(frame)
+    local list, seen = {}, {}
+    local function add(button)
+        if object(button) and not seen[button] and shownChild(button) then
+            seen[button] = true
+            list[#list + 1] = button
+        end
+    end
+    for _, key in ipairs(CONTENT_LISTS) do
+        local group = frame[key]
+        if type(group) == "table" then
+            for _, button in pairs(group) do add(button) end
+        end
+    end
+    if #list == 0 and type(frame.GetChildren) == "function" then
+        local ok, children = pcall(function() return { frame:GetChildren() } end)
+        if ok and type(children) == "table" then
+            for _, child in ipairs(children) do add(child) end
+        end
+    end
+    return list
+end
+
+local function rectOf(frame)
+    if type(frame.GetRect) ~= "function" then return nil end
+    local ok, left, bottom, width, height = pcall(frame.GetRect, frame)
+    left = ok and plain(left, "number") or nil
+    bottom = ok and plain(bottom, "number") or nil
+    width = ok and plain(width, "number") or nil
+    height = ok and plain(height, "number") or nil
+    if not left or not bottom or not width or not height or width <= 0 then return nil end
+    return left, bottom, width, height
+end
+
+local function shiftRow(row, center)
+    local left, right
+    for _, item in ipairs(row) do
+        left = left and math.min(left, item.left) or item.left
+        right = right and math.max(right, item.right) or item.right
+    end
+    if not left or not right or right <= left then return end
+    local shift = center - (left + right) / 2
+    if math.abs(shift) < 0.5 then return end
+    for _, item in ipairs(row) do
+        local button = item.button
+        local okPoint, point, relative, relativePoint, x, y = pcall(button.GetPoint, button, 1)
+        if okPoint and point and type(x) == "number" then
+            local okScale, scale = pcall(button.GetEffectiveScale, button)
+            scale = okScale and plain(scale, "number") or nil
+            if scale and scale > 0 then
+                pcall(button.SetPoint, button, point, relative, relativePoint, x + shift / scale, y)
+            end
+        end
+    end
+end
+
+-- The rendered width of a viewer's buttons, free of the Edit Mode frame's empty
+-- area. Returns nil when the build exposes no readable buttons, so the caller
+-- keeps the frame width for progress rows without icons.
+local function measure(frame)
+    local minLeft, maxRight
+    for _, button in ipairs(iconButtonsOf(frame)) do
+        local bl, _, bw = rectOf(button)
+        if bl then
+            minLeft = minLeft and math.min(minLeft, bl) or bl
+            maxRight = maxRight and math.max(maxRight, bl + bw) or (bl + bw)
+        end
+    end
+    if not minLeft or not maxRight or maxRight <= minLeft then return nil end
+    local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
+    scale = okScale and plain(scale, "number") or nil
+    if not scale or scale <= 0 then return nil end
+    return (maxRight - minLeft) / scale
+end
+
+-- Centres each visible icon row inside the viewer and returns the rendered
+-- width in UIParent units, so the unit-frame boundary follows the icons rather
+-- than the viewer's wider Edit Mode frame.
+local function reflow(frame)
+    local left, _, width = rectOf(frame)
+    if not left then return nil end
+    local center = left + width / 2
+    local rows, order = {}, {}
+    for _, button in ipairs(iconButtonsOf(frame)) do
+        local bl, bb, bw, bh = rectOf(button)
+        if bl then
+            local key = math.floor(bb + bh + 0.5)
+            local row = rows[key]
+            if not row then
+                row = {}
+                rows[key] = row
+                order[#order + 1] = key
+            end
+            row[#row + 1] = { button = button, left = bl, right = bl + bw }
+        end
+    end
+    if #order < 1 then return nil end
+    local minLeft, maxRight
+    for _, key in ipairs(order) do
+        for _, item in ipairs(rows[key]) do
+            minLeft = minLeft and math.min(minLeft, item.left) or item.left
+            maxRight = maxRight and math.max(maxRight, item.right) or item.right
+        end
+    end
+    local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
+    scale = okScale and plain(scale, "number") or nil
+    if not scale or scale <= 0 then return nil end
+    -- A layout pass can publish the new block width and run again before the
+    -- client has moved the icons. The same rect (same centre, same row span)
+    -- therefore means "already applied" and must not shift twice.
+    local signature = string.format("%d:%d:%d", math.floor(center + 0.5),
+        math.floor((minLeft + maxRight) / 2 + 0.5), #order)
+    if frame.lumaCentred == signature then return (maxRight - minLeft) / scale end
+    frame.lumaCentred = signature
+    for _, key in ipairs(order) do shiftRow(rows[key], center) end
+    return (maxRight - minLeft) / scale
+end
+
 -- Every anchor is recorded once, before the first write. The client may anchor
 -- a viewer with more than one point, so all readable points are kept and put
 -- back in order. A viewer with no readable point still gets a record: restoring
@@ -188,7 +310,11 @@ local function layout(self)
             if shown == true and (alpha == nil or alpha > 0) and content ~= false
                 and size and size > 1 and record(frame) then
                 self.recorded[frame] = true
-                chosen[#chosen + 1] = { id = def.id, frame = frame }
+                -- The tracked-buff grid is the row the mockup centres; its icon
+                -- extent also becomes the width the unit frames flank, so the
+                -- viewer's wider Edit Mode frame never reserves empty space.
+                local contentWidth = def.id == "buffIcon" and reflow(frame) or measure(frame)
+                chosen[#chosen + 1] = { id = def.id, frame = frame, contentWidth = contentWidth }
             end
         end
     end
@@ -250,6 +376,11 @@ app:RegisterComponent({
         -- stack back once the client is done with its own layout.
         self:Listen("EDIT_MODE_LAYOUTS_UPDATED", function(current) apply(current) end)
         self:Listen("PLAYER_SPECIALIZATION_CHANGED", function(current) apply(current) end)
+        -- Tracked buffs come and go outside the layout events; re-run the pass
+        -- so every row is centred again after the client lays the grid out.
+        self:Listen("UNIT_AURA", function(current, _, unit)
+            if unit == "player" and not inCombat() then apply(current) end
+        end)
         self:Listen("PLAYER_REGEN_ENABLED", function(current)
             if current.pending then apply(current) end
         end)

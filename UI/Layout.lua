@@ -508,6 +508,12 @@ function Layout:CentralRows(entries)
         local frame = type(item) == "table" and item.frame or item
         local id = type(item) == "table" and item.id or nil
         local width, height = frameSize(frame)
+        -- A caller may measure the rendered content (for example the buff icons
+        -- inside a wider viewer frame); the smaller readable width wins so the
+        -- unit frames do not reserve the viewer's empty Edit Mode area.
+        local measured = type(item) == "table" and item.contentWidth or nil
+        measured = plainNumber(measured)
+        if measured and measured > 0 and (not width or measured < width) then width = measured end
         if frame and height then
             rows[#rows + 1] = {
                 id = id, frame = frame, width = width, height = height,
