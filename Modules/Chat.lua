@@ -45,6 +45,46 @@ local function windowNames()
     return names
 end
 
+-- Screen rectangle of a frame, used to measure the gap above the message area.
+-- A frame that reports no rect simply lifts nothing.
+local function screenRect(frame)
+    if not frame or type(frame.GetRect) ~= "function" then return nil end
+    local ok, left, bottom, width, height = pcall(frame.GetRect, frame)
+    left = ok and app.Capabilities.Plain(left, "number") or nil
+    bottom = ok and app.Capabilities.Plain(bottom, "number") or nil
+    width = ok and app.Capabilities.Plain(width, "number") or nil
+    height = ok and app.Capabilities.Plain(height, "number") or nil
+    if not left or not bottom or not width or not height then return nil end
+    return left, bottom, width, height
+end
+
+-- The tab row sits above the message area, so a plate anchored to the native
+-- background stops one row short and leaves the tabs floating on their own rule.
+-- Lifting the top edge to the tab's bottom edge makes the tab row and the
+-- conversation one surface; the lift is capped so a misreported tab cannot drag
+-- the plate over the whole window.
+local MAX_TAB_LIFT = 40
+
+local function tabLift(entry)
+    local frame, tab = entry.frame, entry.tab
+    if not frame or not tab then return 0 end
+    if type(tab.IsShown) == "function" then
+        local okShown, shown = pcall(tab.IsShown, tab)
+        if okShown and shown ~= true then return 0 end
+    end
+    local _, tabBottom = screenRect(tab)
+    local _, frameBottom, _, frameHeight = screenRect(frame)
+    if not tabBottom or not frameBottom or not frameHeight then return 0 end
+    local gap = tabBottom - (frameBottom + frameHeight)
+    if gap <= 0 then return 0 end
+    local okScale, scale = pcall(frame.GetEffectiveScale, frame)
+    scale = okScale and app.Capabilities.Plain(scale, "number") or nil
+    if not scale or scale <= 0 then return 0 end
+    -- One extra unit so the tab's own rule lands on the plate edge instead of
+    -- leaving a hairline of background between them.
+    return math.min(MAX_TAB_LIFT, gap / scale + 1)
+end
+
 local function nativeRegions(entry)
     local regions = entry.nativeRegions
     if regions then return regions end
@@ -248,15 +288,18 @@ local function paint(entry)
     refreshFocus(entry)
     local background = backgroundFor(entry, "background")
     background:ClearAllPoints()
-    -- The native ChatFrame background already has the correct bounds: it starts
-    -- below the tab row and ends above the edit box. Reuse its geometry instead
-    -- of overshooting into the tabs.
+    -- The native ChatFrame background already has the correct bounds below the
+    -- tab row and above the edit box. The plate keeps those edges and adds the
+    -- tab row on top, so the labels sit on the same surface as the messages
+    -- instead of hovering above it with a gap.
     local native = frame.Background
+    local lift = tabLift(entry)
+    entry.tabLift = lift
     if native then
-        background:SetPoint("TOPLEFT", native, "TOPLEFT", -2, 2)
+        background:SetPoint("TOPLEFT", native, "TOPLEFT", -2, 2 + lift)
         background:SetPoint("BOTTOMRIGHT", native, "BOTTOMRIGHT", 2, -2)
     else
-        background:SetPoint("TOPLEFT", frame, "TOPLEFT", -2, 3)
+        background:SetPoint("TOPLEFT", frame, "TOPLEFT", -2, 3 + lift)
         background:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 2, -6)
     end
     app.Surface:Plate(background, "chat")
@@ -267,10 +310,12 @@ local function paint(entry)
         local editBackground = backgroundFor(entry, "editBackground")
         editBackground:ClearAllPoints()
         -- One padding rule on every side, so the input reads as a field inside
-        -- the conversation rather than a strip glued under it. The text inset
-        -- itself stays with ChatEdit_UpdateHeader, which owns the channel header.
-        editBackground:SetPoint("TOPLEFT", box, "TOPLEFT", -6, 6)
-        editBackground:SetPoint("BOTTOMRIGHT", box, "BOTTOMRIGHT", 6, -6)
+        -- the conversation rather than a strip glued under it. The inset stays
+        -- smaller than the message plate's own edge so the two surfaces read as
+        -- one block. The text inset itself stays with ChatEdit_UpdateHeader,
+        -- which owns the channel header.
+        editBackground:SetPoint("TOPLEFT", box, "TOPLEFT", -4, 4)
+        editBackground:SetPoint("BOTTOMRIGHT", box, "BOTTOMRIGHT", 4, -4)
         app.Surface:Plate(editBackground, "chatActive")
         syncEdit(entry)
     end
@@ -348,6 +393,10 @@ local function attach(self)
                 entry = { frame = frame }
                 self.windows[index] = entry
             end
+            -- The tab row is part of the same surface: its position decides how
+            -- far the plate reaches above the message area. A window without a
+            -- tab (floating, temporary) simply keeps the native background edge.
+            entry.tab = _G[name .. "Tab"]
             local box = editBoxFor(frame)
             if entry.editBox ~= box then
                 app.Transitions:Cancel(entry, "focus")

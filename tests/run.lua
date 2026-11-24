@@ -7442,6 +7442,42 @@ test("chat input mirrors the frame font and spacing and restores both", function
     eq(#app.errors, 0)
 end)
 
+test("the chat plate reaches up to the tab row and drops back without one", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local chat = app.components.chat
+    local entry = chat.windows[1]
+    -- Message area runs 200..560; the tab row sits 20 units above it. The plate
+    -- covers that row plus one unit of overlap so the tab's own rule lands on
+    -- the plate edge instead of beside a hairline of background.
+    ChatFrame1.rect = { left = 20, bottom = 200, width = 320, height = 360 }
+    ChatFrame1Tab.rect = { left = 20, bottom = 580, width = 80, height = 20 }
+    chat:Refresh()
+    eq(entry.tabLift, 21)
+    -- A hidden tab contributes nothing to the surface.
+    ChatFrame1Tab:Hide()
+    chat:Refresh()
+    eq(entry.tabLift, 0)
+    ChatFrame1Tab:Show()
+    chat:Refresh()
+    eq(entry.tabLift, 21)
+    -- A window without its own tab keeps the native background edge.
+    eq(chat.windows[2].tabLift, 0)
+    eq(#app.errors, 0)
+end)
+
+test("the chat input field sits inside the message plate", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local entry = app.components.chat.windows[1]
+    ChatFrame1EditBox:SetFocus()
+    H.Advance(0.3)
+    eq(entry.editBackground:IsShown(), true)
+    -- The mock keeps the last anchor: the field is inset 4 units on every side,
+    -- not 6, so it reads as part of the conversation surface.
+    eq(entry.editBackground.point[4], 4)
+    eq(entry.editBackground.point[5], -4)
+    eq(#app.errors, 0)
+end)
+
 test("chat backing fades on focus and survives a mid-fade reversal", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local chat = app.components.chat
