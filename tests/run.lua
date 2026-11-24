@@ -2037,6 +2037,51 @@ test("the player cast placeholder is an edit-mode rectangle below the action are
     eq(#app.errors, 0)
 end)
 
+test("the damage window placeholder reserves the bottom right corner", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local entry = app.Layout.entries.damageMeterArea
+    eq(entry ~= nil, true)
+    eq(entry.placeholder, true)
+    -- 13% of 1920 wide, 16% of 1080 tall, 3% in from the right edge, bottom edge
+    -- 46 units above the screen bottom (the strip is 30 tall).
+    eq(entry.frame:GetWidth(), 250)
+    eq(entry.frame:GetHeight(), 173)
+    eq(entry.frame.point[4], 777)
+    eq(entry.frame.point[5], -407)
+    -- The outline never takes a click and is only visible while editing.
+    eq(entry.frame:IsMouseEnabled(), false)
+    eq(entry.frame:IsShown(), false)
+    app.Layout:SetEditing(true)
+    eq(entry.frame:IsShown(), true)
+    app.Layout:SetEditing(false)
+    eq(entry.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("the damage window placeholder leaves the layout page when disabled", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local function listed()
+        for _, id in ipairs(app.Layout:IDs()) do
+            if id == "damageMeterArea" then return true end
+        end
+        return false
+    end
+    eq(listed(), true)
+    app.Store:Set("modules", "damageMeterArea", false)
+    local entry = app.Layout.entries.damageMeterArea
+    eq(entry.hidden, true)
+    eq(entry.frame:IsShown(), false)
+    eq(listed(), false)
+    -- A position saved while the module was off is used again on re-enable, so
+    -- toggling never resets the reserved rectangle.
+    app.Store:SetPosition("damageMeterArea", 100, -200)
+    app.Store:Set("modules", "damageMeterArea", true)
+    eq(entry.hidden, nil)
+    eq(entry.frame.point[4], 100)
+    eq(entry.frame.point[5], -200)
+    eq(#app.errors, 0)
+end)
+
 test("the unit diagnostic reports the shared block and frame centres", function()
     local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "unitFrames", true)
@@ -4036,6 +4081,36 @@ test("nameplates paint the target bar and restore it on disable", function()
     eq(count, 1)
     -- Disabling restores the original colour and colour fill.
     app.Store:Set("modules", "nameplates", false)
+    eq(bar.barColor[1], 0.8)
+    eq(#app.errors, 0)
+end)
+
+test("the target plate keeps its track, hairline and mark in step", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    local bar = H.targetPlate.UnitFrame.healthBar
+    local bg, edge, mark = bar.lumaNameplateBg, bar.lumaNameplateEdge, bar.lumaNameplateMark
+    eq(bg:IsShown(), true)
+    eq(edge:IsShown(), true)
+    eq(mark:IsShown(), true)
+    -- The mock keeps the last anchor only: the track reaches 3 units out and the
+    -- hairline 2, so the bar reads as a dark block with a lit edge instead of a
+    -- single flat outline.
+    eq(bg.point[1], "BOTTOMRIGHT")
+    eq(bg.point[4], 3)
+    eq(bg.point[5], -3)
+    eq(edge.point[4], 2)
+    eq(edge.point[5], -2)
+    -- The mark is LumaUI's own two-pixel stripe outside the track; the client's
+    -- nameplate text and the bar's own size are never touched.
+    eq(mark.point[1], "BOTTOMLEFT")
+    eq(mark.point[4], -4)
+    eq(mark.width, 2)
+    -- Stopping the module hides all three and leaves no stale decoration.
+    app.Store:Set("modules", "nameplates", false)
+    eq(bg:IsShown(), false)
+    eq(edge:IsShown(), false)
+    eq(mark:IsShown(), false)
     eq(bar.barColor[1], 0.8)
     eq(#app.errors, 0)
 end)

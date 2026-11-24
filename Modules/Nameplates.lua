@@ -40,9 +40,18 @@ local function isForbidden(object)
     return ok and forbidden == true
 end
 
--- A dark track and one hairline make the native bar read as a Pearl element
--- without resizing or reparenting the plate. Both belong to the bar we record,
--- and are hidden again when the target or the component goes away.
+-- A dark track, one hairline and a target mark make the native bar read as a
+-- Pearl element without resizing or reparenting the plate. All three belong to
+-- the bar we record, and are hidden again when the target or the component goes
+-- away. Only decorations are created: the bar's own size, texture and colour
+-- stay the client's until `paint` records and replaces them.
+--
+-- The track sits one unit further out than the hairline, so the bar reads as a
+-- dark block with a lit edge rather than a flat outline. The mark is LumaUI's own
+-- accent stripe on the leading edge; the client's nameplate text is never moved.
+local TRACK = 3
+local EDGE = 2
+
 local function decorate(bar)
     local bg = bar.lumaNameplateBg
     if not bg then
@@ -50,24 +59,38 @@ local function decorate(bar)
         bar.lumaNameplateBg = bg
     end
     bg:ClearAllPoints()
-    bg:SetPoint("TOPLEFT", bar, "TOPLEFT", -2, 2)
-    bg:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 2, -2)
+    bg:SetPoint("TOPLEFT", bar, "TOPLEFT", -TRACK, TRACK)
+    bg:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", TRACK, -TRACK)
     local color = app.Theme.colors.surface
-    bg:SetColorTexture(color[1], color[2], color[3], 0.82)
+    bg:SetColorTexture(color[1], color[2], color[3], 0.86)
     bg:Show()
 
     local edge = bar.lumaNameplateEdge
     if not edge then
         edge = CreateFrame("Frame", nil, bar, "BackdropTemplate")
-        edge:SetPoint("TOPLEFT", bar, "TOPLEFT", -2, 2)
-        edge:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 2, -2)
         edge:EnableMouse(false)
         bar.lumaNameplateEdge = edge
     end
+    edge:ClearAllPoints()
+    edge:SetPoint("TOPLEFT", bar, "TOPLEFT", -EDGE, EDGE)
+    edge:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", EDGE, -EDGE)
     edge:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, edge) })
     local line = app.Theme.colors.line
     edge:SetBackdropBorderColor(line[1], line[2], line[3], 0.9)
     edge:Show()
+
+    local mark = bar.lumaNameplateMark
+    if not mark then
+        mark = bar:CreateTexture(nil, "OVERLAY")
+        bar.lumaNameplateMark = mark
+    end
+    mark:ClearAllPoints()
+    mark:SetPoint("TOPLEFT", bar, "TOPLEFT", -TRACK - 1, TRACK)
+    mark:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", -TRACK - 1, -TRACK)
+    mark:SetWidth(app.Pixel:Pixels(2, mark))
+    local accent = app.Theme:Accent()
+    mark:SetColorTexture(accent[1], accent[2], accent[3], 0.95)
+    mark:Show()
 end
 
 -- Repaints the target plate's bar with the unit's gradient pair.
@@ -110,6 +133,7 @@ local function restore(self, bar)
     end
     if bar.lumaNameplateBg then bar.lumaNameplateBg:Hide() end
     if bar.lumaNameplateEdge then bar.lumaNameplateEdge:Hide() end
+    if bar.lumaNameplateMark then bar.lumaNameplateMark:Hide() end
 end
 
 local function restoreAll(self)

@@ -51,6 +51,7 @@ Modules\RaidFrames.lua
 Modules\CombatText.lua
 # ==== TRACK-P3: MISC — insert new files above this line ====
 Modules\Nameplates.lua
+Modules\DamageMeterArea.lua
 Modules\ActionPanel.lua
 Modules\ActionButtons.lua
 Modules\ActionBars.lua
