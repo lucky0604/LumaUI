@@ -4115,6 +4115,31 @@ test("the target plate keeps its track, hairline and mark in step", function()
     eq(#app.errors, 0)
 end)
 
+test("the nameplate diagnostic separates a missing plate from a missing component", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "nameplates", true)
+    local plate = H.nameplates.target
+    -- The component only repaints a bar the client already draws, so "no plate"
+    -- and "component stopped" must read differently.
+    H.nameplates.target = nil
+    app.components.nameplates:Diagnose()
+    local joined = table.concat(H.messages, "\n")
+    eq(joined:find("target plate: no", 1, true) ~= nil, true)
+    -- The client's own switch is reported and never written.
+    _G.GetCVar = function(name) return name == "nameplateShowEnemies" and "0" or "1" end
+    H.messages = {}
+    app.components.nameplates:Diagnose()
+    joined = table.concat(H.messages, "\n")
+    eq(joined:find("nameplateShowEnemies=0", 1, true) ~= nil, true)
+    _G.GetCVar = nil
+    H.nameplates.target = plate
+    H.messages = {}
+    app.components.nameplates:Diagnose()
+    joined = table.concat(H.messages, "\n")
+    eq(joined:find("target plate: yes", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
 -- ==== TRACK-P5: MISC —append new tests above this line ====
 
 -- ==== TRACK: VIS-00..04 first round —append new tests above this line ====

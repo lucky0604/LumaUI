@@ -19,6 +19,7 @@ local function command(input)
     elseif action == "party" then app.components.partyFrames:Diagnose()
     elseif action == "unit" then app.components.unitFrames:Diagnose()
     elseif action == "raid" and app.components.raidFrames then app.components.raidFrames:Diagnose()
+    elseif action == "plates" and app.components.nameplates then app.components.nameplates:Diagnose()
     elseif action == "bars" and app.components.actionPanel then app.components.actionPanel:Diagnose()
     elseif action == "char" then app.components.characterWindow:Toggle()
     elseif action == "aura" then

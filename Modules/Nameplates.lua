@@ -199,3 +199,30 @@ function component:Describe()
     for _ in pairs(self.originals or {}) do count = count + 1 end
     return string.format("nameplates: %s=%d", app.L.nativePlatesPainted, count)
 end
+
+-- `/luma plates`: tells "the component cannot see a plate" apart from "the
+-- client draws no plate at all". LumaUI only repaints a bar the client already
+-- draws, so the client's own nameplate settings decide whether there is
+-- anything to repaint. Those values are read here and never written.
+function component:Diagnose()
+    local function yes(value) return value and "yes" or "no" end
+    local api = _G.C_NamePlate
+    local available = type(api) == "table" and type(api.GetNamePlateForUnit) == "function"
+    app:Print(string.format("nameplates: status=%s running=%s api=%s",
+        tostring(self.status), yes(self.running), yes(available)))
+    local plate = available and plateFor("target") or nil
+    local bar = healthBarOf(plate)
+    app:Print(string.format("  target plate: %s · health bar: %s",
+        yes(plate ~= nil), yes(bar ~= nil)))
+    local painted = 0
+    for _ in pairs(self.originals or {}) do painted = painted + 1 end
+    app:Print(string.format("  painted bars: %d", painted))
+    if type(GetCVar) == "function" then
+        for _, name in ipairs({ "nameplateShowEnemies", "nameplateShowFriends" }) do
+            local ok, value = pcall(GetCVar, name)
+            value = ok and app.Capabilities.Plain(value, "string") or nil
+            app:Print(string.format("  %s=%s", name, value or "?"))
+        end
+    end
+    if not plate then app:Print("  " .. app.L.nameplatesMissing) end
+end
