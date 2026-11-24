@@ -698,6 +698,15 @@ function SettingsUI:Build()
     local close = Controls:Button(frame, "×", 30, function() self:Close() end)
     close:SetPoint("TOPRIGHT", -14, -12)
     self.closeButton = close
+    -- The key hint for the client's own game menu. It is a plain button: the
+    -- game menu stays the client's window, and Esc still closes this one through
+    -- UISpecialFrames.
+    local escape = Controls:Button(frame, L.escMenu, 46, function()
+        if type(ToggleGameMenu) == "function" then ToggleGameMenu() end
+    end)
+    escape:SetPoint("TOPRIGHT", close, "TOPLEFT", -6, 0)
+    escape.pulse = true
+    self.gameMenuButton = escape
     self.rule = app.Theme:Rule(frame)
     self.rule:SetPoint("TOPLEFT", theme:Space("lg") + 6, -62)
     self.rule:SetSize(708, 2)

@@ -140,13 +140,19 @@ local function wireState(control)
         self.state.hover = true
         apply(self)
         hoverTo(self, 0.12)
-    end)
-    control:SetScript("OnLeave", function(self)
+        -- One shared animation class: a primary control announces the
+        -- interaction with four growing hairlines on top of the static ring.
+        if app.EdgePulse and (self.pulse or self.kind == "primary") then
+            app.EdgePulse:Show(self)
+        end
+        end)
+        control:SetScript("OnLeave", function(self)
         self.state.hover = false
         self.state.pressed = false
         apply(self)
         hoverTo(self, 0)
-    end)
+        if app.EdgePulse then app.EdgePulse:Hide(self) end
+        end)
     control:SetScript("OnMouseDown", function(self)
         if self.state.disabled then return end
         self.state.pressed = true
@@ -182,6 +188,8 @@ local function wireState(control)
             self.state.focus = false
             if app.Transitions then app.Transitions:Cancel(self, "hover") end
             if self.hoverOverlay then self.hoverOverlay:SetAlpha(0) end
+            -- A disabled control must not keep an animation or a visible edge.
+            if app.EdgePulse then app.EdgePulse:Hide(self) end
             if Controls.focused == self then Controls:ClearFocus() end
         end
         apply(self)

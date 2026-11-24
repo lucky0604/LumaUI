@@ -78,10 +78,15 @@ Theme.units = {
 -- table said 30; both now come from here, so the two cannot drift apart again.
 -- `private` describes that band: one 12 unit icon per slot, five slots running
 -- left from `inset` at `step` intervals, `bottom` units above the row bottom.
+-- Party rows are compact stacks, not tall cards: the block reads as four short
+-- lines beside the central bars. `right` is the column reserved for the role
+-- glyph and the five native private-aura anchors, so the aura band no longer
+-- takes a whole row beneath the power bar. Height, aura size and aura inset are
+-- one decision: the anchors sit inside the reserved column.
 Theme.party = {
-    width = 190, height = 46, gap = 3, icon = 22,
-    nameSize = 10, health = 7, power = 2, textInset = 26,
-    private = { slots = 5, icon = 12, inset = 8, step = 14, bottom = 3 },
+    width = 190, height = 32, gap = 3, icon = 20,
+    nameSize = 10, health = 8, power = 2, textInset = 24, right = 74,
+    private = { slots = 5, icon = 11, inset = 6, step = 12, bottom = 3 },
 }
 Theme.strip = { height = 30, width = 876, rowGap = 18 }
 Theme.edge = { thin = 1, normal = 2 }
@@ -93,6 +98,22 @@ Theme.shadow = { edge = 10, alpha = 0.35 }
 
 function Theme:Accent()
     return self.colors[app.Store:Profile().appearance.accent]
+end
+
+-- Class token to colour, read from the client's own class colour table. Only a
+-- plain token is looked up: a missing table or token returns nil so the caller
+-- keeps its previous colour instead of inventing one.
+function Theme:ClassColor(token)
+    token = app.Capabilities.Plain(token, "string")
+    if not token then return nil end
+    local colors = _G.CUSTOM_CLASS_COLORS or _G.RAID_CLASS_COLORS
+    local color = colors and colors[token]
+    if not color then return nil end
+    local red, green, blue = color.r, color.g, color.b
+    red, green, blue = app.Capabilities.Plain(red, "number"),
+        app.Capabilities.Plain(green, "number"), app.Capabilities.Plain(blue, "number")
+    if not red or not green or not blue then return nil end
+    return red, green, blue
 end
 
 function Theme:QualityColor(quality)

@@ -228,10 +228,44 @@ local function fadeEdit(entry, to)
     entry.editFading = task ~= nil
 end
 
+-- The four chat states come from one function so the backing, the edit frame and
+-- the diagnostics cannot disagree: typing wins over being shown, combat wins
+-- over both (a protected frame cannot be restyled mid-fight), and an unfocused
+-- but visible window is "active" — it keeps its text and gains no extra wash.
+local function stateOf(entry)
+    local frame = entry.frame
+    local shown = true
+    if frame and type(frame.IsShown) == "function" then
+        local ok, value = pcall(frame.IsShown, frame)
+        shown = ok and value == true
+    end
+    -- A hidden window outranks focus: nothing about it should be painted.
+    if not shown then return "quiet" end
+    if entry.focused == true then return "typing" end
+    -- In combat the idle block collapses to text; typing still needs its field.
+    if InCombatLockdown() then return "combat" end
+    return "active"
+end
+
+-- The backing follows the input, not only the window: a box the client keeps
+-- hidden gets no border. A focused box counts as visible even if this client's
+-- own visibility flag lags behind the focus event.
+local function inputShown(entry)
+    local box = entry.editBox
+    if not box then return false end
+    if type(box.HasFocus) == "function" then
+        local ok, focused = pcall(box.HasFocus, box)
+        if ok and focused then return true end
+    end
+    if type(box.IsShown) ~= "function" then return false end
+    local ok, shown = pcall(box.IsShown, box)
+    return ok and shown == true
+end
+
 local function syncEdit(entry)
     local background = entry.editBackground
     if not background or entry.editFading then return end
-    local focused = entry.focused == true and entry.frame ~= nil and entry.frame:IsVisible()
+    local focused = stateOf(entry) == "typing" and inputShown(entry)
     if focused then
         background:Show()
         background:SetAlpha(1)
@@ -433,3 +467,9 @@ module = app:RegisterComponent({ id = "chat", label = "chat",
         for _, entry in pairs(self.windows or {}) do detachEntry(entry) end
     end,
 })
+
+-- Which of the four states one chat window is in. Exposed so a diagnostic (and a
+-- test) can ask the same question the backing asks, instead of re-deriving it.
+function module:StateOf(entry)
+    return stateOf(entry or {})
+end

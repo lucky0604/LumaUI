@@ -194,7 +194,7 @@ local function iconBoxesOf(frame)
         if left and width and width > 0 then
             height = height or 0
             boxes[#boxes + 1] = {
-                button = button, left = left, right = left + width,
+                button = button, left = left, right = left + width, width = width,
                 bottom = bottom, top = bottom + height, height = height,
             }
         end
@@ -341,6 +341,147 @@ local function restoreIcons(frame)
     frame.lumaIconOriginals = nil
 end
 
+----------------------------------------------------------------------
+-- Per-icon slots
+----------------------------------------------------------------------
+-- The Pearl layout puts each icon in its own slot instead of moving one native
+-- block: essential skills wrap at nine, utility at seven, and a short row stays
+-- centred. The plan is pure geometry (`app.CentralGrid`); this file only reads
+-- the client's current rectangles, assigns icons in the client's readable order
+-- and writes one anchor per button. Every write is recorded first, and a refused
+-- write restores that viewer's icons and falls back to moving the whole viewer,
+-- so a build that does not accept the write never shows a half-placed row.
+
+local function screenWidth()
+    local ok, width = pcall(UIParent.GetWidth, UIParent)
+    width = ok and plain(width, "number") or nil
+    if not width or width <= 0 then return 1024 end
+    return width
+end
+
+-- Visual order: top row first, then left to right. The client's own order is the
+-- fallback when two icons share an edge within a pixel.
+local function visualOrder(boxes)
+    local sorted = {}
+    for _, box in ipairs(boxes) do sorted[#sorted + 1] = box end
+    table.sort(sorted, function(a, b)
+        if math.abs(a.top - b.top) > 1 then return a.top > b.top end
+        return a.left < b.left
+    end)
+    return sorted
+end
+
+-- Slot size from the biggest readable icon, gap from the pitch between two
+-- neighbours on the same row. Both come from what the client already draws, so
+-- an Edit Mode icon size is respected instead of being replaced by a constant.
+local function planFor(id, boxes)
+    local sorted = visualOrder(boxes)
+    local size = 0
+    for _, box in ipairs(sorted) do
+        local width = box.right - box.left
+        if width > size then size = width end
+        if box.height > size then size = box.height end
+    end
+    if size <= 0 then return nil end
+    local gap = 4
+    for index = 2, #sorted do
+        local previous, current = sorted[index - 1], sorted[index]
+        if math.abs(current.top - previous.top) <= 1 then
+            local step = current.left - previous.right
+            if step >= 0 and step <= size then gap = step break end
+        end
+    end
+    local style = app.CentralGrid:Style(id)
+    local plan = app.CentralGrid:Plan({
+        count = #sorted, size = size, gap = gap, rowGap = style.rowGap,
+        max = style.max, maxWidth = screenWidth() * (style.widthRatio or 0.17),
+        style = id,
+    })
+    if plan.count < 1 then return nil end
+    return plan, sorted
+end
+
+local function rememberIcon(viewer, button)
+    local records = viewer.lumaIconSlots
+    if not records then
+        records = {}
+        viewer.lumaIconSlots = records
+    end
+    if records[button] then return records[button] end
+    local points = {}
+    for index = 1, 4 do
+        local ok, point, relative, relativePoint, x, y = pcall(button.GetPoint, button, index)
+        if not ok or not point then break end
+        points[#points + 1] = { point, relative, relativePoint, x, y }
+    end
+    records[button] = points
+    return points
+end
+
+local function iconAtTarget(button, x, y)
+    local ok, point, relative, relativePoint, px, py = pcall(button.GetPoint, button, 1)
+    if not ok or point ~= "CENTER" or relative ~= UIParent or relativePoint ~= "BOTTOM" then
+        return false
+    end
+    px, py = plain(px, "number"), plain(py, "number")
+    return px ~= nil and py ~= nil and math.abs(px - x) < 0.25 and math.abs(py - y) < 0.25
+end
+
+local function restoreIconSlots(viewer)
+    local records = viewer and viewer.lumaIconSlots
+    if not records then return end
+    for button, points in pairs(records) do
+        pcall(button.ClearAllPoints, button)
+        for _, point in ipairs(points) do
+            pcall(button.SetPoint, button, point[1], point[2], point[3], point[4], point[5])
+        end
+    end
+    viewer.lumaIconSlots = nil
+end
+
+-- Per-icon slots are opt-in. The client's cooldown viewers are pooled containers
+-- that re-lay out their own buttons; rewriting a pooled button's anchor can put
+-- the two layouts in a loop that reads as a HUD that never stops moving. The
+-- stable default moves the viewer frame only, which the client honours. Players
+-- who want the slot grid turn it on and can turn it off again.
+local function slotsWanted()
+    local profile = app.Store and app.Store:Profile()
+    local look = profile and profile.appearance
+    return look ~= nil and look.perIconSlots == true
+end
+
+-- Places each icon on its slot, measured from the row bottom the stack assigned.
+-- Returns false when a write was refused, after putting that viewer back.
+local function placeIcons(self, viewer, plan, boxes, bottom)
+    local ratio = frameRatio(viewer)
+    if not ratio or ratio <= 0 then ratio = 1 end
+    local placed = true
+    for index, box in ipairs(boxes) do
+        local slot = plan.slots[index]
+        if slot then
+            local button = box.button
+            rememberIcon(viewer, button)
+            local x, y = slot.x / ratio, (bottom + slot.y) / ratio
+            if not iconAtTarget(button, x, y) then
+                local written = pcall(function()
+                    button:ClearAllPoints()
+                    button:SetPoint("CENTER", UIParent, "BOTTOM", x, y)
+                end)
+                if not written then placed = false break end
+            end
+        end
+    end
+    if placed then return true end
+    restoreIconSlots(viewer)
+    self.iconFallback[viewer] = true
+    if not self.refused[viewer] then
+        self.refused[viewer] = true
+        local name = type(viewer.GetName) == "function" and select(2, pcall(viewer.GetName, viewer)) or nil
+        app:Report("cooldownViewer/slots", tostring(name or "viewer"))
+    end
+    return false
+end
+
 -- Every anchor is recorded once, before the first write. The client may anchor
 -- a viewer with more than one point, so all readable points are kept and put
 -- back in order. A viewer with no readable point still gets a record: restoring
@@ -403,18 +544,17 @@ end
 
 -- Bottom to top: skill rows stay closest to the bars, the tracked buff views
 -- sit above them, which is the order of the Pearl mockup's block.
-local function layout(self)
+local function pass(self)
+    self.iconFallback = self.iconFallback or {}
+    local useSlots = slotsWanted()
+    local chosen = {}
     -- The tracked-buff grid is centred even when the viewer itself is filtered
     -- out of the stack: a build that reports no readable height, or whose own
     -- button tables still point at pooled frames, must not silently keep the
-    -- client's left-aligned grid.
+    -- client's left-aligned grid. When the icons can be placed in slots the
+    -- native row shift is skipped, because both would move the same button.
     local iconViewer = _G[BUFF_ICON]
     local iconWidth, iconHeight
-    if object(iconViewer) and type(iconViewer.SetPoint) == "function"
-        and shownState(iconViewer) ~= false then
-        iconWidth, iconHeight = reflow(iconViewer)
-    end
-    local chosen = {}
     for _, def in ipairs(STACK) do
         local frame = _G[def.name]
         if object(frame) and type(frame.SetPoint) == "function"
@@ -423,11 +563,46 @@ local function layout(self)
             local alpha = alphaState(frame)
             local content = contentState(frame)
             local size = heightState(frame)
-            -- The icon extent is what is rendered; for the tracked grid it
-            -- replaces the viewer's own width and height, so both the stack row
-            -- and the block the unit frames flank follow the visible icons.
-            local contentWidth = def.id == "buffIcon" and iconWidth or measure(frame)
-            local contentHeight = def.id == "buffIcon" and iconHeight or nil
+            local boxes = iconBoxesOf(frame)
+            local plan, ordered
+            if useSlots and def.id ~= "buffBar" and #boxes > 0 and not self.iconFallback[frame] then
+                plan, ordered = planFor(def.id, boxes)
+            end
+            if plan then
+                -- The slot plan is what will be rendered, so the boxes are kept
+                -- in the order the slots were assigned.
+                boxes = ordered
+            end
+            local contentWidth
+            local contentHeight
+            local main = def.id == "essential" or def.id == "utility"
+            if plan then
+                -- A main row reserves the full grid width, not the width of the
+                -- skills that happen to be off cooldown right now; otherwise the
+                -- unit frames walk in and out on every cooldown tick.
+                contentWidth = main and plan.capacity or plan.width
+                contentHeight = plan.height
+            elseif main then
+                -- The viewer frame is the client's own configured block. It is
+                -- the same in and out of an instance, which is what keeps the
+                -- HUD reading the same everywhere; the rendered icons are not.
+                -- No content width also means an empty main viewer keeps the
+                -- "proven empty" path and still collapses instead of reserving
+                -- a row it cannot fill.
+                contentWidth = nil
+                contentHeight = nil
+            elseif def.id == "buffIcon" and useSlots then
+                -- Centring the native grid rewrites the anchor of every pooled
+                -- buff button, so it belongs to the same opt-in as the slot grid.
+                -- The default path only measures the rendered width and moves
+                -- the viewer frame.
+                if not iconWidth then
+                    iconWidth, iconHeight = reflow(frame)
+                end
+                contentWidth, contentHeight = iconWidth, iconHeight
+            else
+                contentWidth = measure(frame)
+            end
             local readable = contentWidth ~= nil or contentHeight ~= nil
             local sized = (size and size > 1) or (contentHeight and contentHeight > 1)
             if shown == true and (alpha == nil or alpha > 0)
@@ -436,18 +611,33 @@ local function layout(self)
                 chosen[#chosen + 1] = {
                     id = def.id, frame = frame,
                     contentWidth = contentWidth, contentHeight = contentHeight,
+                    plan = plan, boxes = plan and boxes or nil,
+                    -- Essential and utility skills are the main rows: they own
+                    -- the block the unit frames flank. Buffs above them never
+                    -- widen that distance.
+                    main = def.id == "essential" or def.id == "utility",
                 }
+                self.plans = self.plans or {}
+                self.plans[frame] = plan
             end
         end
     end
     local central = app.Layout:CentralRows(chosen)
     self.placedRows = central.rows
+    local byFrame = {}
+    for _, item in ipairs(chosen) do byFrame[item.frame] = item end
     -- A refused write leaves its old anchor in place; collapse that reserved
     -- row so the rest of the stack stays contiguous instead of leaving a gap.
     local shift = 0
     for _, row in ipairs(central.rows) do
-        if not place(self, row.frame, row.bottom - shift) then
+        local bottom = row.bottom - shift
+        if not place(self, row.frame, bottom) then
             shift = shift + row.height + central.cooldown.gap
+        else
+            local item = byFrame[row.frame]
+            if item and item.plan and item.boxes then
+                placeIcons(self, row.frame, item.plan, item.boxes, bottom)
+            end
         end
     end
     -- The unit frames sit beside the visible block. Publish only after the
@@ -457,15 +647,33 @@ local function layout(self)
     if central.contentChanged then app:Publish("LAYOUT_CENTRAL_CHANGED") end
 end
 
+-- A pass must never re-enter itself. The component publishes the content width
+-- other components follow; if that publish could come back as another pass, the
+-- HUD would repaint and re-anchor on every beat. The guard also makes the
+-- one-second check free once the stack has settled.
+local function layout(self)
+    if self.layouting then return end
+    self.layouting = true
+    local ok, problem = pcall(pass, self)
+    self.layouting = false
+    if ok then return end
+    app:Report("cooldownViewer/pass", tostring(problem))
+end
+
 local function restoreAll(self)
     for frame in pairs(self.recorded or {}) do
         restoreFrame(frame)
     end
-    -- The tracked grid is centred even when the viewer stayed out of the stack,
-    -- so its icon offsets are restored on their own.
+    -- Icons are restored for every viewer this component touched, whether the
+    -- buttons went to slots or were only shifted inside the native grid.
+    for _, def in ipairs(STACK) do
+        restoreIconSlots(_G[def.name])
+    end
     restoreIcons(_G[BUFF_ICON])
     self.recorded = {}
     self.refused = {}
+    self.plans = {}
+    self.iconFallback = {}
     self.placedRows = {}
     self.pending = nil
 end
@@ -518,13 +726,20 @@ app:RegisterComponent({
             -- slow pass stays out of it instead of queueing a job every second.
             if current.running and not inCombat() then apply(current) end
         end)
-        -- 004 moves the reserved action baseline; both stacks follow the one
-        -- published geometry instead of reading each other's private state.
+        -- 004 moves the reserved action baseline through the same message this
+        -- component publishes. The subscriber ignores the publish that its own
+        -- pass just made (`layouting` is still set while it runs), so the stack
+        -- follows a baseline change without a publish ever feeding itself.
         app:Subscribe(self, "LAYOUT_CENTRAL_CHANGED", function()
-            if self.running then apply(self) end
+            if self.running and not self.layouting then apply(self) end
         end)
     end,
     Refresh = function(self) apply(self) end,
+    Describe = function(self)
+        if not self.running then return nil end
+        return string.format("cooldownViewer: rows=%d slots=%s",
+            #(self.placedRows or {}), slotsWanted() and "on" or "off")
+    end,
     Disable = function(self)
         self.pending = nil
         if inCombat() then

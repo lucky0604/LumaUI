@@ -125,6 +125,14 @@ function Items.Cell(parent)
     button.junk:SetPoint("BOTTOMLEFT", 3, 3)
     button.junk:SetColorTexture(0.95, 0.8, 0.42, 0.9)
     button.junk:Hide()
+    -- The sweep belongs to the cell and is hidden with it, so an emptied slot
+    -- never keeps the previous item's cooldown running.
+    button.cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
+    button.cooldown:SetAllPoints(button.icon)
+    if type(button.cooldown.SetDrawEdge) == "function" then
+        button.cooldown:SetDrawEdge(false)
+    end
+    button.cooldown:Hide()
     button:SetScript("OnEnter", function()
         if not button.item then return end
         GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
@@ -135,31 +143,74 @@ function Items.Cell(parent)
     return button
 end
 
+-- Container cooldown, read straight from the client. Values are only passed on
+-- to the cooldown frame when both are plain numbers; a restricted value leaves
+-- the cell without a sweep rather than guessing.
+function Items.Cooldown(item)
+    if not item then return nil end
+    local api = _G.C_Container
+    if type(api) ~= "table" or type(api.GetContainerItemCooldown) ~= "function" then return nil end
+    local ok, start, duration = pcall(api.GetContainerItemCooldown, item.bag, item.slot)
+    if not ok then return nil end
+    start, duration = Plain(start, "number"), Plain(duration, "number")
+    if not start or not duration or duration <= 0 then return nil end
+    return start, duration
+end
+
+-- Removes every layer this module added to a cell and hides it. Used for an
+-- empty slot and for a paint that failed halfway: a cell either shows a whole
+-- item or nothing, never a stale icon with a new border.
+function Items.Clear(button)
+    button.item = nil
+    button:SetShown(false)
+    if button.junk then button.junk:Hide() end
+    if button.border then button.border:Hide() end
+    if button.cooldown then button.cooldown:Hide() end
+    if button.count then button.count:SetText("") end
+    if button.icon then
+        if type(button.icon.SetDesaturated) == "function" then button.icon:SetDesaturated(false) end
+        button.icon:SetAlpha(1)
+    end
+end
+
 function Items.Paint(button, item)
-    button.item = item
-    button:SetShown(item ~= nil)
     if not item then
-        if button.junk then button.junk:Hide() end
-        if button.border then button.border:Hide() end
+        Items.Clear(button)
         return
     end
-    button.icon:SetTexture(item.texture or 134400)
-    button.icon:SetDesaturated(item.locked == true)
-    button.icon:SetAlpha(item.locked and 0.55 or 1)
-    button.count:SetText(item.count > 1 and item.count or "")
-    app.Theme:PaintSurface(button, "embedded")
-    local accent = app.Theme:Accent()
-    button.hover:SetColorTexture(accent[1], accent[2], accent[3], 0.12)
-    local quality = Plain(item.quality, "number")
-    local red, green, blue = app.Theme:QualityColor(quality)
-    if red and quality ~= 1 then
-        button.border:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, button.border) })
-        button.border:SetBackdropBorderColor(red, green, blue, 1)
-        button.border:Show()
-    else
-        button.border:Hide()
+    local painted = pcall(function()
+        button.icon:SetTexture(item.texture or 134400)
+        button.icon:SetDesaturated(item.locked == true)
+        button.icon:SetAlpha(item.locked and 0.55 or 1)
+        button.count:SetText(item.count > 1 and item.count or "")
+        app.Theme:PaintSurface(button, "embedded")
+        local accent = app.Theme:Accent()
+        button.hover:SetColorTexture(accent[1], accent[2], accent[3], 0.12)
+        local quality = Plain(item.quality, "number")
+        local red, green, blue = app.Theme:QualityColor(quality)
+        if red and quality ~= 1 then
+            button.border:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, button.border) })
+            button.border:SetBackdropBorderColor(red, green, blue, 1)
+            button.border:Show()
+        else
+            button.border:Hide()
+        end
+        button.junk:SetShown(item.junk == true and item.locked ~= true)
+        local start, duration = Items.Cooldown(item)
+        if start and duration and type(button.cooldown.SetCooldown) == "function" then
+            button.cooldown:SetCooldown(start, duration)
+            button.cooldown:Show()
+        else
+            button.cooldown:Hide()
+        end
+    end)
+    if not painted then
+        Items.Clear(button)
+        app:Report("items/paint", "cell")
+        return
     end
-    button.junk:SetShown(item.junk == true and item.locked ~= true)
+    button.item = item
+    button:SetShown(true)
 end
 
 -- Search field with its placeholder and the same focus behaviour in both

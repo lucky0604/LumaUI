@@ -21,10 +21,13 @@ local PRIVATE_JOB = "partyFrames/private"
 -- Both client-owned party displays are reported in diagnostics.
 local NATIVE_NAMES = { "PartyFrame", "CompactPartyFrame" }
 local P = app.Theme.party
--- Row height has one owner: the theme's `height`, sized to keep the private-aura
--- band clear of the power bar. The module used to hard-code 46 while the theme
--- said 30, so a row measured from one and drawn with the other.
+-- Row height has one owner: the theme's `height`. The compact row keeps the
+-- name, the health bar and a hairline power bar on the left, and reserves the
+-- right column for the role glyph and the native private-aura anchors.
 local FRAME_WIDTH, FRAME_HEIGHT, FRAME_GAP = P.width, P.height, P.gap
+local RIGHT_COLUMN = P.right or 74
+-- Vertical positions inside the row, measured from its top edge.
+local NAME_TOP, HEALTH_TOP, POWER_TOP = -2, -15, -25
 -- The four buttons are one layout item: a plain container carries the group
 -- position and scale, members keep their relative offsets. Pearl puts the party
 -- block on the left edge, level with the central unit bars.
@@ -150,22 +153,24 @@ local function create(unit)
     frame:SetAttribute("unit", unit)
     frame:SetAttribute("*type1", "target")
     frame:SetAttribute("*type2", "togglemenu")
-    -- A quiet row plate: the portrait and bars float on it, and the plate stops
-    -- short of the private-aura column so native icons are never covered.
+    -- A quiet row plate: the portrait and the text column float on it, and the
+    -- plate stops before the reserved right column so the aura anchors sit on
+    -- transparent space instead of a painted band.
     local plate = frame:CreateTexture(nil, "BACKGROUND")
     plate:SetPoint("TOPLEFT", -2, 2)
-    plate:SetPoint("BOTTOMRIGHT", 2, -2)
+    plate:SetPoint("BOTTOMRIGHT", -RIGHT_COLUMN + 2, -2)
     local surface = app.Theme.colors.surface
-    plate:SetColorTexture(surface[1] * 1.6, surface[2] * 1.6, surface[3] * 1.6, 0.55)
+    plate:SetColorTexture(surface[1] * 1.6, surface[2] * 1.6, surface[3] * 1.6, 0.35)
     frame.plate = plate
     frame.classIcon = frame:CreateTexture(nil, "ARTWORK")
     frame.classIcon:SetSize(P.icon, P.icon)
     frame.classIcon:SetPoint("TOPLEFT", 2, -2)
     frame.classIcon:SetTexture("Interface\\Icons\\ClassIcon_WARRIOR")
     frame.name = app.Type:Text(frame, "body")
-    frame.name:SetPoint("TOPLEFT", P.textInset, -3)
-    -- The role glyph owns the top right corner; the name stops before it.
-    frame.name:SetWidth(FRAME_WIDTH - P.textInset - 18)
+    frame.name:SetPoint("TOPLEFT", P.textInset, NAME_TOP)
+    -- The role glyph owns the top right corner; the name stops before the
+    -- reserved column so it never runs under the role or the aura anchors.
+    frame.name:SetWidth(FRAME_WIDTH - P.textInset - RIGHT_COLUMN)
     frame.name:SetFont(app.Type:Face(), P.nameSize, "OUTLINE")
     if type(frame.name.SetShadowOffset) == "function" then
         pcall(frame.name.SetShadowOffset, frame.name, 1, -1)
@@ -179,8 +184,8 @@ local function create(unit)
     frame.role:SetJustifyH("RIGHT")
     frame.role:SetText("")
     frame.health = app.Theme:Bar(frame, P.health)
-    frame.health:SetPoint("TOPLEFT", P.textInset, -17)
-    frame.health:SetPoint("TOPRIGHT", -6, -17)
+    frame.health:SetPoint("TOPLEFT", P.textInset, HEALTH_TOP)
+    frame.health:SetPoint("TOPRIGHT", -RIGHT_COLUMN, HEALTH_TOP)
     frame.healthEdge = CreateFrame("Frame", nil, frame.health, "BackdropTemplate")
     frame.healthEdge:SetPoint("TOPLEFT", -1, 1)
     frame.healthEdge:SetPoint("BOTTOMRIGHT", 1, -1)
@@ -194,8 +199,8 @@ local function create(unit)
     frame.status:SetPoint("CENTER")
     frame.status:SetText("")
     frame.power = app.Theme:Bar(frame, P.power)
-    frame.power:SetPoint("TOPLEFT", P.textInset, -26)
-    frame.power:SetPoint("TOPRIGHT", -6, -26)
+    frame.power:SetPoint("TOPLEFT", P.textInset, POWER_TOP)
+    frame.power:SetPoint("TOPRIGHT", -RIGHT_COLUMN, POWER_TOP)
     frame.events = CreateFrame("Frame")
     frame.events:SetScript("OnEvent", function()
         app:Call("partyFrames/" .. unit, draw, frame)

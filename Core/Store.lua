@@ -8,7 +8,12 @@ Store.defaults = {
     -- backdrop no longer share one number.
     appearance = { scale = 1, opacity = 0.92, windowOpacity = 0.92, hudOpacity = 0.80,
         chatOpacity = 0.82, chatActiveOpacity = 0.90, motion = true, reduceMotion = false,
-        accent = "pearl", tooltipQuality = true },
+        accent = "pearl", tooltipQuality = true,
+        -- Off by default: the client's cooldown viewers are pooled containers
+        -- that re-lay out their own buttons, and rewriting a pooled button's
+        -- anchor can leave the two layouts fighting. The stable path moves the
+        -- viewer frame; the slot grid is an explicit opt-in.
+        perIconSlots = false },
     modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = true, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
         clickCast = {}, auraFilter = "all", takeoverUnitFrames = true,
@@ -61,6 +66,9 @@ function Store:Normalize(input)
     -- stored next to the motion switch so both share one validated profile.
     if type(look.reduceMotion) == "boolean" then result.appearance.reduceMotion = look.reduceMotion end
     if type(look.tooltipQuality) == "boolean" then result.appearance.tooltipQuality = look.tooltipQuality end
+    -- Opt-in per-icon slot grid for the cooldown viewers. The shipped default is
+    -- off; a profile that never chose keeps the stable whole-viewer placement.
+    if type(look.perIconSlots) == "boolean" then result.appearance.perIconSlots = look.perIconSlots end
     if look.accent == "ember" or look.accent == "ocean" or look.accent == "pearl" then
         result.appearance.accent = look.accent
     end

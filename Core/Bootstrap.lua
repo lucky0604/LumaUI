@@ -11,6 +11,54 @@ function app:Print(message)
     end
 end
 
+-- Runs a chat report into a list instead of the chat frame. Used by
+-- `/luma dump`, which writes the same text into SavedVariables so a reader (a
+-- person or a tool) can open one file instead of copying chat lines. The original
+-- printer is restored even when the callback fails.
+function app:Collect(callback)
+    local lines = {}
+    local previous = self.Print
+    self.Print = function(_, message) lines[#lines + 1] = tostring(message) end
+    local ok, problem = pcall(callback)
+    self.Print = previous
+    if not ok then lines[#lines + 1] = "error: " .. tostring(problem) end
+    return lines
+end
+
+-- `/luma dump` copies the diagnostics page text and the HUD geometry report into
+-- SavedVariables (`LumaUIDB.diagnostics`), so a reader can open the file instead
+-- of copying chat lines. The client flushes SavedVariables on /reload or logout,
+-- and the confirmation names that step. A newer-schema database is never written.
+function app:WriteDiagnostics()
+    local store = self.Store
+    if not store or type(store.data) ~= "table" then self:Print(self.L.notReady); return end
+    if store.readonly then self:Print(self.L.readonly); return end
+    local lines = self:Collect(function()
+        local settings = self.Settings
+        if settings and not settings.frame then settings:Build() end
+        local page = settings and settings.pages and settings.pages.diagnostics
+        if page then
+            page.Update()
+            local function append(text)
+                if type(text) ~= "string" then return end
+                for line in text:gmatch("[^\r\n]+") do self:Print(line) end
+            end
+            self:Print(self.L.diagStatus)
+            append(page.bodies.status and page.bodies.status:GetText())
+            self:Print(self.L.diagNative)
+            append(page.bodies.native and page.bodies.native:GetText())
+            self:Print(self.L.diagCoexistence)
+            append(page.bodies.coexistence and page.bodies.coexistence:GetText())
+            self:Print(self.L.diagErrors)
+            append(page.bodies.errors and page.bodies.errors:GetText())
+            self:Print("")
+        end
+        self.Layout:Diagnose()
+    end)
+    store.data.diagnostics = { version = self.version, lines = lines }
+    self:Print(self.L.diagnosticsSaved)
+end
+
 function app:Report(context, message)
     message = tostring(message)
     for _, existing in ipairs(self.errors) do

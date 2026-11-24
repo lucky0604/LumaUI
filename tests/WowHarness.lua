@@ -24,6 +24,12 @@ function Frame:SetWidth(w) restricted(self); self.width = w end
 function Frame:SetHeight(h) restricted(self); self.height = h end
 function Frame:GetWidth() return self.width or 100 end
 function Frame:GetHeight() return self.height or 30 end
+-- Minimal Cooldown API: the sweep records what it was given so a test can assert
+-- the values reached the client's own drawing call.
+function Frame:SetCooldown(start, duration)
+    self.cooldownStart, self.cooldownDuration = start, duration
+end
+
 function Frame:SetPoint(...) restricted(self); self.point = { ... } end
 function Frame:ClearAllPoints() restricted(self); self.point = nil end
 function Frame:GetPoint(index)
@@ -244,6 +250,30 @@ function H.NewFrame(name, parent, template)
     return frame
 end
 
+-- A name plate with the frame shape the test asks for. "modern" is what the
+-- Retail unit frame uses (bar nested under HealthBarsContainer), "legacy" is the
+-- older direct field, "both" carries one of each, and "frame" has no bar at all.
+local function plainBar(color)
+    local bar = H.NewFrame(nil, UIParent)
+    bar.barColor = color or { 0.8, 0.1, 0.1, 1 }
+    bar.GetStatusBarColor = function(self) return unpack(self.barColor) end
+    return bar
+end
+H.PlainBar = plainBar
+
+function H.Plate(shape, modernBar, legacyBar)
+    local plate = H.NewFrame(nil, UIParent)
+    plate.UnitFrame = H.NewFrame(nil, plate)
+    if shape == "modern" or shape == "both" then
+        plate.UnitFrame.HealthBarsContainer = H.NewFrame(nil, plate.UnitFrame)
+        plate.UnitFrame.HealthBarsContainer.healthBar = modernBar or plainBar()
+    end
+    if shape == "legacy" or shape == "both" then
+        plate.UnitFrame.healthBar = legacyBar or plainBar({ 0.2, 0.3, 0.4, 1 })
+    end
+    return plate
+end
+
 function H.Fire(event, ...)
     local snapshot = {}
     for i, frame in ipairs(H.frames) do snapshot[i] = frame end
@@ -339,6 +369,10 @@ function H.Load(saved)
             modules = { questList = true, unitFrames = false, partyFrames = false,
                 nameplates = false, actionBars = false },
             ui = { takeoverUnitFrames = false },
+            -- The slot-grid tests drive the per-icon layout directly, so the
+            -- shared fixture opts in. The shipped default (off) and the stable
+            -- whole-viewer path are asserted by their own test.
+            appearance = { perIconSlots = true },
         } },
         migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
             actionBars = true },
@@ -909,6 +943,18 @@ function H.Load(saved)
         target = { reaction = 3 },
         focus = { reaction = 2 },
     }
+    -- Nameplate eligibility: a plate unit counts as hostile unless a test says
+    -- otherwise, so the default fixture keeps working as an enemy plate.
+    _G.UnitIsEnemy = function(a, b)
+        local info = H.unitInfo[b] or H.unitInfo[a]
+        if info and info.enemy ~= nil then return info.enemy end
+        if info and info.reaction ~= nil then return info.reaction <= 3 end
+        return true
+    end
+    _G.UnitIsUnit = function(a, b)
+        if a == b then return true end
+        return H.unitSame ~= nil and H.unitSame[a] == b
+    end
     _G.UnitIsPlayer = function(unit)
         local info = H.unitInfo[unit]
         if not info then return false end
@@ -1801,17 +1847,15 @@ function H.Load(saved)
     _G.C_NamePlate = {
         GetNamePlateForUnit = function(unit) return H.nameplates[unit] end,
     }
-    local function nameplateBar()
-        local bar = H.NewFrame(nil, UIParent)
-        bar.barColor = { 0.8, 0.1, 0.1, 1 }
-        bar.GetStatusBarColor = function(self) return unpack(self.barColor) end
-        return bar
-    end
-    local plate = H.NewFrame("NamePlate1", UIParent)
-    plate.UnitFrame = H.NewFrame(nil, plate)
-    plate.UnitFrame.healthBar = nameplateBar()
+    -- The default fixture uses the Retail nested shape on purpose: a component
+    -- that only reads the legacy `UnitFrame.healthBar` field must fail here
+    -- instead of passing because the fixture was written to match the old code.
+    local plate = H.Plate("modern")
+    plate.name = "NamePlate1"
+    _G.NamePlate1 = plate
     H.nameplates.target = plate
     H.targetPlate = plate
+    H.targetBar = plate.UnitFrame.HealthBarsContainer.healthBar
     local app = {}
     local files = _G.LUMA_TEST_FILES or {}
     if not _G.LUMA_TEST_FILES then

@@ -19,7 +19,12 @@ local function command(input)
     elseif action == "party" then app.components.partyFrames:Diagnose()
     elseif action == "unit" then app.components.unitFrames:Diagnose()
     elseif action == "raid" and app.components.raidFrames then app.components.raidFrames:Diagnose()
-    elseif action == "plates" and app.components.nameplates then app.components.nameplates:Diagnose()
+    elseif action == "plates" and app.components.nameplates then
+        -- `on` / `friends` / `off` change the client's own nameplate setting at
+        -- the player's explicit request; anything else prints the report.
+        app.components.nameplates:Command(rest)
+    elseif action == "dump" then app:WriteDiagnostics()
+    elseif action == "hud" then app.Layout:Diagnose()
     elseif action == "bars" and app.components.actionPanel then app.components.actionPanel:Diagnose()
     elseif action == "char" then app.components.characterWindow:Toggle()
     elseif action == "aura" then
@@ -54,6 +59,33 @@ local function command(input)
         else
             click:Bind(key:lower(), spell)
         end
+    elseif action == "slots" then
+        -- Opt-in per-icon grid. Off by default because rewriting a pooled
+        -- cooldown button's anchor can fight the client's own layout.
+        local wanted = not (app.Store:Profile().appearance.perIconSlots == true)
+        if not app.Store:Set("appearance", "perIconSlots", wanted) then
+            app:Print(app.L.readonly)
+            return
+        end
+        app:Print(wanted and app.L.slotsOn or app.L.slotsOff)
+        local viewer = app.components.cooldownViewer
+        if viewer and viewer.running then
+            app:Call("command/slots", viewer.Refresh, viewer)
+        end
+    elseif action == "meter" then
+        -- The sample window only draws from a registered provider; without one
+        -- it says so instead of covering the reserved area with an empty frame.
+        if type(app.DamageMeterProvider) ~= "function" then
+            app:Print(app.L.meterNoProvider)
+            return
+        end
+        app.Store:Set("modules", "damageMeter", true)
+        local meter = app.components.damageMeter
+        if not meter or meter.running ~= true then
+            app:Print(app.L.meterNoProvider)
+            return
+        end
+        if meter:IsShown() then meter:Hide() else meter:Show() end
     elseif action == "status" then app.Settings:Toggle("diagnostics")
     elseif action == "style" then
         -- A command that answers with silence is indistinguishable from a broken

@@ -409,6 +409,9 @@ function Layout:ApplyAll()
     if InCombatLockdown() then return end
     for id in pairs(self.entries) do self:Apply(id) end
     if self.previewName then self:PreviewPreset(self.previewName) end
+    -- While editing, a moved native frame or a changed UI scale has to move its
+    -- guide too; outside editing this is a no-op.
+    if self.editing then self:UpdateEdgeGuides() end
 end
 
 function Layout:ActionAreaBottom()
@@ -478,7 +481,10 @@ function Layout:Central()
             bottom = bottom, top = top, height = height, width = width,
             gap = self.actionGap, rows = rows, estimated = estimated,
         },
-        cooldown = { bottom = top + self.cooldownGap, top = nil, width = width, gap = self.cooldownGap },
+        -- `top` equals `bottom` until CentralRows has placed real rows, so a
+        -- consumer (resource rail, diagnostics) never reads a nil edge.
+        cooldown = { bottom = top + self.cooldownGap, top = top + self.cooldownGap,
+            width = width, gap = self.cooldownGap },
         content = {
             width = contentWidth, left = -contentBoundary, right = contentBoundary,
             gap = unitGap, measured = self.contentWidth ~= nil,
@@ -504,9 +510,9 @@ function Layout:Central()
     return central
 end
 
--- The unit boundary follows the widest visible row. A tracked-buff row can be
--- wider than the skill rows; using only the skills let the icons overlap the
--- player/target frames in game. An empty stack falls back to the mockup width.
+-- Fallback width when no row is marked as a main skill row. The primary rule is
+-- "widest main row" (see CentralRows): an auxiliary buff row above the skills
+-- must not widen the distance between the health bars.
 local function contentRowWidth(rows)
     local width = 0
     for _, row in ipairs(rows) do
@@ -541,6 +547,7 @@ function Layout:CentralRows(entries)
         if frame and height then
             rows[#rows + 1] = {
                 id = id, frame = frame, width = width, height = height,
+                main = type(item) == "table" and item.main == true,
                 bottom = y, top = y + height, center = y + height / 2,
             }
             y = y + height + self.cooldownGap
@@ -549,11 +556,21 @@ function Layout:CentralRows(entries)
     central.rows = rows
     central.cooldown.top = #rows > 0 and rows[#rows].top or central.cooldown.bottom
     central.mainRow = rows[1]
-    -- The widest visible row defines the block the unit frames flank. Storing
-    -- the width here keeps the unit boundary and the stack from two
-    -- measurements; the caller publishes after placing the rows so this pass
-    -- does not re-enter itself. No readable row falls back to the mockup width.
-    local measured = contentRowWidth(rows)
+    -- Main rows (essential and utility skills) define the block the unit frames
+    -- flank. An auxiliary row above them may be wider without pushing the health
+    -- bars apart, because those rows sit above the frames' top edge. A HUD with
+    -- no main row (only tracked buffs) still uses its widest visible row so the
+    -- boundary stays meaningful.
+    local mainWidth, mainTop, mainBottom, mainCount = 0, nil, nil, 0
+    for _, row in ipairs(rows) do
+        if row.main then
+            mainCount = mainCount + 1
+            mainTop = row.top
+            mainBottom = mainBottom or row.bottom
+            if row.width and row.width > mainWidth then mainWidth = row.width end
+        end
+    end
+    local measured = mainWidth > 0 and mainWidth or contentRowWidth(rows)
     local content, gap = self:BlockMetrics(measured > 0 and measured or nil)
     local contentChanged = storeContentWidth(self, content)
     local boundary = content / 2 + gap
@@ -561,15 +578,24 @@ function Layout:CentralRows(entries)
     central.content.left, central.content.right = -boundary, boundary
     central.content.gap = gap
     central.content.measured = self.contentWidth ~= nil
+    central.content.mainOnly = mainWidth > 0
     central.units.left, central.units.right = -boundary, boundary
     central.units.width = content + gap * 2
     central.units.gap = gap
+    central.mainTop, central.mainBottom = mainTop, mainBottom
+    central.mainCount = mainCount
     central.contentChanged = contentChanged or nil
     local halfHeight = central.screen.height / 2
-    central.units.rowTop = central.cooldown.top
+    -- The unit frames read the main row's outer edge: with two main rows that is
+    -- the top of the upper skill row, and a buff row above it does not move the
+    -- health bars.
+    local rowTop = mainTop or central.cooldown.top
+    central.units.rowTop = rowTop
     central.units.rowCenter = rows[1] and rows[1].center or central.cooldown.bottom
-    central.units.rowTopY = central.cooldown.top - halfHeight
+    central.units.rowTopY = rowTop - halfHeight
     central.units.rowCenterY = central.units.rowCenter - halfHeight
+    -- Kept for `/luma hud` only; layout always recomputes from live frames.
+    self.lastCentral = central
     return central
 end
 
@@ -647,6 +673,8 @@ function Layout:SetEditing(wanted)
     self.editing = wanted
     -- Placeholder outlines are only ever visible while editing positions.
     self:UpdatePlaceholders()
+    -- Native region outlines use the same rule: display-only, edit-mode only.
+    self:UpdateEdgeGuides()
     if wanted and app.Settings.frame then app.Settings.frame:Hide() end
     for id, entry in pairs(self.entries) do
         if entry.member then
@@ -925,4 +953,293 @@ end
 
 function Layout:ClearPresetSnapshot()
     self.presetSnapshot = nil
+end
+
+----------------------------------------------------------------------
+-- Native region ownership
+----------------------------------------------------------------------
+-- Each screen region has exactly one owner. Sampling reads the client's own
+-- rectangle when the build reports one; a region whose frame is missing stays
+-- nil instead of being given a guessed boundary, so a client without (say) a
+-- damage meter cannot have its edges reset by a placeholder. The samples feed
+-- the `/luma hud` overlap line and the edit-mode guides; nothing here moves a
+-- native frame.
+-- Local read of a frame's visibility. The `/luma hud` helpers are declared
+-- further down with the report, so the sampler keeps its own copy.
+local function regionShown(frame)
+    if type(frame.IsShown) ~= "function" then return false end
+    local ok, shown = pcall(frame.IsShown, frame)
+    return ok and shown == true
+end
+
+Layout.regions = {
+    map = { names = { "MinimapCluster", "Minimap" }, owner = "minimap" },
+    tracker = { names = { "ObjectiveTrackerFrame" }, owner = "questTracker" },
+    chat = { names = { "ChatFrame1" }, owner = "chat" },
+    cast = { names = { "PlayerCastingBarFrame" }, owner = "native" },
+    extra = { names = { "ExtraActionButton1" }, owner = "native" },
+    meter = { names = { "LumaUIDamageMeter" }, owner = "damageMeter" },
+}
+
+-- Rectangle in UIParent units, or nil when the frame reports none. A frame at a
+-- different effective scale is converted with its own ratio, the same way the
+-- cooldown stack measures native frames.
+function Layout:Sample(id)
+    local region = self.regions[id]
+    if not region then return nil end
+    for _, name in ipairs(region.names) do
+        local frame = _G[name]
+        if object(frame) then
+            local scale = 1
+            if type(frame.GetEffectiveScale) == "function" then
+                local value = plainNumber(select(2, pcall(frame.GetEffectiveScale, frame)))
+                local base = plainNumber(select(2, pcall(UIParent.GetEffectiveScale, UIParent)))
+                if value and base and value > 0 and base > 0 then scale = value / base end
+            end
+            if scale <= 0 then scale = 1 end
+            local sample = {
+                id = id, name = name, frame = frame, owner = region.owner,
+                scale = scale, shown = regionShown(frame),
+            }
+            if type(frame.GetRect) == "function" then
+                local ok, left, bottom, width, height = pcall(frame.GetRect, frame)
+                left, bottom = ok and plainNumber(left) or nil, ok and plainNumber(bottom) or nil
+                width, height = ok and plainNumber(width) or nil, ok and plainNumber(height) or nil
+                if left and bottom and width and height then
+                    sample.left, sample.bottom = left / scale, bottom / scale
+                    sample.width, sample.height = width / scale, height / scale
+                    sample.measured = true
+                end
+            end
+            if not sample.measured and type(frame.GetSize) == "function" then
+                -- Size without a position: enough to describe the region, not
+                -- enough to claim where it sits.
+                local ok, width, height = pcall(frame.GetSize, frame)
+                width, height = ok and plainNumber(width) or nil, ok and plainNumber(height) or nil
+                if width and height then
+                    sample.width, sample.height = width / scale, height / scale
+                end
+            end
+            return sample
+        end
+    end
+end
+
+-- Pairs of owned regions whose measured rectangles intersect. Native-owned
+-- samples are excluded: the client is allowed to overlap its own cast bar.
+function Layout:Overlaps()
+    local samples, list = {}, {}
+    for id in pairs(self.regions) do
+        local sample = self:Sample(id)
+        if sample and sample.measured and sample.shown and sample.owner ~= "native" then
+            samples[#samples + 1] = sample
+        end
+    end
+    for index = 1, #samples do
+        for other = index + 1, #samples do
+            local a, b = samples[index], samples[other]
+            local width = math.min(a.left + a.width, b.left + b.width) - math.max(a.left, b.left)
+            local height = math.min(a.bottom + a.height, b.bottom + b.height) - math.max(a.bottom, b.bottom)
+            if width > 1 and height > 1 then
+                list[#list + 1] = {
+                    a = a.id, b = b.id, ownerA = a.owner, ownerB = b.owner,
+                    width = width, height = height,
+                }
+            end
+        end
+    end
+    return list
+end
+
+function Layout:CreateEdgeGuides()
+    if self.edgeGuides then return self.edgeGuides end
+    local guides = {}
+    self.edgeGuides = guides
+    return guides
+end
+
+-- The edit-mode guides are the only place the sampled rectangles become
+-- visible. They are display-only, created once and never anchored to the
+-- frames they describe, so hiding them restores nothing.
+function Layout:UpdateEdgeGuides()
+    local guides = self:CreateEdgeGuides()
+    for id in pairs(self.regions) do
+        local guide = guides[id]
+        if not self.editing then
+            if guide then guide:Hide() end
+        else
+            local sample = self:Sample(id)
+            if not sample then
+                if guide then guide:Hide() end
+            else
+                if not guide then
+                    guide = CreateFrame("Frame", "LumaUIEdgeGuide_" .. id, UIParent, "BackdropTemplate")
+                    guide:EnableMouse(false)
+                    guide:SetFrameStrata("DIALOG")
+                    guide:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, guide) })
+                    guide.label = app.Theme:Text(guide, 10, true)
+                    guide.label:SetPoint("TOPLEFT", 4, -3)
+                    guides[id] = guide
+                end
+                local accent = app.Theme:Accent()
+                guide:SetBackdropBorderColor(accent[1], accent[2], accent[3],
+                    sample.measured and 0.75 or 0.3)
+                guide:ClearAllPoints()
+                guide.label:SetText(string.format("%s · %s · %s", sample.name, sample.owner,
+                    sample.measured and app.L.hudMeasured or app.L.hudEstimate))
+                if sample.measured then
+                    guide:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", sample.left, sample.bottom)
+                    guide:SetSize(math.max(4, sample.width), math.max(4, sample.height))
+                else
+                    guide:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+                    guide:SetSize(sample.width or 120, sample.height or 24)
+                end
+                guide:Show()
+            end
+        end
+    end
+end
+
+----------------------------------------------------------------------
+-- Read-only geometry report (`/luma hud`)
+----------------------------------------------------------------------
+-- One sampling point for 01 and 03: the central measurement, the four cooldown
+-- viewers with their pools, the managed action bars and the native frames the
+-- edge layout has to avoid. Everything here is a read; a frame that does not
+-- report a rectangle is printed as unknown instead of being given a guess, and
+-- nothing is walked beyond this fixed list.
+local HUD_SAMPLES = {
+    { key = "viewer", owner = "cooldownViewer", names = {
+        "EssentialCooldownViewer", "UtilityCooldownViewer",
+        "BuffBarCooldownViewer", "BuffIconCooldownViewer" } },
+    { key = "bar", owner = "actionBars", names = {
+        "MainActionBar", "MultiBarBottomLeft", "MultiBarBottomRight" } },
+    { key = "map", owner = "minimap", names = { "Minimap", "MinimapCluster" } },
+    { key = "tracker", owner = "questTracker", names = { "ObjectiveTrackerFrame" } },
+    { key = "chat", owner = "chat", names = { "ChatFrame1" } },
+    { key = "cast", owner = "native", names = { "PlayerCastingBarFrame" } },
+    { key = "extra", owner = "native", names = { "ExtraActionButton1", "PersonalResourceDisplayFrame" } },
+}
+
+-- GetRect reports a frame in its own scaled units, so two frames only compare
+-- after both rectangles are moved into UIParent units (the space the central
+-- rows use). The ratio is the same one the layout applies when reading sizes.
+local function rectText(frame)
+    if not object(frame) or type(frame.GetRect) ~= "function" then return "unknown" end
+    local ok, left, bottom, width, height = pcall(frame.GetRect, frame)
+    left, bottom = ok and plainNumber(left) or nil, ok and plainNumber(bottom) or nil
+    width, height = ok and plainNumber(width) or nil, ok and plainNumber(height) or nil
+    if not left or not bottom or not width or not height then return "unknown" end
+    local ratio = frameRatio(frame)
+    return string.format("%.0fx%.0f@%.0f,%.0f",
+        width * ratio, height * ratio, left * ratio, bottom * ratio)
+end
+
+local function shownText(frame)
+    if not object(frame) or type(frame.IsShown) ~= "function" then return "?" end
+    local ok, shown = pcall(frame.IsShown, frame)
+    if not ok or app.Capabilities.IsSecret(shown) then return "?" end
+    return shown == true and "yes" or "no"
+end
+
+local function activeCount(frame)
+    local pool = frame and frame.itemFramePool
+    if not object(pool) or type(pool.EnumerateActive) ~= "function" then return nil end
+    local count = 0
+    pcall(function() for _ in pool:EnumerateActive() do count = count + 1 end end)
+    return count
+end
+
+-- Rendered block of a viewer's own buttons, in UIParent units, when the build
+-- exposes readable icon rectangles. Each rectangle is scaled by its own frame
+-- ratio first: GetRect already divides by that frame's effective scale, so
+-- dividing the union by UIParent's scale alone would report every button that
+-- shares UIParent's scale as 1/scale too large. Reported as a size, never used
+-- for layout.
+local function iconBlock(frame)
+    if not object(frame) then return nil end
+    local minLeft, maxRight, minBottom, maxTop = nil, nil, nil, nil
+    local pool = frame.itemFramePool
+    local function add(button)
+        if not object(button) or type(button.GetRect) ~= "function" then return end
+        local ok, left, bottom, width, height = pcall(button.GetRect, button)
+        left, bottom = ok and plainNumber(left) or nil, ok and plainNumber(bottom) or nil
+        width, height = ok and plainNumber(width) or nil, ok and plainNumber(height) or nil
+        if not left or not bottom or not width or not height then return end
+        local ratio = frameRatio(button)
+        left, bottom = left * ratio, bottom * ratio
+        width, height = width * ratio, height * ratio
+        minLeft = minLeft and math.min(minLeft, left) or left
+        maxRight = maxRight and math.max(maxRight, left + width) or (left + width)
+        minBottom = minBottom and math.min(minBottom, bottom) or bottom
+        maxTop = maxTop and math.max(maxTop, bottom + height) or (bottom + height)
+    end
+    if object(pool) and type(pool.EnumerateActive) == "function" then
+        pcall(function() for button in pool:EnumerateActive() do add(button) end end)
+    end
+    if not minLeft or not maxRight or maxRight <= minLeft then return nil end
+    return maxRight - minLeft, (maxTop or 0) - (minBottom or 0)
+end
+
+function Layout:Diagnose()
+    local screenWidth, screenHeight = uiSize()
+    local scale = plainNumber(select(2, pcall(UIParent.GetEffectiveScale, UIParent))) or 1
+    app:Print(string.format("%s: screen=%dx%d scale=%.2f",
+        app.L.hudHeader, screenWidth, screenHeight, scale))
+    local central = self:Central()
+    local estimated = central.action.estimated and app.L.hudEstimate or app.L.hudMeasured
+    app:Print(string.format("  action: bottom=%.0f top=%.0f width=%.0f rows=%d %s=%s owner=actionBars",
+        central.action.bottom, central.action.top, central.action.width, #central.action.rows,
+        app.L.hudMeasured, estimated))
+    app:Print(string.format("  content: width=%.0f gap=%.1f measured=%s boundary=%.0f/%.0f owner=layout",
+        central.content.width, central.content.gap or 0,
+        central.content.measured and "yes" or "no", central.content.left, central.content.right))
+    local last = self.lastCentral
+    local rows = last and last.rows or {}
+    local main = last and last.mainRow
+    local profile = app.Store and app.Store:Profile()
+    local look = profile and profile.appearance
+    app:Print(string.format("  cooldown: bottom=%.0f rows=%d main=%s slots=%s",
+        central.cooldown.bottom, #rows, main and tostring(main.id or "row1") or "none",
+        (look and look.perIconSlots == true) and "on" or "off"))
+    -- The rows LumaUI actually planned, bottom to top. Two runs (login and an
+    -- instance) can be compared line by line instead of by screenshot: a row that
+    -- is present in one and absent in the other names the viewer responsible.
+    for index, row in ipairs(rows) do
+        app:Print(string.format("  row%d %s: w=%.0f h=%.0f bottom=%.0f main=%s", index,
+            tostring(row.id or "?"), row.width or 0, row.height or 0, row.bottom or 0,
+            row.main and "yes" or "no"))
+    end
+    for _, sample in ipairs(HUD_SAMPLES) do
+        for _, name in ipairs(sample.names) do
+            local frame = _G[name]
+            if object(frame) then
+                local line = string.format("  %s %s: shown=%s rect=%s owner=%s",
+                    sample.key, name, shownText(frame), rectText(frame), sample.owner)
+                if sample.key == "viewer" then
+                    local active = activeCount(frame)
+                    local blockWidth, blockHeight = iconBlock(frame)
+                    local block = blockWidth
+                        and string.format("%.0fx%.0f", blockWidth, blockHeight or 0) or "unknown"
+                    line = string.format("%s icons=%s block=%s", line,
+                        active and tostring(active) or "?", block)
+                end
+                app:Print(line)
+            else
+                app:Print(string.format("  %s %s: %s owner=%s", sample.key, name,
+                    app.L.hudUnknown, sample.owner))
+            end
+        end
+    end
+    -- Two owned regions under one rectangle is a real layout conflict: the
+    -- report names both owners so the next step is not a guess.
+    local overlaps = self:Overlaps()
+    if #overlaps == 0 then
+        app:Print("  overlap: none")
+    else
+        for _, pair in ipairs(overlaps) do
+            app:Print(string.format("  overlap: %s/%s %.0fx%.0f", pair.a, pair.b,
+                pair.width, pair.height))
+        end
+    end
 end
