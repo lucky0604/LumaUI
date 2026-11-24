@@ -1917,8 +1917,8 @@ test("unit main frames share the health baseline and keep it during part changes
     eq(math.abs(healthTop(player) + 205.2) < 0.01, true)
     eq(math.abs(healthTop(target) - healthTop(player)) < 0.01, true)
     -- Fallback cooldown block is 300 UI units: centre = 150 + 24 + 100.
-    eq(player.point[4], -274)
-    eq(target.point[4], 274)
+    eq(player.point[4], -255.76)
+    eq(target.point[4], 255.76)
     local playerTop = player.point[5] + player:GetHeight() / 2
     -- Auras sit directly under power; the target cast owns the next row.
     eq(target.auraIcons[1].point[3], -40)
@@ -1986,7 +1986,7 @@ test("saved unit positions keep their old centre instead of the new default", fu
     eq(units.frames.pet.point[4], 77)
     eq(units.frames.pet.point[5], -88)
     -- An unsaved frame still receives the shared central default.
-    eq(units.frames.target.point[4], 274)
+    eq(units.frames.target.point[4], 255.76)
     eq(#app.errors, 0)
 end)
 
@@ -6339,16 +6339,18 @@ test("combat preset keeps unit frames close to the action area on wide screens",
     local playerOverlay = app.Layout.presetOverlays.unit_player
     local targetOverlay = app.Layout.presetOverlays.unit_target
     local firstX = playerOverlay.point[4]
-    eq(firstX, -274)
-    eq(targetOverlay.point[4], 274)
+    eq(firstX, -255.76)
+    eq(targetOverlay.point[4], 255.76)
     UIParent:SetSize(3440, 1440)
     H.Fire("DISPLAY_SIZE_CHANGED")
-    eq(playerOverlay.point[4], firstX)
-    eq(targetOverlay.point[4], -firstX)
+    -- The gutter is a screen-width ratio, so it grows from 5.76 to the 8 unit
+    -- cap on an ultrawide screen; the block itself stays at the measured 300.
+    eq(playerOverlay.point[4], -258)
+    eq(targetOverlay.point[4], 258)
     eq(app.Layout.previewName, "combat")
     app.Layout:ApplyPreset("combat")
-    eq(app.components.unitFrames.frames.player.point[4], firstX)
-    eq(app.components.unitFrames.frames.target.point[4], -firstX)
+    eq(app.components.unitFrames.frames.player.point[4], -258)
+    eq(app.components.unitFrames.frames.target.point[4], 258)
     eq(#app.errors, 0)
 end)
 
@@ -9147,8 +9149,8 @@ test("central geometry measures the managed action area and exposes unit boundar
     -- report 300 UI units, not the 524-wide bars.
     eq(central.content.width, 300)
     eq(central.content.measured, true)
-    eq(central.units.left, -174)
-    eq(central.units.right, 174)
+    eq(central.units.left, -155.76)
+    eq(central.units.right, 155.76)
     eq(central.action.estimated, false)
     -- Rows are bottom-up distances from the screen bottom; the centre offset
     -- offered to 002 is the same value minus half the screen.
@@ -9172,7 +9174,7 @@ test("central geometry measures the managed action area and exposes unit boundar
     eq(rows.content.width, 300)
     eq(rows.content.measured, true)
     eq(rows.contentChanged, nil)
-    eq(rows.units.left, -174)
+    eq(rows.units.left, -155.76)
     eq(#app.errors, 0)
 end)
 
@@ -9206,7 +9208,41 @@ test("tracked buff rows centre inside the viewer and size the block", function()
     -- The single icon on row two centres on the same axis.
     eq(viewer.icons[4].point[4], 135)
     -- The block width follows the icons, not the 300 wide viewer frame.
-    eq(app.Layout:Central().content.width, 98)
+    eq(app.Layout:Central().content.width, 167.04)
+    eq(#app.errors, 0)
+end)
+
+test("the tracked buff viewer is read through its item frame pool", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer", "BuffBarCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    local viewer = _G.BuffIconCooldownViewer
+    viewer:SetSize(300, 40)
+    viewer:Show()
+    viewer.rect = { left = 810, bottom = 820, width = 300, height = 40 }
+    -- Current builds expose the pooled buttons through this iterator; the
+    -- named tables are absent, which is why the grid stayed left aligned.
+    local pool = { active = {} }
+    function pool:EnumerateActive()
+        local index = 0
+        return function()
+            index = index + 1
+            return self.active[index]
+        end
+    end
+    viewer.itemFramePool = pool
+    for index = 1, 2 do
+        local icon = H.NewFrame("PoolIcon" .. index, viewer)
+        icon:SetSize(30, 30)
+        icon:SetPoint("TOPLEFT", viewer, "TOPLEFT", (index - 1) * 34, 0)
+        icon.rect = { left = 810 + (index - 1) * 34, bottom = 830, width = 30, height = 30 }
+        pool.active[index] = icon
+    end
+    app.components.cooldownViewer:Refresh()
+    -- Two icons span 810..874 (centre 842); the viewer centre is 960.
+    eq(pool.active[1].point[4], 118)
+    eq(pool.active[2].point[4], 152)
     eq(#app.errors, 0)
 end)
 
@@ -9215,14 +9251,14 @@ test("the measured cooldown block moves the unit frames beside it", function()
     app.Store:Set("modules", "unitFrames", true)
     local player = app.components.unitFrames.frames.player
     -- Before any viewer is readable the mockup fallback applies.
-    eq(player.point[4], -274)
+    eq(player.point[4], -255.76)
     local viewer = H.NewFrame("EssentialCooldownViewer", UIParent)
     viewer:SetSize(360, 40)
     local central = app.Layout:CentralRows({ { frame = viewer, id = "essential" } })
     eq(central.content.width, 360)
     eq(central.contentChanged, true)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -304)
+    eq(player.point[4], -285.76)
     -- A wider tracked-buff row also defines the block: the icons must not
     -- overlap the frames the block flanks.
     local buff = H.NewFrame("BuffBarCooldownViewer", UIParent)
@@ -9232,15 +9268,15 @@ test("the measured cooldown block moves the unit frames beside it", function()
     eq(again.content.width, 500)
     eq(again.contentChanged, true)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -374)
-    -- No readable viewer returns to the fallback instead of keeping a stale
+    eq(player.point[4], -355.76)
+    -- No readable viewer returns to the mockup ratio instead of keeping a stale
     -- block width; the units follow in the same pass. The placement component
     -- is off first so it cannot re-measure the 360-wide fixture afterwards.
     app.Store:Set("modules", "cooldownViewer", false)
     app.Layout:CentralRows({})
-    eq(app.Layout:ContentWidth(), 300)
+    eq(app.Layout:ContentWidth(), 167.04)
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -274)
+    eq(player.point[4], -189.28)
     eq(#app.errors, 0)
 end)
 
@@ -9250,16 +9286,16 @@ test("a preset centre follows the measured block until it is dragged", function(
     local player = app.components.unitFrames.frames.player
     -- The preset stores the centre it was applied with.
     app.Layout:ApplyPreset("combat")
-    eq(player.point[4], -274)
-    eq(app.Store:Profile().positions.unit_player.x, -274)
+    eq(player.point[4], -255.76)
+    eq(app.Store:Profile().positions.unit_player.x, -255.76)
     -- A wider tracked-buff row moves the stored centre with the frame, so the
     -- icons cannot overlap the player bar after a preset.
     local viewer = H.NewFrame("BuffBarCooldownViewer", UIParent)
     viewer:SetSize(500, 20)
     app.Layout:CentralRows({ { frame = viewer, id = "buffBar" } })
     app:Publish("LAYOUT_CENTRAL_CHANGED")
-    eq(player.point[4], -374)
-    eq(app.Store:Profile().positions.unit_player.x, -374)
+    eq(player.point[4], -355.76)
+    eq(app.Store:Profile().positions.unit_player.x, -355.76)
     -- A deliberate drag wins: the next boundary change keeps the saved centre.
     app.Store:SetPosition("unit_player", -120, -230)
     app.Layout:CentralRows({ { frame = viewer, id = "buffBar" } })
@@ -9435,10 +9471,10 @@ test("top performance shares the strip sample and releases its ticker", function
     eq(top.running, true)
     eq(top.status, "running")
     eq(top.frame:IsShown(), true)
-    eq(top.frame.point[1], "TOP")
+    eq(top.frame.point[1], "CENTER")
     eq(top.frame.point[2], UIParent)
     eq(top.frame.point[4], 0)
-    eq(top.frame.point[5], -22)
+    eq(top.frame.point[5], 518)
     -- A fixed capsule: a wider number must not resize the band.
     eq(top.frame:GetWidth(), 96)
     eq(top.text:GetText(), app.L.fps .. " 120  " .. app.L.latency .. " 40")

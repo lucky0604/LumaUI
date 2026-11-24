@@ -44,6 +44,12 @@ Layout.centralGap = 24
 Layout.fallbackActionWidth = 524
 Layout.fallbackActionHeight = 40
 Layout.fallbackContentWidth = 300
+-- Reference proportions from the mockup (1672 wide artwork): the centre block
+-- is about 8.7% of the screen width and a unit frame almost touches it, roughly
+-- a 0.3% hairline. A wider live measurement still wins so a dense row cannot
+-- overlap the frames.
+Layout.mockupContentRatio = 0.087
+Layout.mockupUnitGapRatio = 0.003
 Layout.actionBarNames = { "MainActionBar", "MultiBarBottomLeft", "MultiBarBottomRight" }
 
 local function validFrame(frame)
@@ -94,6 +100,19 @@ end
 function Layout:ContentWidth()
     if self.contentWidth and self.contentWidth > 0 then return self.contentWidth end
     return self.fallbackContentWidth
+end
+
+-- Centre block width and the hairline gutter to a unit frame, taken from the
+-- mockup proportions instead of a fixed 300/24 pair. `measured` is the widest
+-- visible row; the mockup width is a floor, never a cap.
+function Layout:BlockMetrics(measured)
+    local ok, screenWidth = pcall(UIParent.GetWidth, UIParent)
+    screenWidth = ok and plainNumber(screenWidth) or nil
+    if not screenWidth or screenWidth <= 0 then screenWidth = 1024 end
+    measured = plainNumber(measured) or 0
+    local content = math.max(measured, screenWidth * self.mockupContentRatio)
+    local gap = math.min(8, math.max(2, screenWidth * self.mockupUnitGapRatio))
+    return content, gap
 end
 
 -- Local frame units to UIParent units. A frame's SetPoint offsets are scaled by
@@ -451,8 +470,8 @@ function Layout:Central()
     end
     local bottom = math.max(0, self.actionBottom)
     local top = bottom + height
-    local contentWidth = self:ContentWidth()
-    local contentBoundary = contentWidth / 2 + self.centralGap
+    local contentWidth, unitGap = self:BlockMetrics(self.contentWidth)
+    local contentBoundary = contentWidth / 2 + unitGap
     local central = {
         screen = { width = screenWidth, height = screenHeight },
         action = {
@@ -462,11 +481,11 @@ function Layout:Central()
         cooldown = { bottom = top + self.cooldownGap, top = nil, width = width, gap = self.cooldownGap },
         content = {
             width = contentWidth, left = -contentBoundary, right = contentBoundary,
-            gap = self.centralGap, measured = self.contentWidth ~= nil,
+            gap = unitGap, measured = self.contentWidth ~= nil,
         },
         units = {
             left = -contentBoundary, right = contentBoundary,
-            width = contentWidth + self.centralGap * 2, gap = self.centralGap,
+            width = contentWidth + unitGap * 2, gap = unitGap,
         },
         anchor = { x = 0 },
         estimated = estimated,
@@ -529,15 +548,17 @@ function Layout:CentralRows(entries)
     -- the width here keeps the unit boundary and the stack from two
     -- measurements; the caller publishes after placing the rows so this pass
     -- does not re-enter itself. No readable row falls back to the mockup width.
-    local contentWidth = contentRowWidth(rows)
-    local contentChanged = storeContentWidth(self, contentWidth > 0 and contentWidth or nil)
-    local content = self:ContentWidth()
-    local boundary = content / 2 + self.centralGap
+    local measured = contentRowWidth(rows)
+    local content, gap = self:BlockMetrics(measured > 0 and measured or nil)
+    local contentChanged = storeContentWidth(self, content)
+    local boundary = content / 2 + gap
     central.content.width = content
     central.content.left, central.content.right = -boundary, boundary
+    central.content.gap = gap
     central.content.measured = self.contentWidth ~= nil
     central.units.left, central.units.right = -boundary, boundary
-    central.units.width = content + self.centralGap * 2
+    central.units.width = content + gap * 2
+    central.units.gap = gap
     central.contentChanged = contentChanged or nil
     local halfHeight = central.screen.height / 2
     central.units.rowTop = central.cooldown.top
@@ -560,7 +581,7 @@ function Layout:CentralOffset(id, side)
         value = ok and plainNumber(value) or nil
         if value and value > 0 then width = value end
     end
-    local boundary = central.content.width / 2 + self.centralGap
+    local boundary = central.content.width / 2 + (central.content.gap or self.centralGap)
     return (side or 1) * (boundary / scale + width / 2)
 end
 

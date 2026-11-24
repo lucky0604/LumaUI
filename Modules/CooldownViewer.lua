@@ -142,6 +142,15 @@ local function iconButtonsOf(frame)
             for _, button in pairs(group) do add(button) end
         end
     end
+    -- Current builds hold the pooled buttons on the viewer itself; this is the
+    -- same list the client and EllesmereUI enumerate, so it is the primary
+    -- source instead of the older named tables above.
+    local pool = frame.itemFramePool
+    if object(pool) and type(pool.EnumerateActive) == "function" then
+        pcall(function()
+            for button in pool:EnumerateActive() do add(button) end
+        end)
+    end
     if #list == 0 and type(frame.GetChildren) == "function" then
         local ok, children = pcall(function() return { frame:GetChildren() } end)
         if ok and type(children) == "table" then

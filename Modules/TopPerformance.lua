@@ -16,13 +16,17 @@ local function build(self)
     if self.frame then return end
     local frame = CreateFrame("Frame", "LumaUITopPerformance", UIParent, "BackdropTemplate")
     frame:SetSize(WIDTH, HEIGHT)
-    frame:SetPoint("TOP", UIParent, "TOP", 0, -22)
     app.Theme:PaintSurface(frame, "hud")
     local text = app.Type:Text(frame, "micro")
     text:SetPoint("CENTER")
     text:SetJustifyH("CENTER")
     local accent = app.Theme:Accent()
     text:SetTextColor(accent[1], accent[2], accent[3])
+    -- The capsule is a layout entry: the layout page can move it, the position
+    -- is remembered per profile, and the same scale and bounds as every other
+    -- panel apply. The default keeps the mockup's top-centre reading.
+    app.Layout:Register("topPerformance", frame, 0, UIParent:GetHeight() / 2 - 22, app.L.topPerformance)
+    app.Layout:Apply("topPerformance")
     self.frame, self.text = frame, text
 end
 
