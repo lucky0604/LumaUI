@@ -48,3 +48,33 @@ function caps.Snapshot()
             or type(_G.GetItemInfoInstant) == "function",
     }
 end
+
+-- One guarded sampling point for the performance readings. The bottom strip,
+-- the report tooltips and the optional top readout share a short cache, so two
+-- components updating on the same beat do not each query the client and cannot
+-- disagree about the number they show. Only plain numbers are cached.
+local sampledAt, sampledFps, sampledHome, sampledWorld
+
+function caps.Performance()
+    local now
+    if type(GetTime) == "function" then
+        local ok, value = pcall(GetTime)
+        now = ok and caps.Plain(value, "number") or nil
+    end
+    if now and sampledAt and now >= sampledAt and now - sampledAt < 0.9 then
+        return sampledFps, sampledHome, sampledWorld
+    end
+    local fps
+    if type(GetFramerate) == "function" then
+        local ok, value = pcall(GetFramerate)
+        fps = ok and caps.Plain(value, "number") or nil
+    end
+    local home, world
+    if type(GetNetStats) == "function" then
+        local ok, _, _, down, up = pcall(GetNetStats)
+        home = ok and caps.Plain(down, "number") or nil
+        world = ok and caps.Plain(up, "number") or nil
+    end
+    sampledAt, sampledFps, sampledHome, sampledWorld = now, fps, home, world
+    return fps, home, world
+end

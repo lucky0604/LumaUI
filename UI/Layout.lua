@@ -2,6 +2,12 @@ local _, app = ...
 local Layout = { entries = {}, groups = {}, editing = false, presets = {}, margin = 8 }
 app.Layout = Layout
 
+-- A HUD band spans the screen edge: the top information row (experience or
+-- watched reputation) keeps its centre on the screen axis. A stale saved centre
+-- or an accidental drag can therefore never leave the bar half off the window;
+-- vertical movement, scaling and the preset heights still apply.
+Layout.axisLock = { topInfo = "x" }
+
 -- Layout keeps one list of placements: independent panels, group containers and
 -- group members. A group member is anchored to its container, so moving or
 -- scaling the group once carries every member with it and members never become
@@ -12,8 +18,116 @@ app.Layout = Layout
 -- absolute member positions are converted once into relative offsets and the
 -- original absolute keys are never deleted.
 
+-- Central HUD geometry. The action bar stack, the cooldown viewer stack, the
+-- preset preview and the side boundaries offered to the unit frames all read
+-- this one measurement. Sizes are UIParent units. Vertical `bottom`/`top` values
+-- are distances from the screen bottom (the space a native frame's BOTTOM point
+-- uses); `units.rowTopY`/`rowCenterY` are the same rows as centre offsets for
+-- the unit-frame layout API, and the preview converts once with `screen.height`.
+--
+-- `actionBottom` is the distance from the screen bottom to the first bar's
+-- bottom edge. It stays a runtime value on purpose: the bottom strip iteration
+-- (004) can move the reserved baseline once instead of teaching every component
+-- its own number. Native bar widths/heights are measured when readable; the
+-- preview marks a fallback estimate so a missing bar cannot silently look like
+-- a measured layout.
+--
+-- The unit frames flank the *visible cooldown block*, not the wider action bar
+-- stack: the mockup places the player/target bars almost against the tracked
+-- icons while the three action bars stay below them. `contentWidth` is that
+-- measured block; until a viewer row is readable the mockup's ~300 UI unit
+-- block is used, so the first layout is already in the right place.
+Layout.actionBottom = 56
+Layout.actionGap = 4
+Layout.cooldownGap = 8
+Layout.centralGap = 24
+Layout.fallbackActionWidth = 524
+Layout.fallbackActionHeight = 40
+Layout.fallbackContentWidth = 300
+Layout.actionBarNames = { "MainActionBar", "MultiBarBottomLeft", "MultiBarBottomRight" }
+
 local function validFrame(frame)
     return frame and type(frame.SetPoint) == "function" and type(frame.GetWidth) == "function"
+end
+
+-- Group members follow the container. A locked axis also pins the member offset,
+-- so an old per-member position cannot reintroduce the drift the container just
+-- dropped.
+local function lockMemberOffset(self, groupId, rx, ry)
+    local lock = self.axisLock[groupId]
+    if lock == "x" then rx = 0 elseif lock == "y" then ry = 0 end
+    return rx, ry
+end
+
+local function object(value)
+    local kind = type(value)
+    return kind == "table" or kind == "userdata"
+end
+
+local function plainNumber(value)
+    return app.Capabilities.Plain(value, "number")
+end
+
+-- Stores the measured cooldown block width without publishing. `CentralRows`
+-- calls this while it is still building the row table, so the caller publishes
+-- after its placement loop instead of re-entering itself. A `nil` width means
+-- "no readable viewer": the fallback takes over again.
+local function storeContentWidth(self, width)
+    width = plainNumber(width)
+    if not width or width <= 0 then width = nil end
+    local current = self.contentWidth
+    if width == current then return false end
+    if width and current and math.abs(width - current) < 0.5 then return false end
+    self.contentWidth = width
+    return true
+end
+
+-- Public setter for diagnostics and tests. Components that measure a central
+-- block can call it; the cooldown component uses `CentralRows` instead so the
+-- width and the rows come from the same measurement.
+function Layout:SetContentWidth(width)
+    if not storeContentWidth(self, width) then return false end
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    return true
+end
+
+function Layout:ContentWidth()
+    if self.contentWidth and self.contentWidth > 0 then return self.contentWidth end
+    return self.fallbackContentWidth
+end
+
+-- Local frame units to UIParent units. A frame's SetPoint offsets are scaled by
+-- the frame, so every measured size and every target position goes through this
+-- ratio instead of assuming the native frame shares LumaUI's scale.
+local function frameRatio(frame)
+    if not object(frame) or type(frame.GetEffectiveScale) ~= "function"
+        or type(UIParent.GetEffectiveScale) ~= "function" then return 1 end
+    local okFrame, frameScale = pcall(frame.GetEffectiveScale, frame)
+    local okParent, parentScale = pcall(UIParent.GetEffectiveScale, UIParent)
+    frameScale = okFrame and plainNumber(frameScale) or nil
+    parentScale = okParent and plainNumber(parentScale) or nil
+    if not frameScale or not parentScale or frameScale <= 0 or parentScale <= 0 then return 1 end
+    return frameScale / parentScale
+end
+
+local function frameSize(frame)
+    if not object(frame) or type(frame.GetWidth) ~= "function"
+        or type(frame.GetHeight) ~= "function" then return nil end
+    local okWidth, width = pcall(frame.GetWidth, frame)
+    local okHeight, height = pcall(frame.GetHeight, frame)
+    width = okWidth and plainNumber(width) or nil
+    height = okHeight and plainNumber(height) or nil
+    if not width or not height or width <= 0 or height <= 0 then return nil end
+    local ratio = frameRatio(frame)
+    return width * ratio, height * ratio
+end
+
+local function uiSize()
+    local okWidth, width = pcall(UIParent.GetWidth, UIParent)
+    local okHeight, height = pcall(UIParent.GetHeight, UIParent)
+    width = okWidth and plainNumber(width) or nil
+    height = okHeight and plainNumber(height) or nil
+    return width and width > 0 and width or 1024, height and height > 0 and height or 768
 end
 
 local function clonePositions(positions)
@@ -95,16 +209,19 @@ function Layout:Join(groupId, id, frame, defaultX, defaultY, spec)
     local offsetKey = groupId .. "|" .. id
     local savedOffset = profile.positions[offsetKey]
     local rx, ry
+    local savedAbs = profile.positions[id]
     if savedOffset then
         rx, ry = savedOffset.x, savedOffset.y
     else
-        local savedAbs = profile.positions[id]
         local baseX = savedAbs and savedAbs.x or (defaultX or 0)
         local baseY = savedAbs and savedAbs.y or (defaultY or 0)
         rx, ry = baseX - (group.x or 0), baseY - (group.y or 0)
-        if savedAbs and not app.Store.readonly then
-            app.Store:SetPosition(offsetKey, rx, ry)
-        end
+    end
+    rx, ry = lockMemberOffset(self, groupId, rx, ry)
+    -- Write the corrected offset back so the next profile load reads the same
+    -- centred value instead of migrating the stale one again.
+    if (savedOffset or savedAbs) and not app.Store.readonly then
+        app.Store:SetPosition(offsetKey, rx, ry)
     end
     local entry = self.entries[id]
     if entry and entry.member == groupId and entry.frame == frame then
@@ -157,6 +274,7 @@ function Layout:RefreshMembers()
                 else
                     entry.rx, entry.ry = (entry.x or 0) - (group.x or 0), (entry.y or 0) - (group.y or 0)
                 end
+                entry.rx, entry.ry = lockMemberOffset(self, entry.groupId, entry.rx, entry.ry)
             end
         end
     end
@@ -189,7 +307,7 @@ end
 function Layout:IDs()
     local ids = {}
     for id, entry in pairs(self.entries) do
-        if not entry.member then ids[#ids + 1] = id end
+        if not entry.member and not entry.hidden then ids[#ids + 1] = id end
     end
     table.sort(ids)
     return ids
@@ -218,7 +336,7 @@ end
 
 function Layout:UpdatePlaceholders()
     for _, entry in pairs(self.entries) do
-        if entry.placeholder and validFrame(entry.frame) then
+        if entry.placeholder and not entry.hidden and validFrame(entry.frame) then
             entry.frame:SetShown(self.editing == true)
         end
     end
@@ -232,9 +350,14 @@ function Layout:Constrain(id, x, y)
     local scale = self:Scale(id)
     local halfW = UIParent:GetWidth() / scale / 2
     local halfH = UIParent:GetHeight() / scale / 2
-    local maxX = math.max(0, halfW - entry.frame:GetWidth() / 2 - self.margin)
-    local maxY = math.max(0, halfH - entry.frame:GetHeight() / 2 - self.margin)
-    return math.max(-maxX, math.min(maxX, x)), math.max(-maxY, math.min(maxY, y))
+    -- A bottom bar owns the screen edge; other entries keep the window margin.
+    local margin = entry.margin or self.margin
+    local maxX = math.max(0, halfW - entry.frame:GetWidth() / 2 - margin)
+    local maxY = math.max(0, halfH - entry.frame:GetHeight() / 2 - margin)
+    x, y = math.max(-maxX, math.min(maxX, x)), math.max(-maxY, math.min(maxY, y))
+    local lock = self.axisLock[id]
+    if lock == "x" then x = 0 elseif lock == "y" then y = 0 end
+    return x, y
 end
 
 function Layout:Apply(id)
@@ -269,6 +392,181 @@ function Layout:ApplyAll()
     if self.previewName then self:PreviewPreset(self.previewName) end
 end
 
+function Layout:ActionAreaBottom()
+    return self.actionBottom
+end
+
+-- The bottom strip iteration (004) owns the reserved baseline. Publishing one
+-- message keeps the bars, the cooldown stack and the preset preview on the same
+-- number without a component reading another component's private state.
+function Layout:SetActionAreaBottom(bottom)
+    bottom = plainNumber(bottom)
+    if not bottom or bottom ~= bottom then return false end
+    bottom = math.max(0, bottom)
+    if self.actionBottom == bottom then return false end
+    self.actionBottom = bottom
+    -- No geometry payload: subscribers recompute after combat, so this message
+    -- itself never reads protected sizes in the middle of a fight.
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    return true
+end
+
+-- One measurement of the managed action area. `action.rows` follows the actual
+-- stack (present bars only); when no bar can be measured the three fallback rows
+-- are explicit estimates. `content.width` is the visible cooldown block the unit
+-- frames sit beside; `units.left/right` use that same boundary. `cooldown.bottom`
+-- is the shared central anchor.
+function Layout:Central()
+    local screenWidth, screenHeight = uiSize()
+    local rows, measured = {}, 0
+    for _, name in ipairs(self.actionBarNames) do
+        local bar = _G[name]
+        local width, height = frameSize(bar)
+        if width and height then
+            rows[#rows + 1] = { name = name, frame = bar, width = width, height = height }
+            measured = measured + 1
+        end
+    end
+    local estimated = false
+    if #rows == 0 then
+        estimated = true
+        for _ = 1, 3 do
+            rows[#rows + 1] = { height = self.fallbackActionHeight, estimated = true }
+        end
+    elseif measured < #self.actionBarNames then
+        estimated = true
+    end
+    local width = 0
+    for _, row in ipairs(rows) do
+        if row.width and row.width > width then width = row.width end
+    end
+    if width <= 0 then
+        width = self.fallbackActionWidth
+        estimated = true
+    end
+    local height = 0
+    for index, row in ipairs(rows) do
+        height = height + row.height
+        if index < #rows then height = height + self.actionGap end
+    end
+    local bottom = math.max(0, self.actionBottom)
+    local top = bottom + height
+    local contentWidth = self:ContentWidth()
+    local contentBoundary = contentWidth / 2 + self.centralGap
+    local central = {
+        screen = { width = screenWidth, height = screenHeight },
+        action = {
+            bottom = bottom, top = top, height = height, width = width,
+            gap = self.actionGap, rows = rows, estimated = estimated,
+        },
+        cooldown = { bottom = top + self.cooldownGap, top = nil, width = width, gap = self.cooldownGap },
+        content = {
+            width = contentWidth, left = -contentBoundary, right = contentBoundary,
+            gap = self.centralGap, measured = self.contentWidth ~= nil,
+        },
+        units = {
+            left = -contentBoundary, right = contentBoundary,
+            width = contentWidth + self.centralGap * 2, gap = self.centralGap,
+        },
+        anchor = { x = 0 },
+        estimated = estimated,
+    }
+    central.action.bottomY = bottom - screenHeight / 2
+    central.action.topY = top - screenHeight / 2
+    central.cooldown.bottomY = central.cooldown.bottom - screenHeight / 2
+    central.anchor.y = central.cooldown.bottom
+    central.anchor.centreY = central.cooldown.bottomY
+    -- A stable row interface before any viewer is measured. CentralRows
+    -- replaces these with the actual main row once the component runs.
+    central.units.rowTop = central.cooldown.bottom
+    central.units.rowCenter = central.cooldown.bottom
+    central.units.rowTopY = central.cooldown.bottomY
+    central.units.rowCenterY = central.cooldown.bottomY
+    return central
+end
+
+-- The unit boundary follows the skill rows, not the widest tracked-buff row: a
+-- buff bar can appear or disappear without moving the player/target frames.
+-- When neither skill row is present the widest remaining row is used, and an
+-- empty stack falls back to the mockup width.
+local function contentRowWidth(rows)
+    local width = 0
+    for _, row in ipairs(rows) do
+        if (row.id == "essential" or row.id == "utility")
+            and row.width and row.width > width then
+            width = row.width
+        end
+    end
+    if width <= 0 then
+        for _, row in ipairs(rows) do
+            if row.width and row.width > width then width = row.width end
+        end
+    end
+    return width
+end
+
+-- Rows are fed in visual order (bottom to top) by the cooldown component. Sizes
+-- are converted to UIParent units here, so a viewer with its own Edit Mode scale
+-- still lands in the shared stack. Frames whose size cannot be read are skipped
+-- and keep their native anchor.
+function Layout:CentralRows(entries)
+    local central = self:Central()
+    local y = central.cooldown.bottom
+    local rows = {}
+    for _, item in ipairs(entries or {}) do
+        local frame = type(item) == "table" and item.frame or item
+        local id = type(item) == "table" and item.id or nil
+        local width, height = frameSize(frame)
+        if frame and height then
+            rows[#rows + 1] = {
+                id = id, frame = frame, width = width, height = height,
+                bottom = y, top = y + height, center = y + height / 2,
+            }
+            y = y + height + self.cooldownGap
+        end
+    end
+    central.rows = rows
+    central.cooldown.top = #rows > 0 and rows[#rows].top or central.cooldown.bottom
+    central.mainRow = rows[1]
+    -- The skill rows define the block the unit frames flank. Storing the width
+    -- here keeps the unit boundary and the stack from two measurements; the
+    -- caller publishes after placing the rows so this pass does not re-enter
+    -- itself. No readable row falls back to the mockup width again.
+    local contentWidth = contentRowWidth(rows)
+    local contentChanged = storeContentWidth(self, contentWidth > 0 and contentWidth or nil)
+    local content = self:ContentWidth()
+    local boundary = content / 2 + self.centralGap
+    central.content.width = content
+    central.content.left, central.content.right = -boundary, boundary
+    central.content.measured = self.contentWidth ~= nil
+    central.units.left, central.units.right = -boundary, boundary
+    central.units.width = content + self.centralGap * 2
+    central.contentChanged = contentChanged or nil
+    local halfHeight = central.screen.height / 2
+    central.units.rowTop = central.cooldown.top
+    central.units.rowCenter = rows[1] and rows[1].center or central.cooldown.bottom
+    central.units.rowTopY = central.cooldown.top - halfHeight
+    central.units.rowCenterY = central.units.rowCenter - halfHeight
+    return central
+end
+
+-- Centre offset in an entry's own units for a frame that should sit beside the
+-- visible cooldown block. 002 uses this for the player/target main row; the
+-- presets use the same call so their outline and the applied position agree.
+function Layout:CentralOffset(id, side)
+    local central = self:Central()
+    local entry = self.entries[id]
+    local scale = self:Scale(id)
+    local width = 0
+    if entry and validFrame(entry.frame) then
+        local ok, value = pcall(entry.frame.GetWidth, entry.frame)
+        value = ok and plainNumber(value) or nil
+        if value and value > 0 then width = value end
+    end
+    local boundary = central.content.width / 2 + self.centralGap
+    return (side or 1) * (boundary / scale + width / 2)
+end
+
 function Layout:Overlay(id, entry)
     if entry.overlay then return entry.overlay end
     local overlay = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
@@ -295,6 +593,9 @@ function Layout:Overlay(id, entry)
         x, y = x * ratio - cx, y * ratio - cy
         local scale = entry.frame:GetScale()
         x, y = math.floor(x / scale / 4 + 0.5) * 4, math.floor(y / scale / 4 + 0.5) * 4
+        -- A locked axis writes the same centre the next apply will use, so the
+        -- overlay cannot briefly settle outside the band it is pinned to.
+        x, y = Layout:Constrain(id, x, y)
         app.Store:SetPosition(id, x, y)
         self:ClearAllPoints()
         self:SetPoint("CENTER", UIParent, "CENTER", x * scale, y * scale)
@@ -328,7 +629,7 @@ function Layout:SetEditing(wanted)
         if entry.member then
             -- Members move with their group; they never get their own drag box.
             if entry.overlay then entry.overlay:Hide() end
-        elseif wanted and validFrame(entry.frame) and (entry.frame:IsShown() or entry.allowHiddenMove) then
+        elseif wanted and not entry.hidden and validFrame(entry.frame) and (entry.frame:IsShown() or entry.allowHiddenMove) then
             local overlay = self:Overlay(id, entry)
             local frame = entry.frame
             local scale = frame:GetEffectiveScale() / UIParent:GetEffectiveScale()
@@ -363,20 +664,24 @@ end
 ----------------------------------------------------------------------
 -- Fractions of the screen size: x is a fraction of the width, y of the height,
 -- positive up. Positions are computed in the entry's own units with its current
--- scale, so a preset lands at the same place on any resolution.
+-- scale, so a preset lands at the same place on any resolution. The main unit
+-- frames ignore the x fraction: their centre comes from the measured action
+-- area (see `UNIT_MAIN_SIDES`), so only y is listed for them.
 Layout.presets = {
     default16x9 = {
         label = "preset16x9",
         entries = {
             topInfo = { 0.00, 0.435 },
-            bottomBar = { 0.00, -0.463 },
+            -- Half a band height above the bottom; Constrain turns the screen
+            -- edge into the flush position once the band owns the margin.
+            bottomBar = { 0.00, -0.5 },
             party = { -0.27, -0.34 },
             raidFrames = { 0.25, -0.06 },
             questList = { -0.355, 0.15 },
             inventory = { 0.00, -0.04 },
             characterWindow = { 0.25, 0.10 },
-            unit_player = { -0.16, -0.18 },
-            unit_target = { 0.16, -0.18 },
+            unit_player = { 0.00, -0.213 },
+            unit_target = { 0.00, -0.213 },
             unit_focus = { 0.24, 0.06 },
             unit_pet = { -0.16, -0.26 },
             unit_targettarget = { 0.16, -0.29 },
@@ -386,12 +691,12 @@ Layout.presets = {
         label = "presetCombat",
         entries = {
             topInfo = { 0.00, 0.45 },
-            bottomBar = { 0.00, -0.463 },
+            bottomBar = { 0.00, -0.5 },
             party = { -0.33, -0.12 },
             raidFrames = { -0.29, -0.10 },
             questList = { 0.37, 0.06 },
-            unit_player = { -0.17, -0.23 },
-            unit_target = { 0.17, -0.23 },
+            unit_player = { 0.00, -0.23 },
+            unit_target = { 0.00, -0.23 },
             unit_focus = { 0.29, -0.13 },
             unit_pet = { -0.17, -0.31 },
             unit_targettarget = { 0.17, -0.31 },
@@ -399,15 +704,10 @@ Layout.presets = {
     },
 }
 Layout.presetOverlays = {}
-local COMBAT_COLUMNS, COMBAT_ROWS = 12, 2
-local COMBAT_BUTTON_SIZE, COMBAT_BUTTON_GAP = 40, 4
-local COMBAT_ACTION_WIDTH = COMBAT_COLUMNS * COMBAT_BUTTON_SIZE + (COMBAT_COLUMNS - 1) * COMBAT_BUTTON_GAP
-local COMBAT_GAP = 24
-local COMBAT_SIDES = { unit_player = -1, unit_pet = -1, unit_target = 1, unit_targettarget = 1 }
-
-local function combatActionWidth()
-    return COMBAT_ACTION_WIDTH
-end
+-- The player and target main bars flank the measured action area in every
+-- preset; auxiliary frames keep their own preset offset so they can sit inside
+-- the main columns without a preset-only 12x2 shape or a hardcoded width.
+local UNIT_MAIN_SIDES = { unit_player = -1, unit_target = 1 }
 
 function Layout:Presets()
     local list = {}
@@ -418,14 +718,12 @@ function Layout:Presets()
     return list
 end
 
-function Layout:PresetOffset(id, spec, presetName)
+function Layout:PresetOffset(id, spec)
     local scale = self:Scale(id)
     local x = (spec[1] or 0) * UIParent:GetWidth() / scale
-    local side = presetName == "combat" and COMBAT_SIDES[id]
-    local entry = self.entries[id]
-    if side and entry and validFrame(entry.frame) then
-        local halfFrame = entry.frame:GetWidth() * scale / 2
-        x = side * (combatActionWidth() / 2 + COMBAT_GAP + halfFrame) / scale
+    local side = UNIT_MAIN_SIDES[id]
+    if side then
+        x = self:CentralOffset(id, side)
     end
     return x, (spec[2] or 0) * UIParent:GetHeight() / scale
 end
@@ -448,26 +746,33 @@ end
 
 -- A static illustration only. It does not inspect, move, or create native
 -- buttons; the player configures the real bars through the game's Edit Mode.
-local function paintActionGuide(overlay)
+-- Separators follow the measured bar rows, so the outline is the same rectangle
+-- the bars will occupy instead of an unrelated 12x2 grid.
+local function paintActionGuide(overlay, action)
     overlay.label:ClearAllPoints()
     overlay.label:SetPoint("BOTTOM", overlay, "TOP", 0, 6)
-    overlay.slots = overlay.slots or {}
-    local line = app.Theme.colors.line
-    for row = 0, COMBAT_ROWS - 1 do
-        for column = 0, COMBAT_COLUMNS - 1 do
-            local index = row * COMBAT_COLUMNS + column + 1
-            local slot = overlay.slots[index]
-            if not slot then
-                slot = overlay:CreateTexture(nil, "ARTWORK")
-                slot:SetSize(COMBAT_BUTTON_SIZE, COMBAT_BUTTON_SIZE)
-                slot:SetPoint("TOPLEFT", overlay, "TOPLEFT",
-                    column * (COMBAT_BUTTON_SIZE + COMBAT_BUTTON_GAP),
-                    -8 - row * (COMBAT_BUTTON_SIZE + COMBAT_BUTTON_GAP))
-                overlay.slots[index] = slot
+    overlay.rowLines = overlay.rowLines or {}
+    local color = app.Theme.colors.line
+    local used, offset = 0, 0
+    for index, row in ipairs(action.rows or {}) do
+        offset = offset + (row.height or 0)
+        if index < #action.rows then
+            offset = offset + (action.gap or 0)
+            used = used + 1
+            local line = overlay.rowLines[used]
+            if not line then
+                line = overlay:CreateTexture(nil, "ARTWORK")
+                line:SetHeight(1)
+                overlay.rowLines[used] = line
             end
-            slot:SetColorTexture(line[1], line[2], line[3], 0.25)
+            line:SetColorTexture(color[1], color[2], color[3], 0.35)
+            line:ClearAllPoints()
+            line:SetPoint("TOPLEFT", overlay, "TOPLEFT", 0, -offset)
+            line:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", 0, -offset)
+            line:Show()
         end
     end
+    for index = used + 1, #overlay.rowLines do overlay.rowLines[index]:Hide() end
 end
 
 -- Draws outlines at the target positions without moving anything.
@@ -484,7 +789,7 @@ function Layout:PreviewPreset(name)
             local scale = self:Scale(id)
             local width = math.max(20, (entry.frame:GetWidth() or 100) * scale)
             local height = math.max(14, (entry.frame:GetHeight() or 30) * scale)
-            local x, y = self:PresetOffset(id, spec, name)
+            local x, y = self:PresetOffset(id, spec)
             x, y = self:Constrain(id, x, y)
             overlay:SetSize(width, height)
             overlay:ClearAllPoints()
@@ -497,16 +802,22 @@ function Layout:PreviewPreset(name)
         end
     end
     if name == "combat" then
+        -- The guide is the geometry every participant will read: measured bar
+        -- rows when available, otherwise a labelled fallback estimate.
+        local central = self:Central()
+        local action = central.action
         local overlay = presetOverlay("nativeActionArea")
-        overlay:SetSize(combatActionWidth(), 100)
+        local centerY = action.bottomY + action.height / 2
+        overlay:SetSize(action.width, action.height)
         overlay:ClearAllPoints()
-        overlay:SetPoint("CENTER", UIParent, "BOTTOM", 0, UIParent:GetHeight() * 0.16)
-        paintActionGuide(overlay)
-        overlay.label:SetText(app.L.nativeActionArea)
+        overlay:SetPoint("CENTER", UIParent, "CENTER", 0, centerY)
+        paintActionGuide(overlay, action)
+        local label = app.L.nativeActionArea
+        if action.estimated then label = label .. " · " .. app.L.presetEstimate end
+        overlay.label:SetText(label)
         overlay:Show()
         rectangles[#rectangles + 1] = { id = "nativeActionArea", overlay = overlay,
-            label = app.L.nativeActionArea, x = 0, y = -UIParent:GetHeight() * 0.34,
-            width = combatActionWidth(), height = 100 }
+            label = label, x = 0, y = centerY, width = action.width, height = action.height }
         shown = shown + 1
     end
     -- Rectangles are in UIParent units, including the same clamping and scale
@@ -557,7 +868,7 @@ local function applyPresetNow(name)
             if positions[id] then
                 snapshot.positions[id] = { x = positions[id].x, y = positions[id].y }
             end
-            local x, y = Layout:PresetOffset(id, spec, name)
+            local x, y = Layout:PresetOffset(id, spec)
             app.Store:SetPosition(id, x, y)
         end
     end

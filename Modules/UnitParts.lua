@@ -97,10 +97,10 @@ local bars = {
     events = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_NAME_UPDATE",
         "UNIT_DISPLAYPOWER", "UNIT_FLAGS", "UNIT_CONNECTION" },
     create = function(frame)
-        local U = app.Theme.units
+        local U = frame.metrics or app.Theme.units
         frame.name = app.Type:Text(frame, "body")
         frame.name:SetPoint("TOPLEFT", 0, 0)
-        frame.name:SetWidth(U.width - 72)
+        frame.name:SetWidth(math.max(36, U.width - U.nameReserve))
         frame.name:SetWordWrap(false)
         frame.name:SetFont(app.Type:Face(), U.nameSize, "OUTLINE")
         -- Without a panel behind it the name floats over the world; a shadow
@@ -114,7 +114,7 @@ local bars = {
         frame.value = app.Type:Text(frame, "body")
         frame.value:SetFont(app.Type:Face(), U.nameSize, "OUTLINE")
         frame.value:SetPoint("TOPRIGHT", 0, 0)
-        frame.value:SetWidth(64)
+        frame.value:SetWidth(U.valueWidth)
         frame.value:SetJustifyH("RIGHT")
         frame.value:SetWordWrap(false)
         frame.health = app.Theme:Bar(frame, U.health)
@@ -251,8 +251,16 @@ local cast = {
         "UNIT_SPELLCAST_EMPOWER_START", "UNIT_SPELLCAST_EMPOWER_UPDATE", "UNIT_SPELLCAST_EMPOWER_STOP",
     },
     create = function(frame)
-        local U = app.Theme.units
-        local y = -(U.nameRow + U.health + U.power + U.castGap)
+        local U = frame.metrics or app.Theme.units
+        -- Auras sit directly under power so a hidden cast does not add a hole
+        -- between the bars and the aura row. The cast row is reserved below
+        -- them; an active cast and a full aura row each keep their own space.
+        local y
+        if frame.auraIcons then
+            y = -(U.nameRow + U.health + U.power + U.auraGap) - U.aura - U.auraGap
+        else
+            y = -(U.nameRow + U.health + U.power + U.castGap)
+        end
         frame.cast = app.Theme:Bar(frame, U.cast)
         frame.cast:SetPoint("TOPLEFT", 0, y)
         frame.cast:SetPoint("TOPRIGHT", 0, y)
@@ -482,10 +490,10 @@ local auras = {
     events = { "UNIT_AURA" },
     create = function(frame)
         frame.auraIcons = {}
-        local U = app.Theme.units
-        -- Below the cast bar when that part exists, otherwise below power.
+        local U = frame.metrics or app.Theme.units
+        -- Directly under the bars. The cast part owns the space below this row,
+        -- so hiding a cast never pushes the auras away from the health bar.
         local anchor = -(U.nameRow + U.health + U.power + U.auraGap)
-        if frame.cast then anchor = anchor - U.cast - U.castGap end
         -- The whole row is centred under the bars, as in the Pearl target,
         -- instead of growing from the left edge.
         local startX = (U.width - (AURA_LIMIT - 1) * U.auraStep - U.aura) / 2
@@ -522,9 +530,17 @@ local auras = {
         if not icons then return end
         local unit = frame.unitToken
         local shown = 0
+        -- A self-target would repeat the player's aura row on the target frame.
+        -- Only a plain true from UnitIsUnit hides it; an unreadable or absent
+        -- answer keeps the native duplicate instead of guessing.
+        local duplicate = false
+        if unit == "target" and type(UnitIsUnit) == "function" then
+            local ok, same = pcall(UnitIsUnit, "target", "player")
+            duplicate = ok and app.Capabilities.Plain(same, "boolean") == true
+        end
         -- The capability is re-checked here so a mid-session API loss simply
         -- empties the row instead of erroring.
-        if UnitExists(unit) and aurasAvailable() then
+        if not duplicate and UnitExists(unit) and aurasAvailable() then
             local onlyDispel = app.Store:Profile().ui.auraFilter == "dispel"
             local harmful = sortAuras(auraList(unit, "HARMFUL", onlyDispel) or {})
             local helpful = sortAuras(auraList(unit, "HELPFUL", onlyDispel) or {})
@@ -638,7 +654,7 @@ local interaction = {
 
 app.UnitParts = { bars = bars, cast = cast, auras = auras, marks = marks, interaction = interaction }
 
-local order = { "bars", "cast", "auras", "marks", "interaction" }
+local order = { "bars", "auras", "cast", "marks", "interaction" }
 
 -- Builds the per-enable part table: every part carries the result of its
 -- capability probe and active lists the parts the component should create,

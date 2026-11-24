@@ -42,6 +42,28 @@ local function setShown(self, shown)
     if self.zonePlate then self.zonePlate:SetShown(shown) end
 end
 
+-- Long zone names must stay inside the map column. The native zone FontString
+-- has no width of its own on every build; give it the map width and let the
+-- client truncate instead of letting the text spill past the square frame.
+local function fitZone(self)
+    local zoneText = _G.MinimapZoneText
+    if not zoneText or not Minimap then return end
+    if self.zoneWidth == nil then
+        local called, width = pcall(zoneText.GetWidth, zoneText)
+        self.zoneWidth = called and app.Capabilities.Plain(width, "number") or nil
+        if type(zoneText.GetWordWrap) == "function" then
+            local wrapped, value = pcall(zoneText.GetWordWrap, zoneText)
+            self.zoneWrap = wrapped and value or nil
+        end
+    end
+    local called, mapWidth = pcall(Minimap.GetWidth, Minimap)
+    mapWidth = called and app.Capabilities.Plain(mapWidth, "number") or nil
+    if not mapWidth or mapWidth <= 0 then return end
+    local width = math.max(40, mapWidth - 24)
+    if type(zoneText.SetWidth) == "function" then zoneText:SetWidth(width) end
+    if type(zoneText.SetWordWrap) == "function" then zoneText:SetWordWrap(false) end
+end
+
 local function style(self)
     if not Minimap then return end
     local accent = app.Theme:Accent()
@@ -77,6 +99,7 @@ local function style(self)
         if not self.zoneColor then self.zoneColor = { zoneText:GetTextColor() } end
         local text = app.Theme.colors.text
         zoneText:SetTextColor(text[1], text[2], text[3])
+        fitZone(self)
     end
     if self.edge then
         self.edge:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, self.edge) })
@@ -184,6 +207,12 @@ local function hook(self)
             frame:HookScript("OnHide", function()
                 if module.running then setShown(module, false) end
             end)
+            if frame == Minimap and not self.sizeHooked then
+                self.sizeHooked = true
+                frame:HookScript("OnSizeChanged", function()
+                    if module.running then fitZone(module) end
+                end)
+            end
             self.hooked[frame] = true
         end
     end
@@ -205,6 +234,8 @@ module = app:RegisterComponent({ id = "minimap", label = "minimap",
         end
         if self.useCoords then hideNativeCoords(self) end
         if self.zonePlate then self.zonePlate:Show() end
+        self:Listen("ZONE_CHANGED", function() fitZone(module) end)
+        self:Listen("ZONE_CHANGED_NEW_AREA", function() fitZone(module) end)
         style(self)
         updateInfo(self)
         self:Every(1, updateInfo)
@@ -235,8 +266,14 @@ module = app:RegisterComponent({ id = "minimap", label = "minimap",
             borderTop:SetShown(self.borderTopShown)
         end
         local zoneText = _G.MinimapZoneText
-        if zoneText and self.zoneColor then
-            zoneText:SetTextColor(unpack(self.zoneColor))
+        if zoneText then
+            if self.zoneColor then zoneText:SetTextColor(unpack(self.zoneColor)) end
+            if self.zoneWidth and type(zoneText.SetWidth) == "function" then
+                zoneText:SetWidth(self.zoneWidth)
+            end
+            if self.zoneWrap ~= nil and type(zoneText.SetWordWrap) == "function" then
+                zoneText:SetWordWrap(self.zoneWrap)
+            end
         end
         restoreNativeCoords(self)
     end,

@@ -17,8 +17,8 @@ test("manifest loads, login enables isolated components", function()
     eq(app.components.unitFrames.running, nil)
     eq(#app.errors, 0)
     H.Fire("PLAYER_LOGIN")
-    -- data strip clock, minimap clock, quest list task-time tick
-    eq(#H.timers, 3)
+    -- data strip clock, minimap clock, quest list task-time tick, top reading
+    eq(#H.timers, 4)
 end)
 
 test("profiles isolate copies and remember each character", function()
@@ -527,6 +527,37 @@ test("minimap frame follows native visibility and quest titles use the Pearl acc
     eq(#app.errors, 0)
 end)
 
+test("the native quest column follows the minimap and restores", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local tracker = app.components.questTracker
+    local frame = _G.ObjectiveTrackerFrame
+    local panel = _G.LumaUIMinimapPanel
+    eq(tracker.running, true)
+    -- The frame sits under the map panel and takes the panel's width; the
+    -- fixture is narrower than the 120 UI minimum.
+    eq(frame.point[1], "TOPRIGHT")
+    eq(frame.point[2], panel)
+    eq(frame.point[3], "BOTTOMRIGHT")
+    eq(frame.point[5], -6)
+    eq(frame.width, 120)
+    -- Long zone names are clipped to the map instead of spilling out.
+    eq(_G.MinimapZoneText.width, 174)
+    panel:SetWidth(300)
+    tracker:Refresh()
+    eq(frame.width, 300)
+    _G.Minimap:SetWidth(200)
+    app.components.minimap:Refresh()
+    eq(_G.MinimapZoneText.width, 176)
+    app.Store:Set("modules", "questTracker", false)
+    eq(frame.point, nil)
+    eq(frame.width, 250)
+    -- The zone width belongs to the minimap component; restoring it is tested
+    -- with that component's own disable path.
+    app.Store:Set("modules", "minimap", false)
+    eq(_G.MinimapZoneText.width, 100)
+    eq(#app.errors, 0)
+end)
+
 test("minimap card follows the HUD theme and screen scale without rebuilding", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local minimap = app.components.minimap
@@ -578,7 +609,7 @@ test("layout page lists movable panels and opens native edit mode", function()
     eq(#app.errors, 0)
 end)
 
-test("quest list preserves the native tracker while offering folds, tracking and icons", function()
+test("quest list replaces the native quest block while offering folds, tracking and icons", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
     eq(list.running, true)
@@ -589,19 +620,22 @@ test("quest list preserves the native tracker while offering folds, tracking and
     eq(app.Layout.entries.questList ~= nil, true)
     eq(app.Layout.entries.questList.label, app.L.questList)
     eq(list.frame.backdrop, nil)
-    -- Every native objective module remains with the client.
+    -- The panel replaces only the quest modules; everything else stays native.
+    eq(list.nativeHidden, true)
     eq(ObjectiveTrackerFrame:IsShown(), true)
-    eq(QuestObjectiveTracker:IsShown(), true)
-    eq(CampaignQuestObjectiveTracker:IsShown(), true)
-    eq(WorldQuestObjectiveTracker:IsShown(), true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(CampaignQuestObjectiveTracker:IsShown(), false)
+    eq(WorldQuestObjectiveTracker:IsShown(), false)
     eq(ScenarioObjectiveTracker:IsShown(), true)
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), false)
     eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
     eq(app.components.questTracker.running, true)
-    -- The client may show a quest module again on its own updates.
+    -- The client may show a quest module again on its own updates; the takeover
+    -- takes it back down so both trackers cannot list the same quest.
     QuestObjectiveTracker:Show()
-    eq(QuestObjectiveTracker:IsShown(), true)
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
 
     local function findRow(text)
         for _, current in ipairs(list.rows) do
@@ -716,16 +750,24 @@ test("quest list preserves the native tracker while offering folds, tracking and
     eq(list.title:GetText(), app.L.questListTitle .. "  2")
     eq(findRow("First quest") ~= nil, true)
 
-    -- An empty filter keeps the panel and its filter buttons reachable.
+    -- An empty filter keeps the panel and its filter buttons reachable, and the
+    -- quest modules return to the client while the panel has nothing to show.
     local entries = H.questLog.entries
     H.questLog.entries = {}
     H.Fire("QUEST_LOG_UPDATE")
     eq(list.frame:IsShown(), true)
     eq(list.title:GetText(), app.L.questListTitle .. "  0")
     eq(findRow(app.L.questListEmpty) ~= nil, true)
+    eq(list.hasContent, false)
+    eq(list.nativeHidden, nil)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
     H.questLog.entries = entries
     H.Fire("QUEST_LOG_UPDATE")
     eq(findRow("First quest") ~= nil, true)
+    eq(list.hasContent, true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
     eq(#app.errors, 0)
 end)
 
@@ -778,7 +820,9 @@ test("quest list filters persist and restore the native tracker on disable", fun
     local restored = reloaded.components.questList
     eq(restored.filter, "tracked")
     eq(restored.title:GetText(), reloaded.L.questListTitle .. "  1")
-    eq(QuestObjectiveTracker:IsShown(), true)
+    -- The reloaded panel has content, so the quest modules stay replaced.
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
     eq(ScenarioObjectiveTracker:IsShown(), true)
 
     reloaded.Store:Set("modules", "questList", false)
@@ -792,7 +836,8 @@ test("quest list filters persist and restore the native tracker on disable", fun
     reloaded.Store:Set("modules", "questList", true)
     eq(restored.running, true)
     eq(restored.frame:IsShown(), true)
-    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
     eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
     eq(#reloaded.errors, 0)
 end)
@@ -1316,77 +1361,94 @@ test("quest item changes remain paired with their original row during combat", f
     eq(#app.errors, 0)
 end)
 
-test("the quest panel keeps native modules until validated", function()
+test("the quest panel replaces native quest modules and keeps the rest", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
-    eq(list.nativeHidden, nil)
-    eq(QuestObjectiveTracker:IsShown(), true)
-    eq(CampaignQuestObjectiveTracker:IsShown(), true)
-    eq(WorldQuestObjectiveTracker:IsShown(), true)
+    eq(list.nativeHidden, true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(CampaignQuestObjectiveTracker:IsShown(), false)
+    eq(WorldQuestObjectiveTracker:IsShown(), false)
     -- Scenario goals are not covered by this panel and stay native.
     eq(ScenarioObjectiveTracker:IsShown(), true)
     eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
     local line = list:Describe()
-    eq(line:find(app.L.nativeKept, 1, true) ~= nil, true)
-    eq(line:find(app.L.nativeAwaitingValidation, 1, true) ~= nil, true)
-    -- Without the container's module list all native objectives stay visible.
+    eq(line:find(app.L.nativeTaken, 1, true) ~= nil, true)
+    eq(line:find(app.L.nativeQuestsOnly, 1, true) ~= nil, true)
+    -- Disabling hands every removed module back to the client.
     app.Store:Set("modules", "questList", false)
     eq(QuestObjectiveTracker:IsShown(), true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(list.nativeRemoved, nil)
+    -- Without the container's module list all native objectives stay visible.
     ObjectiveTrackerFrame.RemoveModule = nil
     app.Store:Set("modules", "questList", true)
     eq(ObjectiveTrackerFrame:IsShown(), true)
     eq(ScenarioObjectiveTracker:IsShown(), true)
     eq(QuestObjectiveTracker:IsShown(), true)
+    eq(list.nativeHidden, nil)
     eq(list:Describe():find(app.L.nativeKept, 1, true) ~= nil, true)
     app.Store:Set("modules", "questList", false)
     eq(ObjectiveTrackerFrame:IsShown(), true)
     eq(#app.errors, 0)
 end)
 
-test("quest preview leaves absent native modules absent", function()
+test("the takeover leaves an absent native module absent", function()
     local app = H.Load()
     ObjectiveTrackerFrame:RemoveModule(WorldQuestObjectiveTracker)
     WorldQuestObjectiveTracker:Hide()
     H.Fire("PLAYER_LOGIN")
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    local list = app.components.questList
+    eq(list.nativeHidden, true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(ObjectiveTrackerFrame:HasModule(WorldQuestObjectiveTracker), false)
     app.Store:Set("modules", "questList", false)
     eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    -- A module the client had already removed is never re-registered or shown.
     eq(ObjectiveTrackerFrame:HasModule(WorldQuestObjectiveTracker), false)
     eq(WorldQuestObjectiveTracker:IsShown(), false)
+    eq(list.nativeRemoved, nil)
     eq(#app.errors, 0)
 end)
 
-test("quest preview never removes native tracker modules", function()
+test("the quest takeover removes only the quest modules", function()
     local app = H.Load()
-    local calls = 0
+    local removed = {}
+    local remove = ObjectiveTrackerFrame.RemoveModule
     ObjectiveTrackerFrame.RemoveModule = function(self, module)
-        calls = calls + 1
-        error("preview must not remove native modules")
+        removed[#removed + 1] = module
+        return remove(self, module)
     end
     H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
-    eq(list.nativeHidden, nil)
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
-    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), true)
-    eq(QuestObjectiveTracker:IsShown(), true)
-    eq(CampaignQuestObjectiveTracker:IsShown(), true)
+    eq(list.nativeHidden, true)
+    eq(#removed, 3)
+    eq(removed[1] == CampaignQuestObjectiveTracker, true)
+    eq(removed[2] == QuestObjectiveTracker, true)
+    eq(removed[3] == WorldQuestObjectiveTracker, true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(ObjectiveTrackerFrame:HasModule(ScenarioObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(CampaignQuestObjectiveTracker:IsShown(), false)
     eq(ScenarioObjectiveTracker:IsShown(), true)
-    eq(calls, 0)
     eq(#app.errors, 0)
 end)
 
-test("quest preview leaves a client-registered module alone", function()
+test("a client re-registered quest module is taken back down", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local list = app.components.questList
+    eq(list.nativeHidden, true)
     ObjectiveTrackerFrame:AddModule(QuestObjectiveTracker)
     QuestObjectiveTracker:Show()
-    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
-    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
+    eq(QuestObjectiveTracker:IsShown(), false)
     app.Store:Set("modules", "questList", false)
     eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), true)
     eq(#app.errors, 0)
 end)
 
-test("overlapping quest preview yields to the native tracker and remains movable", function()
+test("an overlapping quest panel yields both trackers and remains movable", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list, native = app.components.questList, ObjectiveTrackerFrame
     local x = 300
@@ -1397,7 +1459,12 @@ test("overlapping quest preview yields to the native tracker and remains movable
     eq(list.overlapHidden, true)
     eq(list.frame:IsShown(), false)
     eq(native:IsShown(), true)
+    -- The panel hides, so the quest modules must return to the client instead of
+    -- leaving the player with neither display.
     eq(native:HasModule(QuestObjectiveTracker), true)
+    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(native:HasModule(ScenarioObjectiveTracker), true)
+    eq(list.nativeHidden, nil)
     eq(list:Describe():find(app.L.questOverlapStatus, 1, true) ~= nil, true)
     -- Hidden previews remain represented in the layout editor, even if a
     -- hidden frame cannot report a centre on this client.
@@ -1408,6 +1475,10 @@ test("overlapping quest preview yields to the native tracker and remains movable
     app.Layout:Apply("questList")
     eq(list.overlapHidden, nil)
     eq(list.frame:IsShown(), true)
+    -- Moving clear of the tracker resumes the takeover.
+    eq(list.nativeHidden, true)
+    eq(native:HasModule(QuestObjectiveTracker), false)
+    eq(QuestObjectiveTracker:IsShown(), false)
     app.Layout:SetEditing(false)
     eq(#app.errors, 0)
 end)
@@ -1461,19 +1532,20 @@ test("quest overlap check waits for layout and cancels when disabled", function(
     eq(#app.errors, 0)
 end)
 
-test("quest preview preserves a native module hidden by the client", function()
-    local app = H.Load(); H.Fire("PLAYER_LOGIN")
-    local list = app.components.questList
+test("a native module hidden by the client stays hidden after a takeover cycle", function()
+    local app = H.Load()
     ObjectiveTrackerFrame:RemoveModule(QuestObjectiveTracker)
     QuestObjectiveTracker:Hide()
-    app.Store:Set("modules", "questList", false)
+    H.Fire("PLAYER_LOGIN")
+    local list = app.components.questList
+    eq(list.nativeHidden, true)
     eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
-    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), true)
-    app.Store:Set("modules", "questList", true)
-    eq(list.nativeHidden, nil)
+    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), false)
     app.Store:Set("modules", "questList", false)
     eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
     eq(QuestObjectiveTracker:IsShown(), false)
+    eq(ObjectiveTrackerFrame:HasModule(CampaignQuestObjectiveTracker), true)
+    eq(CampaignQuestObjectiveTracker:IsShown(), true)
     eq(list.nativeRemoved, nil)
     eq(#app.errors, 0)
 end)
@@ -1829,6 +1901,168 @@ test("unit frame height follows parts and disable releases everything", function
     eq(#app.errors, 0)
 end)
 
+test("unit main frames share the health baseline and keep it during part changes", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local units = app.components.unitFrames
+    local player, target = units.frames.player, units.frames.target
+    eq(player:GetWidth(), 200)
+    eq(target:GetWidth(), 200)
+    eq(player.health:GetHeight(), 18)
+    eq(target.health:GetHeight(), 18)
+    local function healthTop(frame)
+        return frame.point[5] + frame:GetHeight() / 2 - 15
+    end
+    -- 69% of 1080 from the top is -205.2 from the screen centre.
+    eq(math.abs(healthTop(player) + 205.2) < 0.01, true)
+    eq(math.abs(healthTop(target) - healthTop(player)) < 0.01, true)
+    -- Fallback cooldown block is 300 UI units: centre = 150 + 24 + 100.
+    eq(player.point[4], -274)
+    eq(target.point[4], 274)
+    local playerTop = player.point[5] + player:GetHeight() / 2
+    -- Auras sit directly under power; the target cast owns the next row.
+    eq(target.auraIcons[1].point[3], -40)
+    eq(target.cast.point[3], -60)
+    H.cast.target = { name = "Fireball", startTime = 0, endTime = 2500 }
+    H.Fire("UNIT_SPELLCAST_START", "target")
+    eq(target.cast:IsShown(), true)
+    eq(player.point[5] + player:GetHeight() / 2, playerTop)
+    eq(target.auraIcons[1].point[3], -40)
+    H.cast.target.gone = true
+    H.Fire("UNIT_SPELLCAST_STOP", "target")
+    eq(target.cast:IsShown(), false)
+    eq(target.auraIcons[1].point[3], -40)
+    -- The player's cast remains the client's central bar, not an inline row.
+    eq(player.cast, nil)
+    eq(#app.errors, 0)
+end)
+
+test("a missing aura part keeps the main frame's top edge fixed", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local player = app.components.unitFrames.frames.player
+    local top = player.point[5] + player:GetHeight() / 2
+    local saved = C_UnitAuras
+    C_UnitAuras = nil
+    app:Reconcile()
+    eq(player:GetHeight(), 38)
+    eq(math.abs(player.point[5] + player:GetHeight() / 2 - top) < 0.01, true)
+    C_UnitAuras = saved
+    app:Reconcile()
+    eq(player:GetHeight(), 64)
+    eq(math.abs(player.point[5] + player:GetHeight() / 2 - top) < 0.01, true)
+    eq(#app.errors, 0)
+end)
+
+test("auxiliary unit frames are compact and sit in the inner half of their column", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local units = app.components.unitFrames
+    local player, target = units.frames.player, units.frames.target
+    local pet, tot, focus = units.frames.pet, units.frames.targettarget, units.frames.focus
+    eq(pet:GetWidth(), 100)
+    eq(pet:GetHeight(), 28)
+    eq(pet.health:GetHeight(), 12)
+    eq(pet.health.point[3], -13)
+    eq(pet.cast, nil)
+    eq(pet.auraIcons, nil)
+    eq(pet.point[4], player.point[4] + 50)
+    eq(tot.point[4], target.point[4] - 50)
+    eq(focus.point[4], target.point[4])
+    -- Pet sits under the player, focus above the target, both with a 6px gap.
+    eq(pet.point[5] + pet:GetHeight() / 2, player.point[5] - player:GetHeight() / 2 - 6)
+    eq(focus.point[5] - focus:GetHeight() / 2, target.point[5] + target:GetHeight() / 2 + 6)
+    eq(#app.errors, 0)
+end)
+
+test("saved unit positions keep their old centre instead of the new default", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:SetPosition("unit_player", 123, -45)
+    app.Store:SetPosition("unit_pet", 77, -88)
+    app.Store:Set("modules", "unitFrames", true)
+    local units = app.components.unitFrames
+    eq(units.frames.player.point[4], 123)
+    eq(units.frames.player.point[5], -45)
+    eq(units.frames.pet.point[4], 77)
+    eq(units.frames.pet.point[5], -88)
+    -- An unsaved frame still receives the shared central default.
+    eq(units.frames.target.point[4], 274)
+    eq(#app.errors, 0)
+end)
+
+test("a central change during combat queues one unit layout and applies after", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local player = app.components.unitFrames.frames.player
+    local x = player.point[4]
+    H.Combat(true)
+    app.Layout:SetActionAreaBottom(80)
+    app.Layout:SetActionAreaBottom(100)
+    eq(app.Layout:ActionAreaBottom(), 100)
+    eq(app.Queue:Count(), 2)
+    eq(player.point[4], x)
+    H.Combat(false)
+    eq(player.point[4], x)
+    eq(app.Queue:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("the player cast placeholder is an edit-mode rectangle below the action area", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local entry = app.components.unitFrames.playerCastEntry
+    eq(entry.placeholder, true)
+    eq(entry.frame:IsShown(), false)
+    eq(PlayerCastingBarFrame:IsShown(), true)
+    local central = app.Layout:Central()
+    local actionBottom = -central.screen.height / 2 + central.action.bottom
+    local top = entry.frame.point[5] + entry.frame:GetHeight() / 2
+    local bottom = entry.frame.point[5] - entry.frame:GetHeight() / 2
+    eq(entry.frame.point[4], 0)
+    eq(top <= actionBottom - 8 + 0.01, true)
+    eq(bottom <= actionBottom - 8 + 0.01, true)
+    app.Layout:SetEditing(true)
+    eq(entry.frame:IsShown(), true)
+    app.Layout:SetEditing(false)
+    eq(entry.frame:IsShown(), false)
+    app.Store:Set("modules", "unitFrames", false)
+    eq(entry.placeholder, false)
+    eq(entry.hidden, true)
+    eq(entry.frame:IsShown(), false)
+    local listed = false
+    for _, id in ipairs(app.Layout:IDs()) do if id == "unit_player_cast" then listed = true end end
+    eq(listed, false)
+    eq(PlayerCastingBarFrame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the unit diagnostic reports the shared block and frame centres", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    SlashCmdList.LUMAUI("unit")
+    eq(#app.errors, 0)
+end)
+
+test("a self-target does not repeat the player's aura row", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local units = app.components.unitFrames
+    local player, target = units.frames.player, units.frames.target
+    H.unitAuras.player = { helpful = { { icon = "player-aura" } } }
+    H.unitAuras.target = { helpful = { { icon = "target-aura" } } }
+    _G.UnitIsUnit = function(a, b) return a == b or (a == "target" and b == "player") end
+    H.Fire("UNIT_AURA", "player")
+    H.Fire("UNIT_AURA", "target")
+    eq(player.auraIcons[1]:IsShown(), true)
+    eq(target.auraIcons[1]:IsShown(), false)
+    _G.UnitIsUnit = function(a, b) return a == b end
+    H.Fire("PLAYER_TARGET_CHANGED")
+    eq(target.auraIcons[1]:IsShown(), true)
+    eq(target.auraIcons[1].texture, "target-aura")
+    _G.UnitIsUnit = nil
+    eq(#app.errors, 0)
+end)
+
 -- ==== TRACK: UNIT FRAMES —append new tests above this line ====
 test("unit bars keep names and values above compact health and power", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
@@ -1930,8 +2164,8 @@ test("unit frame preview preserves native frames and cast bars", function()
     eq(units.takeover.units, false)
     eq(units.takeover.cast, false)
     eq(units:Describe():find(app.L.nativeAwaitingValidation, 1, true) ~= nil, true)
-    -- The secure frame height moves through the queued job and is applied.
-    eq(units.frames.player:GetHeight(), 80)
+    -- The player cast is the client's own bar; only bars and auras remain here.
+    eq(units.frames.player:GetHeight(), 64)
     -- The preview never suppresses a client re-show.
     PlayerFrame:Show()
     eq(PlayerFrame:IsShown(), true)
@@ -2092,7 +2326,8 @@ test("unit frames include the target's target with parts, watch and events", fun
     eq(frame ~= nil, true)
     eq(frame:GetAttribute("unit"), "targettarget")
     eq(frame.watched, true)
-    eq(frame:GetHeight(), 80)
+    eq(frame:GetHeight(), 28)
+    eq(frame:GetWidth(), 100)
     eq(frame.events.events["UNIT_HEALTH"], "targettarget")
     eq(frame.events.events["RAID_TARGET_UPDATE"], true)
     eq(_G.LumaUIUnit_targettarget:IsShown(), true)
@@ -4067,12 +4302,12 @@ end)
 
 test("party enable cycles install one native suppression hook", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
-    -- QuestTracker hooks the tracker for its text colors; the preview must not
-    -- add suppression hooks when cycled.
+    -- QuestList hooks the tracker and each replaced module once; cycling the
+    -- panel must not add a second suppression hook.
     local baseline = ObjectiveTrackerFrame.hookCount
     local moduleBaseline = QuestObjectiveTracker.hookCount or 0
     eq(baseline >= 1, true)
-    eq(moduleBaseline, 0)
+    eq(moduleBaseline, 1)
     for _ = 1, 20 do
         app.Store:Set("modules", "unitFrames", true)
         app.Store:Set("modules", "unitFrames", false)
@@ -4086,8 +4321,8 @@ test("party enable cycles install one native suppression hook", function()
     end
     eq(ObjectiveTrackerFrame.hookCount, baseline)
     eq(QuestObjectiveTracker.hookCount or 0, moduleBaseline)
-    eq(CampaignQuestObjectiveTracker.hookCount or 0, 0)
-    eq(WorldQuestObjectiveTracker.hookCount or 0, 0)
+    eq(CampaignQuestObjectiveTracker.hookCount or 0, 1)
+    eq(WorldQuestObjectiveTracker.hookCount or 0, 1)
     for _ = 1, 20 do
         app.Store:Set("modules", "partyFrames", true)
         app.Store:Set("modules", "partyFrames", false)
@@ -4098,8 +4333,10 @@ test("party enable cycles install one native suppression hook", function()
     eq(PlayerFrame:IsShown(), true)
     PlayerFrame:Show()
     eq(PlayerFrame:IsShown(), true)
+    -- A quest module re-shown by the client is suppressed again, not left up.
     QuestObjectiveTracker:Show()
-    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), false)
     eq(#app.errors, 0)
 end)
 
@@ -4107,26 +4344,28 @@ test("quest panel returns the native tracker when it has nothing to show", funct
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
     eq(ObjectiveTrackerFrame:IsShown(), true)
-    eq(QuestObjectiveTracker:IsShown(), true)
-    -- Native modules remain available even when the preview is empty.
+    eq(QuestObjectiveTracker:IsShown(), false)
+    eq(list.nativeHidden, true)
     eq(ScenarioObjectiveTracker:IsShown(), true)
     H.questLog.entries = {}
     H.questLog.watch = {}
     H.Fire("QUEST_LOG_UPDATE")
     eq(list.hasContent, false)
+    eq(list.nativeHidden, nil)
     eq(QuestObjectiveTracker:IsShown(), true)
     eq(CampaignQuestObjectiveTracker:IsShown(), true)
     eq(ObjectiveTrackerFrame:HasModule(QuestObjectiveTracker), true)
     eq(list.frame:IsShown(), true)
-    -- Content continues to leave the native modules alone.
+    -- Content comes back, so the takeover resumes.
     H.questLog.entries = { { title = "New quest", questID = 201, level = 10 } }
     H.Fire("QUEST_LOG_UPDATE")
     eq(list.hasContent, true)
-    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(list.nativeHidden, true)
+    eq(QuestObjectiveTracker:IsShown(), false)
     eq(ScenarioObjectiveTracker:IsShown(), true)
-    -- A re-show from the client is left alone.
+    -- A re-show from the client is taken back down.
     QuestObjectiveTracker:Show()
-    eq(QuestObjectiveTracker:IsShown(), true)
+    eq(QuestObjectiveTracker:IsShown(), false)
     eq(#app.errors, 0)
 end)
 
@@ -4200,8 +4439,9 @@ test("diagnostics describe the native takeover of every replacement", function()
     local page = app.Settings.pages.diagnostics
     eq(page.headers.native.text:GetText(), app.L.diagNative)
     local native = page.bodies.native:GetText()
-    -- The quest panel runs by default and reports that the tracker is kept.
-    eq(native:find("questList: " .. app.L.nativeKept, 1, true) ~= nil, true)
+    -- The quest panel runs by default and reports the module-only takeover.
+    eq(native:find("questList: " .. app.L.nativeTaken, 1, true) ~= nil, true)
+    eq(native:find(app.L.nativeQuestsOnly, 1, true) ~= nil, true)
     -- A disabled replacement contributes no takeover line.
     eq(native:find("unitFrames:", 1, true), nil)
     app.Store:Set("modules", "unitFrames", true)
@@ -5890,6 +6130,89 @@ test("the information strip owns the bottom bar while experience stays on top", 
     eq(#app.errors, 0)
 end)
 
+test("a stale top info centre cannot drag the experience bar off the screen axis", function()
+    local app = H.Load({ schema = 1, profiles = { Default = { positions = {
+        topInfo = { x = -900, y = 420 },
+    } } } })
+    H.Fire("PLAYER_LOGIN")
+    local group = app.Layout.entries.topInfo
+    -- The band keeps the saved height but its centre stays on the screen axis,
+    -- so an old or accidental drag cannot leave the bar half off the window.
+    eq(group.frame.point[1], "CENTER")
+    eq(group.frame.point[4], 0)
+    eq(group.frame.point[5], 420)
+    eq(app.Store:Profile().positions.topInfo.x, -900)
+    eq(#app.errors, 0)
+end)
+
+test("a legacy experience position is centred inside the top information band", function()
+    local app = H.Load({ schema = 1, profiles = { Default = { positions = {
+        experience = { x = -900, y = 500 },
+    } } } })
+    H.Fire("PLAYER_LOGIN")
+    local xp = app.Layout.entries.experience
+    -- The old absolute centre only contributes its height; the corrected
+    -- per-member offset is written back for the next profile load.
+    eq(xp.rx, 0)
+    eq(xp.ry, 7)
+    eq(app.Store:Profile().positions["topInfo|experience"].x, 0)
+    app.Store:SetPosition("topInfo|experience", -300, 0)
+    app.Layout:RefreshMembers()
+    eq(xp.rx, 0)
+    eq(#app.errors, 0)
+end)
+
+test("the bottom strip spans the screen, spreads its readings and keeps a saved position", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local strip = app.components.dataStrip
+    local group = app.Layout.entries.bottomBar
+    -- Full width, flush to the bottom edge: the group owns the edge margin.
+    eq(strip.frame:GetWidth(), 1920)
+    eq(group.frame:GetWidth(), 1920)
+    eq(group.margin, 0)
+    eq(group.frame.point[4], 0)
+    eq(group.frame.point[5], -525)
+    -- The left cluster starts at the band padding; slack is shared evenly, so
+    -- the money field is wider than its text budget without measuring text.
+    eq(strip.segments.money.point[1], "LEFT")
+    eq(strip.segments.money.point[2], strip.frame)
+    eq(strip.segments.money.point[4], 12)
+    eq(strip.segments.money:GetWidth(), 224)
+    eq(strip.segments.zone:GetWidth(), 200)
+    eq(strip.segments.zone.point[4], 0)
+    eq(strip.segments.clock.point[1], "RIGHT")
+    eq(strip.segments.clock.point[4], -12)
+    eq(strip.segments.clock:GetWidth(), 173.5)
+    -- A smaller screen shrinks the slack and moves the flush centre with it.
+    UIParent:SetSize(1600, 900); H.Fire("DISPLAY_SIZE_CHANGED")
+    eq(strip.frame:GetWidth(), 1600)
+    eq(strip.segments.money:GetWidth(), 184)
+    eq(group.frame:GetWidth(), 1600)
+    eq(group.frame.point[5], -435)
+    -- A deliberate position survives a resize, while the default stays flush.
+    app.Store:SetPosition("bottomBar", 0, -200)
+    app.Layout:ApplyAll()
+    eq(group.frame.point[5], -200)
+    UIParent:SetSize(1366, 768); H.Fire("DISPLAY_SIZE_CHANGED")
+    eq(group.frame.point[5], -200)
+    eq(app.Layout.entries.bottomBar.y, -369)
+    -- Narrow windows fall back to the compact reading instead of overlapping.
+    UIParent:SetSize(1100, 800); H.Fire("DISPLAY_SIZE_CHANGED")
+    eq(strip.frame:GetWidth(), 340)
+    eq(strip.summary:IsShown(), true)
+    eq(strip.segments.money:IsShown(), false)
+    eq(strip.segments.zone:IsShown(), true)
+    eq(strip.segments.clock:IsShown(), true)
+    -- An appearance scale grows the band but must not push it past the screen:
+    -- the local width is divided by the group scale.
+    UIParent:SetSize(1920, 1080); H.Fire("DISPLAY_SIZE_CHANGED")
+    app.Store:Set("appearance", "scale", 1.2)
+    eq(math.abs(strip.frame:GetWidth() - 1600) < 1e-6, true)
+    eq(math.abs(strip.frame:GetEffectiveScale() - 1.2) < 1e-9, true)
+    eq(group.frame:GetWidth(), 1600)
+    eq(#app.errors, 0)
+end)
+
 test("a missing group container falls back to absolute positions", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local member = app.Layout.entries.experience
@@ -5985,15 +6308,21 @@ test("combat layout is selected and previewed without moving the native action b
     eq(app.Layout.previewName, "combat")
     local guide = app.Layout.presetOverlays.nativeActionArea
     eq(guide:IsShown(), true)
-    eq(#guide.slots, 24)
-    eq(guide.slots[1]:GetWidth(), 40)
-    eq(guide.slots[1].point[4], 0)
-    eq(guide.slots[12].point[4], 484)
-    eq(guide.slots[13].point[5], -52)
-    local firstSlot = guide.slots[1]
+    -- The guide is the measured action rectangle, not a preset-only grid. With
+    -- only the main bar present its one measured row has no separator and the
+    -- label says the two missing bars make this an estimate.
+    eq(guide:GetWidth(), 524)
+    eq(guide:GetHeight(), 40)
+    eq(guide.point[1], "CENTER")
+    eq(guide.point[2], UIParent)
+    eq(guide.point[4], 0)
+    eq(guide.point[5], -464)
+    eq(#guide.rowLines, 0)
+    eq(guide.label:GetText():find(app.L.presetEstimate, 1, true) ~= nil, true)
+    local firstLine = guide.rowLines[1]
     app.Layout:PreviewPreset("combat")
-    eq(guide.slots[1], firstSlot)
-    eq(#guide.slots, 24)
+    eq(guide.rowLines[1], firstLine)
+    eq(#guide.rowLines, 0)
     eq(bar.point, point)
     H.Click(app.Settings.presetButtons.apply)
     eq(app.Layout.presetOverlays.nativeActionArea:IsShown(), false)
@@ -6010,8 +6339,8 @@ test("combat preset keeps unit frames close to the action area on wide screens",
     local playerOverlay = app.Layout.presetOverlays.unit_player
     local targetOverlay = app.Layout.presetOverlays.unit_target
     local firstX = playerOverlay.point[4]
-    eq(firstX, -386)
-    eq(targetOverlay.point[4], 386)
+    eq(firstX, -274)
+    eq(targetOverlay.point[4], 274)
     UIParent:SetSize(3440, 1440)
     H.Fire("DISPLAY_SIZE_CHANGED")
     eq(playerOverlay.point[4], firstX)
@@ -6863,6 +7192,50 @@ test("the experience bar follows level, lock and watched reputation", function()
     H.Fire("UPDATE_FACTION")
     eq(experience.mode, "xp")
     eq(#app.errors, 0)
+end)
+
+test("the native status bar is released whenever the replacement stops drawing", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local experience = app.components.experience
+    local native = _G.MainStatusTrackingBarContainer
+    -- A drawn XP reading takes the client's bar over.
+    eq(experience.frame:IsShown(), true)
+    eq(native:IsShown(), false)
+    eq(experience.nativeSuppressed, true)
+    -- Edit Mode re-shows the client's container; the next pass hides it again.
+    native:Show()
+    eq(native:IsShown(), true)
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    eq(native:IsShown(), false)
+    -- Max level hides the replacement, so the client's own bar comes back.
+    H.maxLevel = 80
+    H.Fire("PLAYER_LEVEL_UP")
+    eq(experience.frame:IsShown(), false)
+    eq(native:IsShown(), true)
+    eq(experience.nativeSuppressed, false)
+    -- Turning the component off also releases it.
+    H.maxLevel = 90
+    H.Fire("PLAYER_LEVEL_UP")
+    eq(native:IsShown(), false)
+    app.Store:Set("modules", "experience", false)
+    eq(native:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("a refused native status bar write is reported once and never hides the reading", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local experience = app.components.experience
+    local native = _G.MainStatusTrackingBarContainer
+    native.Hide = function() error("refused", 0) end
+    -- The client re-shows its bar; the replacement tries the takeover again.
+    native:Show()
+    experience.nativeSuppressed = nil
+    H.Fire("PLAYER_XP_UPDATE")
+    eq(experience.frame:IsShown(), true)
+    eq(#app.errors, 1)
+    -- The refusal is reported once, not on every experience event.
+    H.Fire("PLAYER_XP_UPDATE")
+    eq(#app.errors, 1)
 end)
 
 test("retail watched reputation uses the current API and safe progress ranges", function()
@@ -8683,7 +9056,7 @@ test("the single-bar sample keeps the bar skin out of its way", function()
     eq(#app.errors, 0)
 end)
 
-test("the cooldown manager viewers are stacked above the bars and put back", function()
+test("the cooldown manager viewers are stacked above the measured action area and put back", function()
     local app = H.Load()
     local essential = H.NewFrame("EssentialCooldownViewer", UIParent)
     essential:SetPoint("CENTER", UIParent, "CENTER", 111, 222)
@@ -8693,20 +9066,27 @@ test("the cooldown manager viewers are stacked above the bars and put back", fun
     H.Fire("PLAYER_LOGIN")
     local component = app.components.cooldownViewer
     eq(component.running, true)
-    -- Bottom to top: skill rows hug the bars, the tracked buff icons on top.
+    -- Bottom to top: skill rows hug the action area (bottom 56, main bar 40 and
+    -- an 8 unit gap put the first row at 104). A viewer the player hid is
+    -- skipped instead of being forced back on screen.
     eq(essential.point[1], "BOTTOM")
-    eq(essential.point[2], _G.MultiBarBottomRight or MainActionBar)
-    eq(essential.point[5], 4)
-    eq(utility.point[2], essential)
-    eq(_G.BuffBarCooldownViewer.point[2], utility)
-    eq(buffs.point[2], _G.BuffBarCooldownViewer)
-    -- A viewer that was hidden for the player is shown while the component runs.
-    eq(utility:IsShown(), true)
+    eq(essential.point[2], UIParent)
+    eq(essential.point[4], 0)
+    eq(essential.point[5], 104)
+    eq(utility.point, nil)
+    eq(utility:IsShown(), false)
+    eq(_G.BuffBarCooldownViewer.point[5], 142)
+    eq(buffs.point[5], 180)
+    eq(component.placedRows[1].id, "essential")
+    eq(component.placedRows[2].id, "buffBar")
+    eq(component.placedRows[3].id, "buffIcon")
 
     app.Store:Set("modules", "cooldownViewer", false)
     eq(essential.point[1], "CENTER")
     eq(essential.point[4], 111)
+    eq(essential.point[5], 222)
     eq(essential.lumaCooldownViewerOriginal, nil)
+    eq(buffs.point, nil)
     eq(utility:IsShown(), false)
     eq(#app.errors, 0)
     -- These globals outlive one H.Load; drop them so the next case starts from
@@ -8724,6 +9104,219 @@ test("the cooldown manager placement stays off without native viewers", function
     eq(app.components.cooldownViewer.running == true, false)
     eq(app.components.cooldownViewer.status, "unsupported")
     eq(#app.errors, 0)
+end)
+
+test("central geometry measures the managed action area and exposes unit boundaries", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2:SetSize(524, 44)
+    local bar3 = H.NewFrame("MultiBarBottomRight", UIParent)
+    bar3:SetSize(524, 44)
+    local central = app.Layout:Central()
+    eq(central.action.width, 524)
+    eq(central.action.height, 136)
+    eq(central.action.bottom, 56)
+    eq(central.action.top, 192)
+    eq(central.cooldown.bottom, 200)
+    -- The visible cooldown block owns the unit boundary; the fixture viewers
+    -- report 300 UI units, not the 524-wide bars.
+    eq(central.content.width, 300)
+    eq(central.content.measured, true)
+    eq(central.units.left, -174)
+    eq(central.units.right, 174)
+    eq(central.action.estimated, false)
+    -- Rows are bottom-up distances from the screen bottom; the centre offset
+    -- offered to 002 is the same value minus half the screen.
+    local essential = H.NewFrame("EssentialCooldownViewer", UIParent)
+    essential:SetSize(300, 50)
+    local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
+    utility:SetSize(280, 40)
+    local rows = app.Layout:CentralRows({
+        { frame = essential, id = "essential" }, { frame = utility, id = "utility" } })
+    eq(rows.rows[1].bottom, 200)
+    eq(rows.rows[1].top, 250)
+    eq(rows.rows[2].bottom, 258)
+    eq(rows.mainRow, rows.rows[1])
+    eq(rows.mainRow.id, "essential")
+    eq(rows.cooldown.top, 298)
+    eq(rows.units.rowTop, 298)
+    eq(rows.units.rowTopY, -242)
+    eq(rows.units.rowCenterY, -315)
+    -- The widest visible row matches the fixture block, so the boundary stays
+    -- put and no extra central change is published.
+    eq(rows.content.width, 300)
+    eq(rows.content.measured, true)
+    eq(rows.contentChanged, nil)
+    eq(rows.units.left, -174)
+    eq(#app.errors, 0)
+end)
+
+test("the measured cooldown block moves the unit frames beside it", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local player = app.components.unitFrames.frames.player
+    -- Before any viewer is readable the mockup fallback applies.
+    eq(player.point[4], -274)
+    local viewer = H.NewFrame("EssentialCooldownViewer", UIParent)
+    viewer:SetSize(360, 40)
+    local central = app.Layout:CentralRows({ { frame = viewer, id = "essential" } })
+    eq(central.content.width, 360)
+    eq(central.contentChanged, true)
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    eq(player.point[4], -304)
+    -- A wider tracked-buff row must not drag the unit frames outward; only the
+    -- skill rows define the block the bars flank.
+    local buff = H.NewFrame("BuffBarCooldownViewer", UIParent)
+    buff:SetSize(500, 20)
+    local again = app.Layout:CentralRows({
+        { frame = viewer, id = "essential" }, { frame = buff, id = "buffBar" } })
+    eq(again.content.width, 360)
+    eq(again.contentChanged, nil)
+    eq(player.point[4], -304)
+    -- No readable viewer returns to the fallback instead of keeping a stale
+    -- block width; the units follow in the same pass. The placement component
+    -- is off first so it cannot re-measure the 360-wide fixture afterwards.
+    app.Store:Set("modules", "cooldownViewer", false)
+    app.Layout:CentralRows({})
+    eq(app.Layout:ContentWidth(), 300)
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    eq(player.point[4], -274)
+    eq(#app.errors, 0)
+end)
+
+test("central geometry marks a missing action area as an estimate", function()
+    local app = H.Load()
+    _G.MainActionBar, _G.MultiBarBottomLeft, _G.MultiBarBottomRight = nil, nil, nil
+    H.Fire("PLAYER_LOGIN")
+    local central = app.Layout:Central()
+    eq(central.action.estimated, true)
+    eq(central.action.width, 524)
+    eq(central.action.height, 128)
+    eq(central.action.bottom, 56)
+    eq(#central.action.rows, 3)
+    eq(#app.errors, 0)
+end)
+
+test("the action area baseline moves both the bars and the cooldown stack", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local essential = _G.EssentialCooldownViewer
+    eq(essential.point[5], 104)
+    app.Store:Set("modules", "actionBars", true)
+    eq(MainActionBar.point[5], 56)
+    eq(essential.point[5], 104)
+    eq(app.Layout:SetActionAreaBottom(80), true)
+    eq(MainActionBar.point[5], 80)
+    eq(essential.point[5], 128)
+    eq(app.Layout:SetActionAreaBottom(80), false)
+    -- In combat both components queue; the latest shared baseline wins and
+    -- each keeps its own key instead of one overwriting the other.
+    H.Combat(true)
+    app.Layout:SetActionAreaBottom(90)
+    app.Layout:SetActionAreaBottom(100)
+    eq(MainActionBar.point[5], 80)
+    eq(app.Queue:Count(), 2)
+    H.Combat(false)
+    eq(MainActionBar.point[5], 100)
+    eq(essential.point[5], 148)
+    -- Switching only the bars off leaves the cooldown stack on the new area.
+    app.Store:Set("modules", "actionBars", false)
+    eq(app.components.cooldownViewer.running, true)
+    eq(essential.point[5], 148)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(essential.point, nil)
+    eq(#app.errors, 0)
+end)
+
+test("bars fade in from the measured rectangle and the panel shares their alpha", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionBars", true)
+    app.Store:Set("modules", "actionPanel", true)
+    local panel = app.components.actionPanel.panels[MainActionBar]
+    eq(panel:IsShown(), true)
+    eq(MainActionBar.alpha, 0)
+    eq(panel:GetAlpha(), 0)
+    -- UIParent centre is 960,540 in the fixture; -480 is inside the area whose
+    -- bottom is 56 above the screen bottom (centre offset -484).
+    _G.GetCursorPosition = function() return 960, 60 end
+    H.Advance(0.35)
+    eq(MainActionBar.alpha > 0.5, true)
+    eq(panel:GetAlpha(), MainActionBar.alpha)
+    -- Chat focus inside the same rectangle must not summon the bars.
+    _G.GetMouseFocus = function() return ChatFrame1 end
+    H.now = H.now + 2
+    H.Advance(1.6)
+    eq(MainActionBar.alpha < 0.1, true)
+    _G.GetCursorPosition, _G.GetMouseFocus = nil, nil
+    _G.MouseIsOver = function() return false end
+    app.Store:Set("modules", "actionBars", false)
+    eq(panel:GetAlpha(), 1)
+    eq(panel:IsShown(), true)
+    _G.MouseIsOver = nil
+    eq(#app.errors, 0)
+end)
+
+test("empty, hidden and alpha-zero cooldown viewers collapse their rows", function()
+    local app = H.Load()
+    _G.UtilityCooldownViewer.cooldownButtons = {}
+    _G.BuffBarCooldownViewer:SetAlpha(0)
+    _G.BuffIconCooldownViewer:SetHeight(1)
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.cooldownViewer
+    eq(_G.EssentialCooldownViewer.point[5], 104)
+    eq(_G.UtilityCooldownViewer.point, nil)
+    eq(_G.BuffBarCooldownViewer.point, nil)
+    eq(_G.BuffIconCooldownViewer.point, nil)
+    eq(#component.placedRows, 1)
+    eq(component.placedRows[1].id, "essential")
+    -- Skipping a viewer changes only its position, never its own visibility.
+    eq(_G.UtilityCooldownViewer:IsShown(), true)
+    eq(_G.BuffBarCooldownViewer:IsShown(), true)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(_G.EssentialCooldownViewer.lumaCooldownViewerOriginal, nil)
+    eq(next(component.events.events), nil)
+    eq(#app.errors, 0)
+end)
+
+test("a cooldown viewer that loads after login joins the next layout pass", function()
+    local app = H.Load()
+    _G.UtilityCooldownViewer, _G.BuffIconCooldownViewer, _G.BuffBarCooldownViewer = nil, nil, nil
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.cooldownViewer
+    eq(component.running, true)
+    eq(_G.EssentialCooldownViewer.point[5], 104)
+    local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
+    utility:SetSize(280, 28)
+    H.Fire("PLAYER_ENTERING_WORLD")
+    eq(utility.point[1], "BOTTOM")
+    eq(utility.point[5], 142)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(utility.point, nil)
+    eq(#app.errors, 0)
+end)
+
+test("one refused cooldown viewer keeps its anchor and the stack continues", function()
+    local app = H.Load()
+    local essential = _G.EssentialCooldownViewer
+    essential:SetPoint("CENTER", UIParent, "CENTER", 33, 44)
+    local original = essential.SetPoint
+    essential.SetPoint = function(self, point, ...)
+        if point == "BOTTOM" then error("refused", 0) end
+        return original(self, point, ...)
+    end
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.cooldownViewer
+    eq(essential.point[1], "CENTER")
+    eq(essential.point[4], 33)
+    eq(essential.point[5], 44)
+    -- The refused row collapses, so the next viewer takes its place.
+    eq(_G.UtilityCooldownViewer.point[5], 104)
+    eq(#app.errors, 1)
+    eq(app.errors[1].context:find("cooldownViewer", 1, true) ~= nil, true)
+    app.Store:Set("modules", "cooldownViewer", false)
+    eq(essential.point[1], "CENTER")
+    eq(essential.point[4], 33)
+    essential.SetPoint = original
+    eq(#app.errors, 1)
 end)
 
 test("a target change cannot bring a suppressed native frame back", function()
@@ -8749,6 +9342,40 @@ test("bottom strip reads durability and bag counts on its own tick", function()
     H.Fire("UPDATE_INVENTORY_DURABILITY")
     eq(strip.durability:GetText():find("40%", 1, true) ~= nil, true)
     eq(strip.bags:GetText():find("6/12", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("top performance shares the strip sample and releases its ticker", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local top = app.components.topPerformance
+    eq(top.running, true)
+    eq(top.status, "running")
+    eq(top.text:IsShown(), true)
+    eq(top.text.point[1], "TOP")
+    eq(top.text.point[2], UIParent)
+    eq(top.text.point[4], 0)
+    eq(top.text.point[5], -6)
+    eq(top.text:GetText(), app.L.fps .. " 120   " .. app.L.latency .. " 40")
+    -- The strip and the top reading update on the same beat; the shared cache
+    -- means one guarded client query, not one per component.
+    local calls = 0
+    local framerate = _G.GetFramerate
+    _G.GetFramerate = function()
+        calls = calls + 1
+        return framerate()
+    end
+    H.Advance(1)
+    eq(calls, 1)
+    -- With the strip disabled the top reading keeps sampling by itself.
+    app.Store:Set("modules", "dataStrip", false)
+    H.Advance(1)
+    eq(calls, 2)
+    -- With both disabled there is no performance timer left.
+    app.Store:Set("modules", "topPerformance", false)
+    eq(top.text:IsShown(), false)
+    local before = calls
+    H.Advance(2)
+    eq(calls, before)
     eq(#app.errors, 0)
 end)
 

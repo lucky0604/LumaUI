@@ -1,16 +1,49 @@
 local _, app = ...
 local U = app.Theme.units
--- Pearl layout: one compact bar pair flanking the action buttons, with the
--- target-of-target directly under the target and focus/pet kept out of the way.
+
+-- The main health bars start at the same fraction of the screen as the mockup;
+-- the frame top includes the name row above the health bar. Auxiliary units are
+-- shorter, use the compact metrics below and sit in the inner half of their
+-- parent's column, which keeps them away from the chat side and the action area.
+local TOP_FRACTION = 0.69
+local AUX_GAP = 6
+local FOCUS_GAP = 6
+local PLAYER_CAST_ID = "unit_player_cast"
+local PLAYER_CAST_HEIGHT = 18
+local PLAYER_CAST_INSET = 8
+
+local PARTS_ALL = { bars = true, cast = true, auras = true, marks = true, interaction = true }
+-- The player cast is the client's own central bar (or its edit-mode placeholder);
+-- drawing another inline copy would duplicate it. The target keeps the inline
+-- cast so target casts still work through the existing part.
+local PARTS_PLAYER = { bars = true, auras = true, marks = true, interaction = true }
+local PARTS_MINOR = { bars = true, marks = true, interaction = true }
+
+local function metrics(style)
+    if style == "minor" then
+        return {
+            width = U.minorWidth, nameRow = U.minorNameRow, health = U.minorHealth,
+            power = U.minorPower, powerGap = U.minorPowerGap, nameSize = U.minorNameSize,
+            valueWidth = 42, nameReserve = 50,
+            cast = U.cast, castGap = U.castGap, aura = U.aura, auraStep = U.auraStep, auraGap = U.auraGap,
+        }
+    end
+    return {
+        width = U.width, nameRow = U.nameRow, health = U.health, power = U.power,
+        powerGap = U.powerGap, nameSize = U.nameSize, valueWidth = 64, nameReserve = 72,
+        cast = U.cast, castGap = U.castGap, aura = U.aura, auraStep = U.auraStep, auraGap = U.auraGap,
+    }
+end
+local MAIN, MINOR = metrics("main"), metrics("minor")
+
 local specs = {
-    { unit = "player", x = -250, y = -120, native = "PlayerFrame" },
-    { unit = "target", x = 250, y = -120, native = "TargetFrame" },
-    { unit = "targettarget", x = 250, y = -205, native = nil },
-    { unit = "focus", x = 420, y = 40, native = "FocusFrame" },
-    { unit = "pet", x = -250, y = -196, native = "PetFrame" },
+    { unit = "player", style = "main", parts = PARTS_PLAYER, side = -1 },
+    { unit = "target", style = "main", parts = PARTS_ALL, side = 1 },
+    { unit = "targettarget", style = "minor", parts = PARTS_MINOR, side = 1, parent = "target" },
+    { unit = "focus", style = "minor", parts = PARTS_MINOR, side = 1, parent = "target", above = true },
+    { unit = "pet", style = "minor", parts = PARTS_MINOR, side = -1, parent = "player" },
 }
 
-local BASE_HEIGHT = U.nameRow + U.health + U.power + U.powerGap
 -- Part availability is diagnostic only; it does not prove native parity.
 local REPLACEMENT_PARTS = { "bars", "cast", "auras" }
 local FRAME_EVENTS = { "PLAYER_ENTERING_WORLD", "PLAYER_TARGET_CHANGED", "PLAYER_FOCUS_CHANGED", "UNIT_PET" }
@@ -22,11 +55,17 @@ local component
 -- inside the parts. The frame height is deliberately NOT written here:
 -- resizing a secure unit button is a protected change, and events fire during
 -- combat, so the height only moves through the queued job below.
+local function partAllowed(frame, id)
+    return not frame.partsFilter or frame.partsFilter[id] == true
+end
+
 local function drawFrame(frame)
     local parts = component.parts
     if not parts then return end
     for _, part in ipairs(parts.active) do
-        app:Call("unit/" .. frame.unitToken .. "/" .. part.id, part.draw, frame)
+        if partAllowed(frame, part.id) then
+            app:Call("unit/" .. frame.unitToken .. "/" .. part.id, part.draw, frame)
+        end
     end
 end
 
@@ -39,36 +78,47 @@ local function drawEvent(frame, event)
         return
     end
     for _, part in ipairs(subscribed) do
-        app:Call("unit/" .. frame.unitToken .. "/" .. part.id, part.draw, frame)
+        if partAllowed(frame, part.id) then
+            app:Call("unit/" .. frame.unitToken .. "/" .. part.id, part.draw, frame)
+        end
     end
 end
 
-local function partsHeight(parts)
-    local height = BASE_HEIGHT
-    for _, part in ipairs(parts.active) do height = height + (part.height or 0) end
+local function partsHeight(parts, frame)
+    local height = frame.baseHeight
+    for _, part in ipairs(parts.active) do
+        if partAllowed(frame, part.id) then height = height + (part.height or 0) end
+    end
     return height
 end
 
 -- Resizing the secure frame is queued (per-frame key, latest intent wins), so
 -- a height change from a parts-availability shift waits for the fight to end.
 local function applyHeight(self, frame)
-    local height = partsHeight(self.parts)
+    local height = partsHeight(self.parts, frame)
     app.Queue:Run("unitFrames/height/" .. frame.unitToken, function()
         if frame:GetHeight() ~= height then frame:SetHeight(height) end
     end)
 end
 
 local function create(spec)
+    local m = spec.style == "minor" and MINOR or MAIN
     local frame = CreateFrame("Button", "LumaUIUnit_" .. spec.unit, UIParent, "SecureUnitButtonTemplate,BackdropTemplate")
     frame:Hide()
-    frame:SetSize(U.width, BASE_HEIGHT)
+    frame.metrics = m
+    frame.partsFilter = spec.parts
+    frame.baseHeight = m.nameRow + m.health + m.power + m.powerGap
+    frame:SetSize(m.width, frame.baseHeight)
     frame.unitToken = spec.unit
+    frame.unitSide = spec.side
+    frame.unitParent = spec.parent
+    frame.unitAbove = spec.above
     frame.partsCreated = {}
     frame.events = CreateFrame("Frame")
     frame.events:SetScript("OnEvent", function(_, event)
         app:Call("unit/" .. spec.unit, drawEvent, frame, event)
     end)
-    app.Layout:Register("unit_" .. spec.unit, frame, spec.x, spec.y, app.L.unitFrames .. " · " .. spec.unit)
+    app.Layout:Register("unit_" .. spec.unit, frame, 0, 0, app.L.unitFrames .. " · " .. spec.unit)
     return frame
 end
 
@@ -76,7 +126,7 @@ end
 -- its controls before its events register; each part only builds once.
 local function ensureParts(parts, frame)
     for _, part in ipairs(parts.active) do
-        if not frame.partsCreated[part.id] then
+        if partAllowed(frame, part.id) and not frame.partsCreated[part.id] then
             frame.partsCreated[part.id] = true
             part.create(frame)
         end
@@ -89,19 +139,21 @@ end
 local function attachEvents(parts, frame, unit)
     frame.eventParts = {}
     for _, part in ipairs(parts.active) do
-        for _, event in ipairs(part.events or {}) do
-            -- A single event name the current build lacks must not fail the
-            -- whole component; the handler simply never fires.
-            pcall(frame.events.RegisterUnitEvent, frame.events, event, unit)
-            local list = frame.eventParts[event]
-            if not list then list = {}; frame.eventParts[event] = list end
-            list[#list + 1] = part
-        end
-        for _, event in ipairs(part.globalEvents or {}) do
-            pcall(frame.events.RegisterEvent, frame.events, event)
-            local list = frame.eventParts[event]
-            if not list then list = {}; frame.eventParts[event] = list end
-            list[#list + 1] = part
+        if partAllowed(frame, part.id) then
+            for _, event in ipairs(part.events or {}) do
+                -- A single event name the current build lacks must not fail the
+                -- whole component; the handler simply never fires.
+                pcall(frame.events.RegisterUnitEvent, frame.events, event, unit)
+                local list = frame.eventParts[event]
+                if not list then list = {}; frame.eventParts[event] = list end
+                list[#list + 1] = part
+            end
+            for _, event in ipairs(part.globalEvents or {}) do
+                pcall(frame.events.RegisterEvent, frame.events, event)
+                local list = frame.eventParts[event]
+                if not list then list = {}; frame.eventParts[event] = list end
+                list[#list + 1] = part
+            end
         end
     end
     for _, event in ipairs(FRAME_EVENTS) do
@@ -258,6 +310,78 @@ local function applyTakeover(self)
     end
 end
 
+-- The player cast stays the client's own bar. This outline only reserves the
+-- agreed central rectangle in edit mode; it never moves or hides the native
+-- cast frame, so a build without a confirmed cast-frame name keeps working.
+local function playerCastPlaceholder(self)
+    local entry = self.playerCastEntry
+    if entry then
+        entry.placeholder = true
+        return entry
+    end
+    entry = app.Layout:RegisterPlaceholder(PLAYER_CAST_ID, app.L.playerCastArea, 0, 0, 240, PLAYER_CAST_HEIGHT)
+    self.playerCastEntry = entry
+    return entry
+end
+
+local function positionPlayerCast(self, central)
+    local entry = self.playerCastEntry
+    if not entry or not entry.frame then return end
+    local scale = app.Layout:Scale(PLAYER_CAST_ID)
+    if not scale or scale <= 0 then scale = 1 end
+    local width = math.max(160, math.min(380, central.action.width * 0.62))
+    local height = PLAYER_CAST_HEIGHT
+    local bottom = central.action.bottom - PLAYER_CAST_INSET
+    local center = bottom - (height * scale) / 2 - central.screen.height / 2
+    entry.frame:SetSize(width / scale, height)
+    app.Layout:SetEntryDefault(PLAYER_CAST_ID, 0, center / scale)
+    app.Layout:Apply(PLAYER_CAST_ID)
+end
+
+-- Main health bars share the same screen top; auxiliary frames use the compact
+-- metrics and the inner half of their parent's column. Only the entry default is
+-- updated here: Layout:Apply still gives a saved manual position precedence.
+local function updateDefaults(self)
+    if not self.frames then return end
+    local central = app.Layout:Central()
+    local screenHeight = central.screen.height
+    local healthTop = screenHeight * (0.5 - TOP_FRACTION)
+    local rows = {}
+    for _, spec in ipairs(specs) do
+        local frame = self.frames[spec.unit]
+        if frame then
+            local id = "unit_" .. spec.unit
+            local scale = app.Layout:Scale(id)
+            if not scale or scale <= 0 then scale = 1 end
+            local height = partsHeight(self.parts, frame)
+            local width = frame.metrics.width
+            local parent = spec.parent and rows[spec.parent]
+            local x, top
+            if spec.style == "main" then
+                x = app.Layout:CentralOffset(id, spec.side)
+                top = healthTop / scale + frame.metrics.nameRow
+            elseif spec.above then
+                x = parent and parent.x or app.Layout:CentralOffset(id, spec.side)
+                top = (parent and parent.top or (healthTop / scale + frame.metrics.nameRow))
+                    + FOCUS_GAP + height
+            else
+                local mainX = parent and parent.x or app.Layout:CentralOffset(id, spec.side)
+                local mainWidth = parent and parent.width or width
+                local mainTop = parent and parent.top or (healthTop / scale + frame.metrics.nameRow)
+                local mainHeight = parent and parent.height or 0
+                x = mainX - spec.side * ((mainWidth - width) / 2)
+                top = mainTop - mainHeight - AUX_GAP
+            end
+            rows[spec.unit] = { x = x, top = top, width = width, height = height }
+            app.Layout:SetEntryDefault(id, x, top - height / 2)
+        end
+    end
+    for _, spec in ipairs(specs) do
+        if self.frames[spec.unit] then app.Layout:Apply("unit_" .. spec.unit) end
+    end
+    positionPlayerCast(self, central)
+end
+
 component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", defaultEnabled = true,
     Supported = function(_, caps) return caps.units end,
     Enable = function(self)
@@ -277,7 +401,24 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
             drawFrame(frame)
             applyHeight(self, frame)
         end
+        local castEntry = playerCastPlaceholder(self)
+        castEntry.hidden = nil
+        updateDefaults(self)
         applyTakeover(self)
+        app:Subscribe(self, "LAYOUT_CENTRAL_CHANGED", function()
+            if not self.running then return end
+            app.Queue:Run("unitFrames/layout", function()
+                if self.running then updateDefaults(self) end
+            end)
+        end)
+        -- ActionBars loads later in the TOC and normalizes the native scale; one
+        -- post-reconcile pass keeps the unit defaults aligned with that geometry.
+        app:Subscribe(self, "RUNTIME_UPDATED", function()
+            if not self.running then return end
+            app.Queue:Run("unitFrames/layout", function()
+                if self.running then updateDefaults(self) end
+            end)
+        end)
     end,
     Refresh = function(self)
         -- Re-evaluates the parts so a client that lost an API mid-session keeps
@@ -300,9 +441,16 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
             drawFrame(frame)
             applyHeight(self, frame)
         end
+        playerCastPlaceholder(self)
+        updateDefaults(self)
         applyTakeover(self)
     end,
     Disable = function(self)
+        if self.playerCastEntry then
+            self.playerCastEntry.placeholder = false
+            self.playerCastEntry.hidden = true
+            if self.playerCastEntry.frame then self.playerCastEntry.frame:Hide() end
+        end
         for _, frame in pairs(self.frames or {}) do
             frame.events:UnregisterAllEvents()
             UnregisterUnitWatch(frame)
@@ -331,4 +479,46 @@ function component:Describe()
         text = text .. ", " .. app.L.nativeMissing .. ": " .. table.concat(missing, ",")
     end
     return text .. " · " .. app.L.nativeAwaitingValidation .. " · " .. app.L.unitCoverage
+end
+
+-- `/luma unit`: the shared block width and each frame's actual centre, so "the
+-- frames did not move" can be attributed to a saved position, a missing viewer
+-- measurement or a disabled component instead of guessed at.
+local function frameCentre(frame)
+    if type(frame.GetCenter) ~= "function" then return nil, nil end
+    local ok, x, y = pcall(frame.GetCenter, frame)
+    if not ok then return nil, nil end
+    return app.Capabilities.Plain(x, "number"), app.Capabilities.Plain(y, "number")
+end
+
+function component:Diagnose()
+    local content = app.Layout:ContentWidth()
+    local measured = app.Layout.contentWidth ~= nil
+    local central = app.Layout:Central()
+    app:Print(string.format("unitFrames: status=%s running=%s block=%.0f (%s) action=%.0f",
+        tostring(self.status), self.running and "yes" or "no", content,
+        measured and "measured" or "fallback", central.action.width))
+    local cooldown = app.components.cooldownViewer
+    local rows = cooldown and cooldown.placedRows or {}
+    if #rows > 0 then
+        local parts = {}
+        for _, row in ipairs(rows) do
+            parts[#parts + 1] = string.format("%s=%.0f", tostring(row.id), row.width or 0)
+        end
+        app:Print("  rows: " .. table.concat(parts, " "))
+    end
+    local positions = app.Store:Profile().positions
+    for _, spec in ipairs(specs) do
+        local frame = self.frames and self.frames[spec.unit]
+        if frame then
+            local x, y = frameCentre(frame)
+            local ok, shown = pcall(frame.IsShown, frame)
+            app:Print(string.format("  %s: shown=%s size=%.0fx%.0f center=%s,%s saved=%s",
+                spec.unit, ok and shown == true and "yes" or "no",
+                frame:GetWidth(), frame:GetHeight(),
+                x and string.format("%.1f", x) or "?",
+                y and string.format("%.1f", y) or "?",
+                positions["unit_" .. spec.unit] and "yes" or "no"))
+        end
+    end
 end

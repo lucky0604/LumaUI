@@ -9,7 +9,7 @@ Store.defaults = {
     appearance = { scale = 1, opacity = 0.92, windowOpacity = 0.92, hudOpacity = 0.80,
         chatOpacity = 0.82, chatActiveOpacity = 0.90, motion = true, reduceMotion = false,
         accent = "pearl", tooltipQuality = true },
-    modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
+    modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = true, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
         clickCast = {}, auraFilter = "all", takeoverUnitFrames = true,
         -- One clock by default. The bottom strip owns it; the minimap panel is

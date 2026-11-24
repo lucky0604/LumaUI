@@ -82,6 +82,25 @@ local function sync()
     end
 end
 
+-- The bars stay on screen at alpha 0; a separate backing would otherwise hang
+-- behind buttons that are visually gone. Reading the bar component's published
+-- fade keeps one driver and leaves the panels opaque when the bars component is
+-- off (the native bars are then fully visible and still need their backing).
+local function barAlpha()
+    local bars = app.components.actionBars
+    if bars and bars.running then
+        local alpha = app.Capabilities.Plain(bars.alpha, "number")
+        if alpha then return math.max(0, math.min(1, alpha)) end
+    end
+    return 1
+end
+
+local function applyAlpha(self)
+    local alpha = barAlpha()
+    self.panelAlpha = alpha
+    for _, panel in pairs(self.panels or {}) do pcall(panel.SetAlpha, panel, alpha) end
+end
+
 -- Creation and painting are separate: a panel that already exists must still
 -- follow profile, theme and opacity changes, so refresh never skips a cached
 -- panel. Anchoring to the bar keeps movement and Edit Mode scaling native.
@@ -154,6 +173,7 @@ refresh = function(self)
     end
     self.activeBars = active
     self.skippedBars = skipped
+    applyAlpha(self)
 end
 
 component = app:RegisterComponent({ id = "actionPanel", label = "actionPanel", defaultEnabled = false,
@@ -161,6 +181,9 @@ component = app:RegisterComponent({ id = "actionPanel", label = "actionPanel", d
     Enable = function(self)
         self.panels = self.panels or {}
         self:Listen("EDIT_MODE_LAYOUTS_UPDATED", function() app.Queue:Run(JOB, sync) end)
+        app:Subscribe(self, "ACTION_BARS_ALPHA", function()
+            if self.running then applyAlpha(self) end
+        end)
         app.Queue:Run(JOB, sync)
     end,
     Refresh = function(self)
@@ -210,6 +233,14 @@ local function reportLine(entry)
     local shown = false
     local okShown, visible = pcall(frame.IsVisible or frame.IsShown, frame)
     shown = okShown and visible == true
+    -- Alpha 0 still reports IsShown; the fade leaves the bars hit-testable and
+    -- only the report's alpha column tells a faded bar from a visible one.
+    local alphaText = "?"
+    if type(frame.GetAlpha) == "function" then
+        local okAlpha, alpha = pcall(frame.GetAlpha, frame)
+        alpha = okAlpha and app.Capabilities.Plain(alpha, "number") or nil
+        if alpha then alphaText = string.format("%.2f", alpha) end
+    end
     -- GetRect returns scaled screen coordinates already (left, bottom, width,
     -- height); they are plain numbers, so formatting them is safe. A client
     -- that reports no rect keeps the "?" placeholder instead of guessing.
@@ -232,7 +263,8 @@ local function reportLine(entry)
             if okButton and shownButton then count = count + 1 end
         end
     end
-    local line = string.format("  %-18s shown=%s %s default=%s buttons=%d", entry.name, yes(shown), place, atDefault, count)
+    local line = string.format("  %-18s shown=%s alpha=%s %s default=%s buttons=%d",
+        entry.name, yes(shown), alphaText, place, atDefault, count)
     -- Two visible bars at the same top-left corner are stacked on each other;
     -- naming the overlap turns "the screen is messy" into "these two bars".
     if left and bottom and shown then

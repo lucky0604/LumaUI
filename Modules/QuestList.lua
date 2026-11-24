@@ -9,8 +9,13 @@ local MAX_ROWS = 250
 local MAX_TEXT_LINES = 12
 local TASK_TICK = 30
 local NATIVE_JOB = "questList/native"
--- Module APIs do not establish complete quest-tracker parity on their own.
-local NATIVE_PARITY_VALIDATED = false
+-- The native takeover removes only the quest modules; scenario/dungeon and any
+-- other module stay with the client. It was gated while the panel was a preview.
+-- 003 turns it on by product decision: the LumaUI panel replaces the Blizzard
+-- quest block, with folding, quest items and world quests still needing their
+-- own in-game regression. Set this back to false to hand quests back to the
+-- native tracker without disabling the panel.
+local NATIVE_PARITY_VALIDATED = true
 local ITEM_JOB = "questList/items"
 local BANNER_HEIGHT = 20
 local component
@@ -28,9 +33,9 @@ local ICONS = {
 -- separate files for every quest classification, so use the shared atlas.
 local ACTIVE_ATLAS = "SideInProgressquesticon"
 
--- Quest panel preview: grouping, folding and tracking are independent of the
--- native tracker. All native objective modules remain under client control
--- until the preview has passed feature-parity and in-game validation.
+-- Quest panel: grouping, folding and tracking are independent of the native
+-- tracker. The takeover below replaces only the quest modules; scenario,
+-- dungeon, achievement and other objectives remain under client control.
 
 local function callQuest(name, ...)
     local log = _G.C_QuestLog
@@ -756,7 +761,7 @@ refresh = function(self)
         local offset = self.scroll.GetVerticalScroll and self.scroll:GetVerticalScroll() or 0
         if offset > overflow then self.scroll:SetVerticalScroll(overflow) end
     end
-    -- Track whether the preview contains quest rows for diagnostics.
+    -- Track whether the panel contains quest rows for diagnostics and takeover.
     self.hasContent = data.quests > 0
     requestSync(self)
     scheduleOverlap(self)
@@ -1231,12 +1236,14 @@ local function checkOverlap(self)
             self.overlapHidden = true
             if entry then entry.allowHiddenMove = true end
             self.frame:Hide()
+            requestSync(self)
             app:Print(L.questOverlapHidden)
         end
     elseif self.overlapHidden then
         self.overlapHidden = nil
         if entry then entry.allowHiddenMove = nil end
         self.frame:Show()
+        requestSync(self)
     end
 end
 
@@ -1263,8 +1270,8 @@ scheduleOverlap = function(self)
 end
 
 
--- The dormant takeover path targets individual quest modules, never the whole
--- tracker. It remains gated pending complete feature and in-game validation.
+-- The takeover targets individual quest modules, never the whole tracker: a
+-- client without module-level control keeps its own objectives.
 local NATIVE_MODULES = { "CampaignQuestObjectiveTracker", "QuestObjectiveTracker", "WorldQuestObjectiveTracker" }
 
 local function nativeContainer()
@@ -1389,20 +1396,27 @@ showNative = function(self)
     end
 end
 
--- Content decides the takeover. In combat the decision is queued, because a
--- client that treats the tracker as protected must not be touched mid-fight.
+-- Content decides the takeover, but a panel that yielded to the native tracker
+-- for overlap no longer replaces anything: the quest modules must come back so
+-- the player never loses both displays at once.
+local function wantsNative(self)
+    return NATIVE_PARITY_VALIDATED and self.hasContent == true and not self.overlapHidden
+end
+
+-- In combat the decision is queued, because a client that treats the tracker as
+-- protected must not be touched mid-fight.
 local function syncNative(self)
     if not self.running then return end
     if self.nativeRemoved and not self.nativeHidden then
         showNative(self)
         if self.nativeRemoved then return end
     end
-    if NATIVE_PARITY_VALIDATED and self.hasContent == true then hideNative(self) else showNative(self) end
+    if wantsNative(self) then hideNative(self) else showNative(self) end
 end
 
 requestSync = function(self)
     self.hasContent = self.hasContent == true
-    local wantHidden = NATIVE_PARITY_VALIDATED and self.hasContent == true
+    local wantHidden = wantsNative(self)
     -- Nothing to do when the recorded state already matches: this keeps routine
     -- quest log refreshes (including combat ones) out of the combat queue.
     if not (self.nativeRemoved and not self.nativeHidden)

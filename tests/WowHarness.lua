@@ -259,6 +259,10 @@ end
 function H.Advance(seconds)
     seconds = tonumber(seconds) or 0
     if seconds <= 0 then return end
+    -- Advancing the clock is part of advancing time: caches keyed on GetTime
+    -- (the shared performance sample, cast and aura remainders) must expire
+    -- exactly as they would in the client.
+    H.now = (H.now or 0) + seconds
     local groups = {}
     for i, group in ipairs(H.groups or {}) do groups[i] = group end
     for _, group in ipairs(groups) do
@@ -367,6 +371,10 @@ function H.Load(saved)
     end
     _G.UIParent = H.NewFrame("UIParent")
     UIParent.width, UIParent.height = 1920, 1080
+    -- The client's own experience/reputation bar. It starts shown like a fresh
+    -- login so the replacement's takeover and release can be observed.
+    _G.MainStatusTrackingBarContainer = H.NewFrame("MainStatusTrackingBarContainer", UIParent)
+    MainStatusTrackingBarContainer:Show()
     _G.MinimapCluster = H.NewFrame("MinimapCluster", UIParent)
     _G.Minimap = H.NewFrame("Minimap", MinimapCluster)
     Minimap.width, Minimap.height = 198, 198
@@ -377,14 +385,26 @@ function H.Load(saved)
     local borderRegions = { H.NewFrame(nil, MinimapCluster.BorderTop), H.NewFrame(nil, MinimapCluster.BorderTop) }
     MinimapCluster.BorderTop.GetRegions = function() return borderRegions[1], borderRegions[2] end
     MinimapCluster.MinimapContainer = { PlayerCoords = H.NewFrame(nil, MinimapCluster) }
+    -- A new session starts without the bars a previous test created. Leaving
+    -- those globals behind made the shared central geometry read another test's
+    -- bar sizes instead of this scene's.
+    _G.MultiBarBottomLeft, _G.MultiBarBottomRight = nil, nil
+    _G.MultiBarRight, _G.MultiBarLeft = nil, nil
+    _G.MultiBar5, _G.MultiBar6, _G.MultiBar7 = nil, nil
+    _G.PetActionBar, _G.StanceBar = nil, nil
     _G.MainActionBar = H.NewFrame("MainActionBar", UIParent)
+    -- A real main bar spans twelve buttons; the shared central geometry reads
+    -- this size, so the fixture gives it the same measured shape.
+    MainActionBar.width, MainActionBar.height = 524, 40
     MainActionBar.actionButtons = {}
     -- The client's Cooldown Manager viewers exist on the supported builds; the
-    -- placement component only moves them.
-    _G.EssentialCooldownViewer = H.NewFrame("EssentialCooldownViewer", UIParent)
-    _G.UtilityCooldownViewer = H.NewFrame("UtilityCooldownViewer", UIParent)
-    _G.BuffIconCooldownViewer = H.NewFrame("BuffIconCooldownViewer", UIParent)
-    _G.BuffBarCooldownViewer = H.NewFrame("BuffBarCooldownViewer", UIParent)
+    -- placement component only moves them. The 300-wide block matches the
+    -- mockup's visible icon stack, which now also sets the unit-frame boundary.
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer",
+        "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
+        local viewer = H.NewFrame(name, UIParent)
+        viewer:SetWidth(300)
+    end
     MainActionBar.BorderArt = H.NewFrame("MainActionBarBorderArt", MainActionBar)
     local endCaps = H.NewFrame("MainActionBarEndCaps", MainActionBar)
     endCaps.LeftEndCap = H.NewFrame("MainActionBarLeftEndCap", endCaps)

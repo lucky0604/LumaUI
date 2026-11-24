@@ -195,15 +195,11 @@ end
 -- can never disagree about what LumaUI knows.
 
 function Reports:AddPerformance(tooltip)
-    local fps = plain(type(GetFramerate) == "function" and GetFramerate() or nil, "number")
+    local fps, home, world = app.Capabilities.Performance()
     if fps then addLine(tooltip, string.format("%s:  %d", app.L.networkFps, math.floor(fps + 0.5))) end
-    if type(GetNetStats) == "function" then
-        local ok, _, _, home, world = pcall(GetNetStats)
-        home, world = ok and plain(home, "number") or nil, ok and plain(world, "number") or nil
-        if home and world then
-            addLine(tooltip, string.format("%s:  %d %s", app.L.networkHome, home, app.L.latency))
-            addLine(tooltip, string.format("%s:  %d %s", app.L.networkWorld, world, app.L.latency))
-        end
+    if home and world then
+        addLine(tooltip, string.format("%s:  %d %s", app.L.networkHome, home, app.L.latency))
+        addLine(tooltip, string.format("%s:  %d %s", app.L.networkWorld, world, app.L.latency))
     end
 end
 

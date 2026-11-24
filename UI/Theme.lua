@@ -66,6 +66,10 @@ Theme.units = {
     width = 200, nameSize = 11, health = 18, power = 3,
     cast = 12, aura = 16, auraStep = 18,
     nameRow = 15, healthGap = 1, powerGap = 2, castGap = 4, auraGap = 4,
+    -- Pet, target-of-target and focus use the same draw path at a smaller,
+    -- lighter size; their narrower labels keep the name and percent apart.
+    minorWidth = 100, minorNameRow = 13, minorHealth = 12, minorPower = 2,
+    minorPowerGap = 1, minorNameSize = 10,
 }
 Theme.party = {
     width = 190, height = 30, gap = 3, icon = 22,

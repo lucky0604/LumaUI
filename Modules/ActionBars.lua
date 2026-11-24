@@ -13,7 +13,7 @@ local BARS = {
     { key = "bar3", frame = "MultiBarBottomRight", prefix = "MultiBarBottomRightButton" },
 }
 local HIDDEN = { "MultiBarRight", "MultiBarLeft", "MultiBar5", "MultiBar6", "MultiBar7" }
-local BOTTOM, GAP = 56, 4
+local GAP = 4
 local FADE_STEP, HIDE_DELAY, HOVER_PAD = 0.05, 0.9, 22
 local LAYOUT_JOB, RESTORE_JOB = "actionBars/layout", "actionBars/restore"
 
@@ -225,6 +225,13 @@ local function skinButtons(self)
     self.sampleOwned = false
 end
 
+local function publishAlpha(self)
+    local alpha = self.alpha or 0
+    if self.publishedAlpha == alpha then return end
+    self.publishedAlpha = alpha
+    app:Publish("ACTION_BARS_ALPHA", alpha)
+end
+
 local function layout(self)
     if inCombat() then return false end
     local parkFrame = parked()
@@ -236,26 +243,40 @@ local function layout(self)
         end
     end
 
-    local previous
-    for index, def in ipairs(BARS) do
-        local bar, buttons = buttonsOf(def)
+    -- Normalise scale before measuring: the shared geometry must describe the
+    -- bars as LumaUI leaves them, not their previous Edit Mode scale.
+    for _, def in ipairs(BARS) do
+        local bar = named(def.frame)
         if bar then
             recordBar(bar)
             pcall(bar.SetScale, bar, 1)
             pcall(bar.Show, bar)
+            self.bars[def.key] = bar
+        end
+    end
+    local central = app.Layout:Central()
+    self.geometry = central
+    local bottom = central.action.bottom
+    local gap = central.action.gap or GAP
+
+    local previous
+    for _, def in ipairs(BARS) do
+        local bar, buttons = buttonsOf(def)
+        if bar then
             pcall(bar.ClearAllPoints, bar)
             if not previous then
-                pcall(bar.SetPoint, bar, "BOTTOM", UIParent, "BOTTOM", 0, BOTTOM)
+                pcall(bar.SetPoint, bar, "BOTTOM", UIParent, "BOTTOM", 0, bottom)
             else
-                pcall(bar.SetPoint, bar, "BOTTOM", previous, "TOP", 0, GAP)
+                pcall(bar.SetPoint, bar, "BOTTOM", previous, "TOP", 0, gap)
             end
             pcall(bar.SetAlpha, bar, self.alpha or 0)
-            self.bars[def.key] = bar
             previous = bar
             for _, button in ipairs(buttons) do styleCooldown(self, button) end
         end
     end
     skinButtons(self)
+    self.pending = nil
+    publishAlpha(self)
     return true
 end
 
@@ -269,7 +290,10 @@ end
 local function apply(self)
     if not layout(self) then
         self.pending = true
-        app.Queue:Run(LAYOUT_JOB, function() layout(self) end)
+        app.Queue:Run(LAYOUT_JOB, function()
+            if not self.running then return end
+            layout(self)
+        end)
     end
 end
 
@@ -307,8 +331,48 @@ local function editModeOpen()
     return ok and not app.Capabilities.IsSecret(shown) and shown == true
 end
 
+-- The hover area is the measured action rectangle, not each bar's own hit box:
+-- a fade at alpha 0 keeps hit testing, but an explicit rectangle keeps the
+-- reveal limited to the reserved area and away from the bottom strip (zero
+-- bottom padding). Returns nil when the client exposes no cursor readback so
+-- the caller can fall back to the native mouse predicates.
+local function cursorInside(geometry)
+    if not geometry or not geometry.action then return nil end
+    if type(GetCursorPosition) ~= "function" or type(UIParent.GetCenter) ~= "function" then return nil end
+    local okPos, rawX, rawY = pcall(GetCursorPosition)
+    local okCenter, rawCX, rawCY = pcall(UIParent.GetCenter, UIParent)
+    local okScale, rawScale = pcall(UIParent.GetEffectiveScale, UIParent)
+    local x = okPos and app.Capabilities.Plain(rawX, "number") or nil
+    local y = okPos and app.Capabilities.Plain(rawY, "number") or nil
+    local cx = okCenter and app.Capabilities.Plain(rawCX, "number") or nil
+    local cy = okCenter and app.Capabilities.Plain(rawCY, "number") or nil
+    local scale = okScale and app.Capabilities.Plain(rawScale, "number") or nil
+    if not x or not y or not cx or not cy or not scale or scale <= 0 then return nil end
+    -- GetCursorPosition is in physical pixels; GetCenter already reports in
+    -- UIParent units, so only the cursor is divided by the effective scale.
+    local dx, dy = x / scale - cx, y / scale - cy
+    local half = geometry.action.width / 2 + HOVER_PAD
+    return dx >= -half and dx <= half
+        and dy >= geometry.action.bottomY and dy <= geometry.action.topY + HOVER_PAD
+end
+
+-- Chat sits in front of part of the action area on narrow screens. Excluding a
+-- focused ChatFrame (or one of its children) keeps typing from summoning the
+-- bars; other overlapping windows need their own evidence and follow-up.
+local function chatFocused()
+    if type(GetMouseFocus) ~= "function" then return false end
+    local ok, focus = pcall(GetMouseFocus)
+    if not ok or not object(focus) then return false end
+    local name = type(focus.GetName) == "function" and select(2, pcall(focus.GetName, focus)) or nil
+    name = app.Capabilities.Plain(name, "string")
+    return name ~= nil and name:find("^ChatFrame") ~= nil
+end
+
 local function isOver(self)
     if editModeOpen() then return true end
+    if chatFocused() then return false end
+    local inside = cursorInside(self.geometry)
+    if inside ~= nil then return inside end
     for _, bar in pairs(self.bars) do
         if mouseOver(bar) then return true end
     end
@@ -331,6 +395,7 @@ local function step(self)
         if math.abs(self.target - alpha) < 0.02 then alpha = self.target end
         self.alpha = alpha
         for _, bar in pairs(self.bars) do pcall(bar.SetAlpha, bar, alpha) end
+        publishAlpha(self)
     end
 end
 
@@ -379,6 +444,8 @@ app:RegisterComponent({
         self.target = 0
         self.lastOver = 0
         self.pending = nil
+        self.geometry = nil
+        self.publishedAlpha = nil
         self.ticking = true
         apply(self)
         if type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
@@ -407,6 +474,11 @@ app:RegisterComponent({
                 apply(self)
             end
         end)
+        -- The bottom strip owns the reserved baseline. Re-layout when it moves
+        -- instead of keeping a private copy of the old bottom offset.
+        app:Subscribe(self, "LAYOUT_CENTRAL_CHANGED", function()
+            if self.running then apply(self) end
+        end)
     end,
     Refresh = function(self) apply(self) end,
     Disable = function(self)
@@ -416,8 +488,16 @@ app:RegisterComponent({
             self.ticker = nil
         end
         for _, bar in pairs(self.bars or {}) do pcall(bar.SetAlpha, bar, 1) end
+        -- The backing panels follow this published value; returning to 1 here
+        -- keeps them useful if only the bars are switched off.
+        self.alpha = 1
+        publishAlpha(self)
+        self.geometry = nil
         if inCombat() then
-            app.Queue:Run(RESTORE_JOB, function() restoreAll(self) end)
+            app.Queue:Run(RESTORE_JOB, function()
+                if self.running then return end
+                restoreAll(self)
+            end)
         else
             restoreAll(self)
         end

@@ -57,6 +57,9 @@ local component = app:RegisterComponent({
 | `app.Layout:SetEntryDefault(id, x, y)` / `SetGroupSize(id, w, h)` | 更新默认中心或组尺寸；不要直接写 `Layout.entries` |
 | `app.Layout:RegisterPlaceholder(id, label, x, y, width, height)` | 预留第三方区域：只在布局编辑时显示轮廓，不接管任何外部框体 |
 | `app.Layout:PreviewPreset(name)` / `ApplyPreset(name)` / `CancelPresetPreview()` / `UndoPreset()` | 16:9 预设：预览只画轮廓；应用显式写入当前方案并保存快照；撤销恢复快照 |
+| `app.Layout:Central()` / `CentralRows(entries)` / `CentralOffset(id, side)` | 只读共享中央几何：动作区宽高、冷却行、`content`（可见冷却块宽度及左右单位边界）、`units` 和主行；纵向 `bottom/top` 为距屏幕底部的 UIParent 单位，`bottomY/rowTopY` 为布局中心坐标。`CentralRows` 用最宽可见行更新 `content`，调用方在放置完成后发布 `LAYOUT_CENTRAL_CHANGED` |
+| `app.Layout:ContentWidth()` / `SetContentWidth(width)` | 单位框所贴的可见冷却块宽度（UIParent 单位）；未测到时回退 300。`SetContentWidth` 变化时发布 `LAYOUT_CENTRAL_CHANGED`，`nil` 恢复回退值 |
+| `app.Layout:ActionAreaBottom()` / `SetActionAreaBottom(bottom)` | 底部动作区基线（距屏幕底部）。改变后发布 `LAYOUT_CENTRAL_CHANGED`；订阅方应在非战斗时重排，不要在这里直接写受保护框体 |
 
 统一外观从 `app.Theme` 获取，只有自己的窗口可使用 `app.Transitions`。动画只作用于自有表现对象，生命、资源、冷却等战斗信息应立即显示。
 
@@ -107,4 +110,4 @@ local component = app:RegisterComponent({
 
 先做公开能力探测和普通数据模型，再做安全框体初始化、战斗事件绘制和非战斗配置队列。单位交互使用安全模板及状态驱动；不能在事件里用普通 Lua 改受保护属性。私有光环只交给客户端锚点绘制，不读取其内容。接管原生单位、队伍或光环框体前，必须完成对等能力和私有光环验收。
 
-`PROFILE_CHANGED` 表示配置意图更新；若发生在战斗中，实际框体可能尚未变化。`RUNTIME_UPDATED` 表示本轮协调完成。不要在这两个回调里无条件再次调用 `Reconcile`，以免形成循环。
+`PROFILE_CHANGED` 表示配置意图更新；若发生在战斗中，实际框体可能尚未变化。`RUNTIME_UPDATED` 表示本轮协调完成。`LAYOUT_CENTRAL_CHANGED` 表示动作区基线被 `SetActionAreaBottom` 更新，或可见冷却块宽度被 `CentralRows`/`SetContentWidth` 更新；订阅方应重新读取 `Layout:Central()` 并在非战斗时改锚。不要在这些回调里无条件再次调用 `Reconcile`，以免形成循环。

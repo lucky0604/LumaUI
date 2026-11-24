@@ -32,6 +32,7 @@ Modules\QuestList.lua
 Modules\Reports.lua
 Modules\DataStrip.lua
 Modules\Experience.lua
+Modules\TopPerformance.lua
 Modules\Chat.lua
 Modules\ChatTabs.lua
 Modules\Tooltip.lua
