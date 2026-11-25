@@ -2,7 +2,11 @@ local _, app = ...
 local L, Plain = app.L, app.Capabilities.Plain
 local Items = app.Items
 local PAGE_SIZE, COLUMNS = 60, 12
-local module
+-- The component spec is registered at the bottom of this file, and the
+-- container-takeover methods are defined before it: they are collected here and
+-- copied onto the spec right after registration.
+local methods = {}
+local module = methods
 
 local function sortAvailable()
     return type(C_Container) == "table" and type(C_Container.SortBags) == "function"
@@ -149,13 +153,13 @@ local function build(self)
         -- clicks, not automated actions.
         button:SetScript("OnClick", function(self2, mouseButton)
             local item = self2.item
-            if not item then return end
+            if not item or self.closing then return end
             if IsModifiedClick and IsModifiedClick("CHATLINK") then Items.Link(item); return end
             if mouseButton == "LeftButton" and IsControlKeyDown and IsControlKeyDown() then openSplit(item); return end
             if mouseButton == "RightButton" then Items.Use(item) else Items.Pickup(item) end
         end)
-        button:SetScript("OnDragStart", function(self2) Items.Pickup(self2.item) end)
-        button:SetScript("OnReceiveDrag", function(self2) Items.Pickup(self2.item) end)
+        button:SetScript("OnDragStart", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
+        button:SetScript("OnReceiveDrag", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
     end
     Items.Pager(frame, self, { "BOTTOMLEFT", 22, 58 }, 62, function() redraw(self) end)
     self.summary = app.Theme:Text(frame, 12, true)
@@ -173,8 +177,146 @@ local function build(self)
     hint:SetText(L.bagHint)
     -- Only the window container animates in; the 60 cells are plain children
     -- and never get a per-item fade, so a large grid opens in one step.
-    frame:SetScript("OnShow", function() refresh(self); app.Transitions:Reveal(frame) end)
+    frame:SetScript("OnShow", function()
+        self.closing = false
+        refresh(self)
+        app.Transitions:Reveal(frame)
+    end)
+    -- Any hide (Esc, button, component off) is a final state: the close fade
+    -- is dropped and the frame is left opaque and hittable for the next open.
+    frame:SetScript("OnHide", function()
+        self.closing = false
+        app.Transitions:Cancel(frame)
+        frame:SetAlpha(1)
+        frame:EnableMouse(true)
+    end)
     app.Layout:Register("inventory", frame, UIParent:GetWidth() / 2 - 310, -45, L.inventory)
+end
+
+--------------------------------------------------------------------
+-- Container takeover (014 phase 01)
+--------------------------------------------------------------------
+-- The bag key, the bag bar and "open all bags" are the client's own globals.
+-- Each is wrapped, never replaced in spirit: the wrapper calls the original and
+-- then decides what the player sees. The rule is deliberately narrow — LumaUI
+-- only takes over the client's containers. When another bag addon's frames open
+-- (the client's own frames never appear), nothing of ours is drawn on top, so
+-- two browsers cannot stack. Every wrapper is inert while the profile switch is
+-- off, and the originals are put back when it is turned off or the module stops.
+local ENTRY_TOGGLES = { "ToggleBackpack", "ToggleAllBags", "ToggleBag" }
+local ENTRY_OPENS = { "OpenAllBags" }
+local ENTRY_CLOSES = { "CloseAllBags" }
+
+local function nativeBagFrames()
+    local frames = {}
+    local combined = rawget(_G, "ContainerFrameCombinedBags")
+    if combined then frames[#frames + 1] = combined end
+    local count = Plain(rawget(_G, "NUM_CONTAINER_FRAMES"), "number") or 0
+    for index = 1, count do
+        local frame = rawget(_G, "ContainerFrame" .. index)
+        if frame then frames[#frames + 1] = frame end
+    end
+    return frames
+end
+
+local function anyNativeBagOpen()
+    if type(rawget(_G, "IsAnyBagOpen")) == "function" then
+        local ok, open = pcall(_G.IsAnyBagOpen)
+        if ok and Plain(open, "boolean") == true then return true end
+    end
+    for _, frame in ipairs(nativeBagFrames()) do
+        local ok, shown = pcall(frame.IsShown, frame)
+        if ok and shown == true then return true end
+    end
+    return false
+end
+
+local function hideNativeBags()
+    local hidden = 0
+    for _, frame in ipairs(nativeBagFrames()) do
+        local ok, shown = pcall(frame.IsShown, frame)
+        if ok and shown == true then
+            if pcall(frame.Hide, frame) then hidden = hidden + 1 end
+        end
+    end
+    return hidden
+end
+
+-- The client's own container window opened: hand it over. Another addon's
+-- window opening on its own frames reaches neither branch and is left alone.
+function module:AfterClientOpen()
+    if not self.takeover or not self.running then return end
+    if not anyNativeBagOpen() then return end
+    hideNativeBags()
+    self:SetOpen(true)
+end
+
+function module:AfterClientClose()
+    if not self.takeover or not self.running then return end
+    if self.frame and self.frame:IsShown() then self:SetOpen(false) end
+end
+
+function module:TakeoverWanted()
+    return self.running == true and app.Store:Profile().ui.containerTakeover == true
+end
+
+function module:InstallTakeover()
+    if self.entryWrappers then return true end
+    local self_ = self
+    local installed = {}
+    local function wrap(name, before, after)
+        local original = rawget(_G, name)
+        if type(original) ~= "function" then return end
+        local wrapper = function(...)
+            if before and self_:BeforeClientToggle() then return end
+            original(...)
+            if after then app:Call("inventory/entry", self_[after], self_) end
+        end
+        rawset(_G, name, wrapper)
+        installed[#installed + 1] = { name = name, original = original, wrapper = wrapper }
+    end
+    for _, name in ipairs(ENTRY_TOGGLES) do wrap(name, true, "AfterClientOpen") end
+    for _, name in ipairs(ENTRY_OPENS) do wrap(name, false, "AfterClientOpen") end
+    for _, name in ipairs(ENTRY_CLOSES) do wrap(name, false, "AfterClientClose") end
+    if #installed == 0 then return false end
+    self.entryWrappers = installed
+    return true
+end
+
+function module:RemoveTakeover()
+    for _, entry in ipairs(self.entryWrappers or {}) do
+        -- Only put an original back while our wrapper is still the function in
+        -- place: a bag addon that loaded later owns it now, and restoring over
+        -- that would silently disable it.
+        if rawget(_G, entry.name) == entry.wrapper then rawset(_G, entry.name, entry.original) end
+    end
+    self.entryWrappers = nil
+end
+
+-- A toggle whose window is already open is the player closing it; the client's
+-- own container stays closed instead of being opened and hidden in one frame.
+function module:BeforeClientToggle()
+    if not self.takeover or not self.running then return false end
+    local frame = self.frame
+    if frame and frame:IsShown() then
+        self:SetOpen(false)
+        return true
+    end
+    return false
+end
+
+-- One entry point for the profile switch and the module lifecycle.
+function module:ApplyTakeover()
+    local wanted = self:TakeoverWanted()
+    if wanted and not self.entryWrappers then self:InstallTakeover() end
+    if not wanted and self.entryWrappers then self:RemoveTakeover() end
+    self.takeover = wanted
+    if app.Ownership then
+        app.Ownership:Set("inventory.entry", wanted
+            and { intent = "owned", active = "owned", evidence = "simulated" }
+            or { intent = "owned", active = "native", evidence = "simulated", reason = "option-off" })
+    end
+    return wanted
 end
 
 module = app:RegisterComponent({ id = "inventory", label = "inventory",
@@ -183,13 +325,19 @@ module = app:RegisterComponent({ id = "inventory", label = "inventory",
         if not self.frame then build(self) end
         self:Listen("BAG_UPDATE_DELAYED", refresh)
         self:Listen("ITEM_DATA_LOAD_RESULT", refresh)
+        self:ApplyTakeover()
     end,
     Refresh = function(self)
         app.Surface:Plate(self.frame, "card")
         paintFilters(self)
         refresh(self)
+        -- The profile switch lives in the same Refresh as the theme: turning it
+        -- on or off applies on the next reconcile, without a reload.
+        self:ApplyTakeover()
     end,
     Disable = function(self)
+        self.takeover = false
+        self:RemoveTakeover()
         if self.frame then
             -- A reveal still in flight is settled before hiding, so the window
             -- never comes back at a half faded alpha.
@@ -199,9 +347,72 @@ module = app:RegisterComponent({ id = "inventory", label = "inventory",
     end,
 })
 
+-- Container-takeover methods were defined before registration; the runtime
+-- calls the spec, so they are copied onto it here without touching the
+-- lifecycle callbacks it just declared.
+for key, value in pairs(methods) do
+    if module[key] == nil then module[key] = value end
+end
+
+-- The switch itself: written to the profile so the choice survives a reload.
+-- Turning it off restores the client's entry points and containers at once.
+function module:SetTakeover(wanted)
+    wanted = wanted == true
+    if (app.Store:Profile().ui.containerTakeover == true) == wanted then
+        self:ApplyTakeover()
+        return true
+    end
+    if not app.Store:Set("ui", "containerTakeover", wanted) then
+        app:Print(L.readonly)
+        return false
+    end
+    -- The switch promises the bank window as well, so the bank component is
+    -- switched on with it: a component left off would make the bank silently
+    -- stay native while the bag key changed.
+    if wanted then app.Store:Set("modules", "bank", true) end
+    self:ApplyTakeover()
+    app:Print(wanted and L.containerTakeoverOn or L.containerTakeoverOff)
+    return true
+end
+
+function module:ToggleTakeover()
+    return self:SetTakeover(not (app.Store:Profile().ui.containerTakeover == true))
+end
+
+-- Re-entrant open/close. Opening from a half-closed window continues from the
+-- current alpha; closing clears search focus and hits first, and only the
+-- latest close hides the window. Motion off, combat or a missing fade settle
+-- at once.
+function module:SetOpen(open)
+    local frame = self.frame
+    if not self.running or not frame then return end
+    local Transitions = app.Transitions
+    if open then
+        if frame:IsShown() and self.closing then
+            self.closing = false
+            frame:EnableMouse(true)
+            Transitions:Fade(frame, frame, 1, 0.16, nil, "reveal")
+        elseif not frame:IsShown() then
+            frame:Show()
+        end
+        return
+    end
+    if not frame:IsShown() or self.closing then return end
+    if InCombatLockdown() or not Transitions.MotionEnabled() then frame:Hide(); return end
+    self.closing = true
+    if self.search then self.search:ClearFocus() end
+    frame:EnableMouse(false)
+    Transitions:Cancel(frame, "reveal")
+    local task = Transitions:Fade(frame, frame, 0, 0.11, function()
+        if self.closing then frame:Hide() end
+    end, "reveal")
+    if not task and self.closing then frame:Hide() end
+end
+
 function module:Toggle()
     if not self.running then app:Print(L.inventoryDisabled); return end
-    self.frame:SetShown(not self.frame:IsShown())
+    local frame = self.frame
+    self:SetOpen(not frame:IsShown() or self.closing == true)
 end
 
 -- Diagnostics: what the browser can actually do on this build, not what it

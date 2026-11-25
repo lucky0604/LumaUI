@@ -2,7 +2,10 @@ local _, app = ...
 local L, Plain = app.L, app.Capabilities.Plain
 local Items = app.Items
 local PAGE_SIZE, COLUMNS = 48, 8
-local module
+-- The spec is registered at the bottom; the bank-takeover methods are defined
+-- before it, so they are collected here and copied onto the spec afterwards.
+local methods = {}
+local module = methods
 
 -- Each bank type is probed on its own: whether it can be viewed and whether its
 -- contents may be acted on are separate questions on Retail. The tab bag ids
@@ -147,7 +150,7 @@ local function build(self)
     local title = app.Type:Text(frame, "display")
     title:SetPoint("TOPLEFT", 20, -18)
     title:SetText(L.bankTitle)
-    local close = app.Controls:Button(frame, "×", 28, function() frame:Hide() end)
+    local close = app.Controls:Button(frame, "×", 28, function() self:SetOpen(false) end)
     close:SetPoint("TOPRIGHT", -12, -12)
     Items.Search(frame, self, 462, 26, -56, function() refresh(self) end)
     -- The bank type is a choice, not a title: only viewable banks appear, and a
@@ -175,7 +178,7 @@ local function build(self)
         button:SetPoint("TOPLEFT", 22 + ((i - 1) % COLUMNS) * 44, -156 - math.floor((i - 1) / COLUMNS) * 44)
         button:SetScript("OnClick", function(self2, mouseButton)
             local item = self2.item
-            if not item then return end
+            if not item or self.closing then return end
             if IsModifiedClick and IsModifiedClick("CHATLINK") then Items.Link(item); return end
             if mouseButton == "RightButton" then Items.Use(item) else Items.Pickup(item) end
         end)
@@ -196,7 +199,76 @@ local function build(self)
     if not anchored then frame:SetPoint("CENTER", UIParent, "CENTER", 260, 40) end
     -- Only this window fades in; its cells are plain children, so an 8-column
     -- grid appears in one step instead of 48 staggered fades.
-    frame:SetScript("OnShow", function() refresh(self); app.Transitions:Reveal(frame) end)
+    frame:SetScript("OnShow", function()
+        self.closing = false
+        refresh(self)
+        app.Transitions:Reveal(frame)
+    end)
+    -- Any hide is a final state: opaque and hittable for the next open. When
+    -- this window was the one holding the session open, closing it ends the
+    -- session too, exactly like closing the client's own bank.
+    frame:SetScript("OnHide", function()
+        self.closing = false
+        app.Transitions:Cancel(frame)
+        frame:SetAlpha(1)
+        frame:EnableMouse(true)
+        if module then module:EndSession() end
+    end)
+end
+
+--------------------------------------------------------------------
+-- Native bank takeover (014 phase 01)
+--------------------------------------------------------------------
+-- The client's window owns the bank session: BankFrame:OnHide calls
+-- C_Bank.CloseBankFrame, so hiding it would empty our own browser. The frame
+-- stays shown and is made invisible and unhittable instead, together with its
+-- content panel, so the session keeps running and everything comes back exactly
+-- as recorded when the bank closes or the switch is turned off.
+local function nativeBankFrame()
+    return rawget(_G, "BankFrame")
+end
+
+function module:TakeoverOn()
+    return self.running == true and app.Store:Profile().ui.containerTakeover == true
+end
+
+function module:SuppressNative(active)
+    local frame = nativeBankFrame()
+    if not frame then return false end
+    if active then
+        if not self.nativeBank then
+            local okAlpha, alpha = pcall(frame.GetAlpha, frame)
+            local okMouse, mouse = pcall(frame.IsMouseEnabled, frame)
+            self.nativeBank = {
+                alpha = okAlpha and Plain(alpha, "number") or 1,
+                mouse = okMouse and mouse == true or false,
+                panel = frame.BankPanel,
+            }
+        end
+        pcall(frame.SetAlpha, frame, 0)
+        pcall(frame.EnableMouse, frame, false)
+        local panel = self.nativeBank.panel
+        if panel then pcall(panel.Hide, panel) end
+        return true
+    end
+    if not self.nativeBank then return false end
+    local recorded = self.nativeBank
+    self.nativeBank = nil
+    pcall(frame.SetAlpha, frame, recorded.alpha)
+    pcall(frame.EnableMouse, frame, recorded.mouse)
+    if recorded.panel then pcall(recorded.panel.Show, recorded.panel) end
+    return true
+end
+
+-- Closing our window ends the session, because the client's window is what
+-- holds it. The reverse path (walking away, the client closing it) arrives as
+-- BANKFRAME_CLOSED and only restores what was recorded.
+function module:EndSession()
+    if not self.nativeBank then return end
+    self:SuppressNative(false)
+    if type(C_Bank) == "table" and type(C_Bank.CloseBankFrame) == "function" then
+        pcall(C_Bank.CloseBankFrame)
+    end
 end
 
 module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnabled = false,
@@ -204,13 +276,21 @@ module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnable
     Enable = function(self)
         if not self.frame then build(self) end
         -- The component switch doubles as the open entry: enabling creates the
-        -- browser and shows it. Bank events keep it in sync.
-        self.frame:Show()
+        -- browser and shows it. With the takeover on the client's own window is
+        -- what opens it, so no empty browser sits on screen at login.
+        if not self:TakeoverOn() then self.frame:Show() end
         pcall(self.Listen, self, "BANKFRAME_OPENED", function()
+            if self:TakeoverOn() then self:SuppressNative(true) end
             self.frame:Show()
             refresh(self)
         end)
-        pcall(self.Listen, self, "BANKFRAME_CLOSED", function() self.frame:Hide() end)
+        pcall(self.Listen, self, "BANKFRAME_CLOSED", function()
+            -- Hand the client's frame back first: the hide below runs the close
+            -- path, and that path must not ask the client to close a session
+            -- which the client has already closed.
+            self:SuppressNative(false)
+            self.frame:Hide()
+        end)
         -- Tabs and permission changes redraw while the window is open.
         for _, event in ipairs({ "BAG_UPDATE_DELAYED", "BANK_TABS_CHANGED", "PLAYER_ACCOUNT_BANK_TAB_SLOTS_CHANGED" }) do
             pcall(self.Listen, self, event, function()
@@ -219,12 +299,16 @@ module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnable
         end
     end,
     Refresh = function(self)
+        -- Turning the shared switch off must hand the client's window back even
+        -- when the bank is open and this module was never re-enabled.
+        if not self:TakeoverOn() then self:SuppressNative(false) end
         app.Surface:Plate(self.frame, "card")
         Items.PaintFilters(self)
         sourceChips(self)
         refresh(self)
     end,
     Disable = function(self)
+        self:SuppressNative(false)
         if self.frame then
             app.Transitions:Settle(self.frame)
             self.frame:Hide()
@@ -232,9 +316,43 @@ module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnable
     end,
 })
 
+-- The takeover methods were defined before registration; the runtime calls the
+-- spec, so they are copied onto it without touching its lifecycle callbacks.
+for key, value in pairs(methods) do
+    if module[key] == nil then module[key] = value end
+end
+
+-- Same re-entrant open/close as the bags. The server-side BANKFRAME_CLOSED
+-- hides at once; only the player's own close and toggle fade.
+function module:SetOpen(open)
+    local frame = self.frame
+    if not self.running or not frame then return end
+    local Transitions = app.Transitions
+    if open then
+        if frame:IsShown() and self.closing then
+            self.closing = false
+            frame:EnableMouse(true)
+            Transitions:Fade(frame, frame, 1, 0.16, nil, "reveal")
+        elseif not frame:IsShown() then
+            frame:Show()
+        end
+        return
+    end
+    if not frame:IsShown() or self.closing then return end
+    if InCombatLockdown() or not Transitions.MotionEnabled() then frame:Hide(); return end
+    self.closing = true
+    if self.search then self.search:ClearFocus() end
+    frame:EnableMouse(false)
+    Transitions:Cancel(frame, "reveal")
+    local task = Transitions:Fade(frame, frame, 0, 0.11, function()
+        if self.closing then frame:Hide() end
+    end, "reveal")
+    if not task and self.closing then frame:Hide() end
+end
+
 function module:Toggle()
     if not self.running then app:Print(L.bankHintDisabled); return end
-    self.frame:SetShown(not self.frame:IsShown())
+    self:SetOpen(not self.frame:IsShown() or self.closing == true)
 end
 
 -- Diagnostics: which bank types this build reports viewable, and the tab count

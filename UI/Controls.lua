@@ -41,6 +41,16 @@ local function hoverTo(control, target)
         overlay:SetAlpha(target)
         return
     end
+    -- The wash is a Texture, and a Texture has no animation group: Fade would
+    -- settle at once. The value channel is the one alpha driver that works on
+    -- both a Texture and a Frame, so the hover eases in both directions.
+    if type(overlay.CreateAnimationGroup) ~= "function" then
+        app.Transitions:Animate(control, "hover", {
+            from = overlay:GetAlpha(), to = target, duration = 0.09,
+            apply = function(value) overlay:SetAlpha(value) end,
+        })
+        return
+    end
     app.Transitions:Fade(control, overlay, target, 0.09, nil, "hover")
 end
 
@@ -140,12 +150,27 @@ local function wireState(control)
         self.state.hover = true
         apply(self)
         hoverTo(self, 0.12)
-        -- One shared animation class: a primary control announces the
+        -- One shared animation class: an interactive button announces the
         -- interaction with four growing hairlines on top of the static ring.
-        if app.EdgePulse and (self.pulse or self.kind == "primary") then
+        -- A repeated OnEnter in the same hover does not restart the run. Flat
+        -- rows and navigation entries stay quiet: a list of pulsing rows would
+        -- read as noise, not as feedback.
+        local pulses = self.pulse ~= false
+            and (self.kind == "primary" or (self.kind == "secondary" and not self.flat))
+        if app.EdgePulse and pulses and not app.EdgePulse.active[self] then
             app.EdgePulse:Show(self)
         end
         end)
+    -- Hiding (window closed, page switched) releases the run and the hover
+    -- layer at once, so nothing is left animating on an invisible control.
+    control:SetScript("OnHide", function(self)
+        self.state.hover = false
+        self.state.pressed = false
+        if app.Transitions then app.Transitions:Cancel(self, "hover") end
+        if self.hoverOverlay then self.hoverOverlay:SetAlpha(0) end
+        if app.EdgePulse then app.EdgePulse:Release(self) end
+        apply(self)
+    end)
         control:SetScript("OnLeave", function(self)
         self.state.hover = false
         self.state.pressed = false
@@ -211,6 +236,9 @@ function Controls:Button(parent, text, width, callback, options)
     button.state = newState()
     button.kind = options.kind or "secondary"
     button.flat = options.flat == true
+    -- Carried on the control, not read from the call site: `pulse = false` is the
+    -- documented opt-out and a caller may also set `button.pulse` afterwards.
+    button.pulse = options.pulse
     button.mutedWhenIdle = options.mutedWhenIdle == true
     button.callback = callback
     button.text = app.Theme:Text(button, options.size or 12)
@@ -452,8 +480,14 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     thumb:SetColorTexture(color[1], color[2], color[3])
     slider:SetThumbTexture(thumb)
     local pending
+    -- Percent is only the default because most ranges here are opacities. A
+    -- count or a pixel size must not read "2600%": `options.format` receives the
+    -- snap value and returns the whole label.
+    local formatValue = options.format or function(number)
+        return string.format("%.0f%%", number * 100)
+    end
     local function format(number)
-        value:SetFormattedText("%.0f%%", number * 100)
+        value:SetText(formatValue(number))
     end
     local function commit()
         if pending == nil then return end

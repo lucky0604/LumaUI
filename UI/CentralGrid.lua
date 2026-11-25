@@ -83,6 +83,33 @@ function Grid:Plan(spec)
         if row.width > plan.width then plan.width = row.width end
     end
     plan.height = rowCount * size + (rowCount - 1) * rowGap
+    if spec.vertical == true then Grid:Transpose(plan, size, gap, rowGap) end
+    return plan
+end
+
+-- Turns a row plan into a column plan: every "row" becomes a column of up to
+-- `perRow` icons that grows upward, and each column is centred on the block's
+-- vertical axis, so a short last column is not bottom-aligned. `x` stays a
+-- centre offset from the block axis and `y` from its bottom edge. `capacity`
+-- becomes the block's width, because the anchor sizes the holder from it.
+function Grid:Transpose(plan, size, gap, rowGap)
+    local columns = #plan.rows
+    local tallest = math.min(plan.perRow, plan.count)
+    local height = tallest * size + (tallest - 1) * gap
+    local width = columns * size + (columns - 1) * rowGap
+    for _, slot in ipairs(plan.slots) do
+        local row = plan.rows[slot.row]
+        local columnHeight = row.count * size + (row.count - 1) * gap
+        local slotRow, slotColumn = slot.row, slot.column
+        slot.x = -width / 2 + (slotRow - 1) * (size + rowGap) + size / 2
+        slot.y = (height - columnHeight) / 2 + (slotColumn - 1) * (size + gap) + size / 2
+    end
+    for _, row in ipairs(plan.rows) do
+        row.height = row.count * size + (row.count - 1) * gap
+        row.width, row.left = size, nil
+    end
+    plan.vertical = true
+    plan.width, plan.height, plan.capacity = width, height, width
     return plan
 end
 

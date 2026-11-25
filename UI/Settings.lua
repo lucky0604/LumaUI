@@ -166,6 +166,26 @@ function SettingsUI:BuildGeneral(page)
     end))
     reset:SetPoint("TOPLEFT", 164, y)
     y = y - 44
+    section(body, L.sectionContainers, y)
+    y = y - 22
+    updates[#updates + 1] = settingsControl(page,
+        Controls:Toggle(body, L.containerTakeover, y, function()
+            return app.Store:Profile().ui.containerTakeover == true
+        end, function(v)
+            -- One writer for the switch: it also enables the bank component and
+            -- prints a confirmation, so the checkbox and `/luma bags takeover`
+            -- can never disagree.
+            local inventory = app.components and app.components.inventory
+            if inventory and inventory.running then
+                self:Result(inventory:SetTakeover(v))
+            else
+                self:Result(app.Store:Set("ui", "containerTakeover", v))
+            end
+            self:Update()
+        end, { width = 462 }))
+    y = y - 44
+    page.takeoverHint = note(body, L.containerTakeoverHint, y, 462)
+    y = y - noteHeight(page.takeoverHint, 46)
     page.instructions = note(body, L.instructions, y, 462)
     y = y - noteHeight(page.instructions, 44)
     section(body, L.sectionCompatibility, y)
@@ -363,6 +383,187 @@ function SettingsUI:BuildLayout(page)
                 self:Result(app.Store:Set("ui", "actionBarScales", scales))
             end, { width = 462 })
     end
+    -- Central HUD: the two own cooldown groups. Changes are a session draft,
+    -- previewed at once, written only by Apply and dropped by Cancel.
+    local hudControls = {}
+    local hudHeading = note(body, L.hudEditorHint, 0, 462)
+    local function groupComponent() return app.components and app.components.cooldownGroups end
+    -- The mode switch. Without it the two groups never draw, so the editor would
+    -- offer geometry for a block the player cannot see.
+    local hudOwned = Controls:Toggle(body, L.hudOwned, 0,
+        function()
+            local profile = app.Store:Profile()
+            return profile.ui.cooldownGroups.owned == true
+        end,
+        function(wanted)
+            local component = groupComponent()
+            if component and component.running then self:Result(component:SetOwned(wanted)) end
+            self:Update()
+        end, { width = 462 })
+    -- Tracked buffs are the one Cooldown Manager block LumaUI does not replace,
+    -- so hiding them is a separate switch with its own warning.
+    local hudBuffs = Controls:Toggle(body, L.hudHideBuffs, 0,
+        function()
+            local profile = app.Store:Profile()
+            return profile.ui.cooldownGroups.hideBuffViewers ~= false
+        end,
+        function(wanted)
+            local component = groupComponent()
+            if component and component.running then self:Result(component:SetHideBuffViewers(wanted)) end
+            self:Update()
+        end, { width = 462 })
+    -- Counts and pixels are not percentages: without a formatter the shared
+    -- slider would print an icon size of 26 as "2600%".
+    local function countLabel(number) return string.format("%d", math.floor(number + 0.5)) end
+    -- One editor block per group, including the tracked-buff block: every group
+    -- has its own size, gap, cap and column mode, and its own list rows.
+    local groupTitles = {
+        essential = L.hudGroupEssential, utility = L.hudGroupUtility, buffs = L.hudGroupBuffs,
+    }
+    for _, groupID in ipairs(app.CooldownModel.GROUP_IDS) do
+        local id = groupID
+        local function value(key)
+            local component = groupComponent()
+            return component and component:DraftValue(id, key)
+        end
+        local function stage(key, wanted)
+            local component = groupComponent()
+            if component and component.running then component:SetDraft(id, key, wanted) end
+            self:Update()
+        end
+        local title = groupTitles[id] or id
+        -- Follow mode is a mode switch, not geometry: written at once.
+        local follow = Controls:Toggle(body, title .. " · " .. L.hudFollow, 0,
+            function()
+                local groups = app.CooldownModel:Normalize(app.Store:Profile().ui.cooldownGroups)
+                return ((groups.groups[id] or {}).auto ~= false)
+            end,
+            function(wanted)
+                local component = groupComponent()
+                if component and component.running then self:Result(component:SetFollow(id, wanted)) end
+                self:Update()
+            end, { width = 462 })
+        local vertical = Controls:Toggle(body, title .. " · " .. L.hudVertical, 0,
+            function() return value("vertical") == true end,
+            function(wanted) stage("vertical", wanted) end, { width = 462 })
+        local function range(key, label, low, high)
+            return Controls:Range(body, title .. " · " .. label, 0, low, high, 1,
+                function() return value(key) or low end,
+                function(wanted) stage(key, wanted) end,
+                { width = 462, format = countLabel })
+        end
+        local model = app.CooldownModel
+        hudControls[#hudControls + 1] = { follow = follow, vertical = vertical, id = id,
+            max = range("max", L.hudMax, model.maxRange[1], model.maxRange[2]),
+            size = range("size", L.hudSize, model.sizeRange[1], model.sizeRange[2]),
+            gap = range("gap", L.hudGap, model.gapRange[1], model.gapRange[2]),
+            import = Controls:Button(body, title .. " · " .. L.hudImport, 250, function()
+                local component = groupComponent()
+                if component then self:Result(component:Import(id)) end
+                self:Update()
+            end),
+            empty = note(body, L.hudEmptyGroup, 0, 462),
+            reset = Controls:Button(body, title .. " · " .. L.hudResetPosition, 250, function()
+                local component = groupComponent()
+                if component then component:ResetPosition(id) end
+                self:Update()
+            end) }
+    end
+    -- Spell order: one pooled row per slot with up / down / other-group
+    -- buttons. These write at once through the same Model:Move as `/luma cds
+    -- move`, so a failed move changes nothing.
+    -- One row per storable slot: the model accepts up to `maxEntries`, and an
+    -- editor that stopped at 12 could not reorder or remove the rest.
+    local ORDER_ROWS = app.CooldownModel.maxEntries
+    local orderRows = {}
+    local function orderOf(id)
+        local ui = app.Store:Profile().ui
+        local group = ui and ui.cooldownGroups and ui.cooldownGroups.groups and ui.cooldownGroups.groups[id]
+        return group and group.order or {}
+    end
+    for _, groupID in ipairs(app.CooldownModel.GROUP_IDS) do
+        local id = groupID
+        -- Rows can move a spell to either of the other two groups.
+        local others = {}
+        for _, known in ipairs(app.CooldownModel.GROUP_IDS) do
+            if known ~= id then others[#others + 1] = known end
+        end
+        local other = others[1]
+        for slot = 1, ORDER_ROWS do
+            local rowFrame = CreateFrame("Frame", nil, body)
+            rowFrame:SetSize(462, 26)
+            local label = app.Theme:Text(rowFrame, 12)
+            label:SetPoint("LEFT", 4, 0)
+            label:SetWidth(280)
+            label:SetJustifyH("LEFT")
+            local record = { frame = rowFrame, label = label, group = id, slot = slot }
+            local function act(fn)
+                local component = groupComponent()
+                if component and component.running and not app.Store.readonly and record.spellID then
+                    fn(component, record.spellID)
+                end
+                self:Update()
+            end
+            record.up = Controls:Button(rowFrame, "▲", 30, function()
+                act(function(c, spell) c:MoveSpell(spell, id, record.slot - 1) end)
+            end)
+            record.down = Controls:Button(rowFrame, "▼", 30, function()
+                act(function(c, spell) c:MoveSpell(spell, id, record.slot + 1) end)
+            end)
+            record.swap = Controls:Button(rowFrame, "⇄", 30, function()
+                act(function(c, spell) c:MoveSpell(spell, other) end)
+            end)
+            record.up:SetPoint("RIGHT", rowFrame, "RIGHT", -72, 0)
+            record.down:SetPoint("RIGHT", rowFrame, "RIGHT", -38, 0)
+            record.swap:SetPoint("RIGHT", rowFrame, "RIGHT", -4, 0)
+            -- Mouse drag: drop on any listed row to take its group and slot.
+            rowFrame:EnableMouse(true)
+            rowFrame:RegisterForDrag("LeftButton")
+            rowFrame:SetScript("OnDragStart", function() record.dragging = true; rowFrame:SetAlpha(0.6) end)
+            rowFrame:SetScript("OnDragStop", function()
+                rowFrame:SetAlpha(1)
+                if not record.dragging then return end
+                record.dragging = false
+                local cursor = select(2, GetCursorPosition())
+                local scale = UIParent:GetEffectiveScale()
+                local y = app.Capabilities.Plain(cursor, "number")
+                if y and scale and scale > 0 then self:DropOrderRow(record, y / scale) end
+            end)
+            rowFrame:Hide()
+            orderRows[#orderRows + 1] = record
+        end
+    end
+    -- Finds the listed row under the cursor height and moves the dragged spell
+    -- there. Dropping on itself, outside every row, in combat or read-only
+    -- changes nothing.
+    function self:DropOrderRow(record, y)
+        local component = groupComponent()
+        if not component or not component.running or app.Store.readonly or not record.spellID then return false end
+        for _, target in ipairs(orderRows) do
+            if target ~= record and target.spellID and target.frame:IsShown() then
+                local top, bottom = target.frame:GetTop(), target.frame:GetBottom()
+                top, bottom = app.Capabilities.Plain(top, "number"), app.Capabilities.Plain(bottom, "number")
+                if top and bottom and y <= top and y >= bottom then
+                    local moved = component:MoveSpell(record.spellID, target.group, target.slot)
+                    self:Update()
+                    return moved
+                end
+            end
+        end
+        return false
+    end
+    local hudApply = Controls:Button(body, L.hudApply, 150, function()
+        local component = groupComponent()
+        if component then self:Result(component:ApplyDraft()) end
+        self:Update()
+    end)
+    local hudCancel = Controls:Button(body, L.hudCancel, 150, function()
+        local component = groupComponent()
+        if component then component:CancelDraft() end
+        self:Update()
+    end)
+    self.hudEditor = { heading = hudHeading, owned = hudOwned, buffs = hudBuffs,
+        groups = hudControls, apply = hudApply, cancel = hudCancel, orderRows = orderRows }
     page.Update = function()
         local ids = app.Layout:IDs()
         local rows = self.layoutRows
@@ -415,6 +616,94 @@ function SettingsUI:BuildLayout(page)
                 control:Update()
                 scaleTop = scaleTop - 62
             end
+        end
+        -- Central HUD block below the bar scales.
+        local component = groupComponent()
+        local live = component and component.running == true
+        hudHeading:ClearAllPoints(); hudHeading:SetPoint("TOPLEFT", 0, scaleTop - 4)
+        scaleTop = scaleTop - 4 - noteHeight(hudHeading, 28)
+        hudOwned:SetShown(live)
+        hudOwned:SetEnabled(live and not readonly)
+        if live then
+            hudOwned:ClearAllPoints(); hudOwned:SetPoint("TOPLEFT", 0, scaleTop)
+            hudOwned:Update(component)
+            scaleTop = scaleTop - 38
+        end
+        hudBuffs:SetShown(live)
+        hudBuffs:SetEnabled(live and not readonly)
+        if live then
+            hudBuffs:ClearAllPoints(); hudBuffs:SetPoint("TOPLEFT", 0, scaleTop)
+            hudBuffs:Update(component)
+            scaleTop = scaleTop - 38
+        end
+        for _, group in ipairs(hudControls) do
+            group.follow:SetShown(live)
+            group.follow:SetEnabled(live and not readonly)
+            if live then
+                group.follow:ClearAllPoints(); group.follow:SetPoint("TOPLEFT", 0, scaleTop)
+                group.follow:Update(component)
+                scaleTop = scaleTop - 38
+            end
+            for _, key in ipairs({ "vertical", "max", "size", "gap" }) do
+                local control = group[key]
+                control:SetShown(live)
+                control:SetEnabled(live and not readonly)
+                if live then
+                    control:ClearAllPoints()
+                    control:SetPoint("TOPLEFT", 0, scaleTop)
+                    control:Update()
+                    scaleTop = scaleTop - (key == "vertical" and 38 or 62)
+                end
+            end
+            -- In follow mode the stored list is empty on purpose; the note then
+            -- explains where the spells come from instead of calling the group
+            -- empty.
+            local auto = (app.CooldownModel:Normalize(
+                app.Store:Profile().ui.cooldownGroups).groups[group.id] or {}).auto ~= false
+            local empty = live and (auto or #orderOf(group.id) == 0)
+            group.empty:SetText(auto and L.hudAutoGroup or L.hudEmptyGroup)
+            group.empty:SetShown(empty == true)
+            group.import:SetShown(live)
+            group.import:SetEnabled(live and not readonly)
+            if empty then
+                group.empty:ClearAllPoints(); group.empty:SetPoint("TOPLEFT", 0, scaleTop)
+                scaleTop = scaleTop - noteHeight(group.empty, 20)
+            end
+            if live then
+                group.import:ClearAllPoints(); group.import:SetPoint("TOPLEFT", 0, scaleTop)
+                scaleTop = scaleTop - 38
+            end
+            group.reset:SetShown(live)
+            group.reset:SetEnabled(live and not readonly)
+            if live then
+                group.reset:ClearAllPoints(); group.reset:SetPoint("TOPLEFT", 0, scaleTop)
+                scaleTop = scaleTop - 40
+            end
+        end
+        for _, record in ipairs(orderRows) do
+            local spellID = live and orderOf(record.group)[record.slot] or nil
+            record.spellID = spellID
+            record.frame:SetShown(spellID ~= nil)
+            if spellID then
+                local info = _G.C_Spell and _G.C_Spell.GetSpellInfo and _G.C_Spell.GetSpellInfo(spellID)
+                local name = info and app.Capabilities.Plain(info.name, "string") or nil
+                record.label:SetText(string.format("%s · %s", groupTitles[record.group] or record.group, name or tostring(spellID)))
+                record.up:SetEnabled(not readonly and record.slot > 1)
+                record.down:SetEnabled(not readonly and record.slot < #orderOf(record.group))
+                record.swap:SetEnabled(not readonly)
+                record.frame:ClearAllPoints()
+                record.frame:SetPoint("TOPLEFT", 0, scaleTop)
+                scaleTop = scaleTop - 28
+            end
+        end
+        local pending = live and component:HasDraft()
+        hudApply:SetShown(live); hudCancel:SetShown(live)
+        hudApply:SetEnabled(pending and not readonly)
+        hudCancel:SetEnabled(pending == true)
+        if live then
+            hudApply:ClearAllPoints(); hudApply:SetPoint("TOPLEFT", 0, scaleTop)
+            hudCancel:ClearAllPoints(); hudCancel:SetPoint("TOPLEFT", 164, scaleTop)
+            scaleTop = scaleTop - 40
         end
         body:SetHeight(math.max(420, -scaleTop + 6))
         scroll:UpdateRange()

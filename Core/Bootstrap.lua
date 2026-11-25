@@ -58,7 +58,7 @@ function app:WriteDiagnostics()
         -- dump and a chat report can be compared line by line (010 phase 06).
         local plates = self.components and self.components.nameplates
         if plates and plates.running and type(plates.Diagnose) == "function" then
-            self:Call("dump/nameplates", plates.Diagnose, plates)
+            self:Call("dump/nameplates", plates.Diagnose, plates, 40)
         end
     end)
     store.data.diagnostics = { version = self.version, lines = lines }

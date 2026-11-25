@@ -916,6 +916,28 @@ Layout.presets = {
             unit_targettarget = { 0.17, -0.315 },
         },
     },
+    -- Blood Death Knight starting point: key buffs stay above the skill block
+    -- (their native viewer is not moved), the two own groups form a compact
+    -- two-row block, the cast bar reserves the space below, and the unit pair
+    -- flanks it. Resource and rune rails follow the central block on their own.
+    -- Only the entries listed are written; applying is explicit and undoable.
+    pearlBloodDK = {
+        label = "presetPearlBloodDK",
+        entries = {
+            topInfo = { 0.00, 0.435 },
+            bottomBar = { 0.00, -0.5 },
+            cdGroup_essential = { 0.00, -0.105 },
+            cdGroup_utility = { 0.00, -0.165 },
+            playerCast = { 0.00, -0.26 },
+            party = { -0.355, -0.20 },
+            questList = { 0.345, 0.175 },
+            unit_player = { 0.00, -0.213 },
+            unit_target = { 0.00, -0.213 },
+            unit_focus = { 0.265, 0.05 },
+            unit_pet = { -0.175, -0.275 },
+            unit_targettarget = { 0.175, -0.295 },
+        },
+    },
 }
 Layout.presetOverlays = {}
 -- The player and target main bars flank the measured action area in every
@@ -1190,6 +1212,11 @@ Layout.regions = {
     unitPlayer = { names = { "LumaUIUnit_player" }, owner = "unitFrames", family = "unitPlayer" },
     unitTarget = { names = { "LumaUIUnit_target" }, owner = "unitFrames", family = "unitTarget" },
     questList = { names = { "LumaUIQuestList" }, owner = "questList", family = "questList" },
+    -- The own cooldown groups: a player who drags one onto another region gets
+    -- the overlap line in `/luma hud` instead of a silent stack.
+    cdEssential = { names = { "LumaUICooldownOwn_essential" }, owner = "cooldownGroups", family = "cdEssential" },
+    cdUtility = { names = { "LumaUICooldownOwn_utility" }, owner = "cooldownGroups", family = "cdUtility" },
+    cdBuffs = { names = { "LumaUICooldownOwn_buffs" }, owner = "cooldownGroups", family = "cdBuffs" },
     strip = { names = { "LumaUIDataStrip" }, owner = "dataStrip", family = "strip" },
 }
 
@@ -1386,6 +1413,13 @@ local HUD_SAMPLES = {
     -- report says so instead of counting it as a hidden bar.
     { key = "castArea", owner = "layout", reserved = true,
         names = { "LumaUIPlaceholder_unit_player_cast" } },
+    -- LumaUI's own cooldown group containers and its own cast bar: a group that
+    -- is not enabled has no frame, which the report prints as a missing object
+    -- instead of guessing a position. Two groups sharing one rectangle is the
+    -- 012 defect this line makes visible.
+    { key = "ownGroup", owner = "cooldownGroups", names = {
+        "LumaUICooldownOwn_essential", "LumaUICooldownOwn_utility", "LumaUICooldownOwn_buffs" } },
+    { key = "ownCast", owner = "playerCast", names = { "LumaUIPlayerCast" } },
     { key = "extra", owner = "native", names = { "ExtraActionButton1", "PersonalResourceDisplayFrame" } },
     { key = "resource", owner = "playerResource", names = { "LumaUIPlayerResource" } },
     { key = "unit", owner = "unitFrames", names = { "LumaUIUnit_player", "LumaUIUnit_target" } },

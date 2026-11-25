@@ -14,7 +14,13 @@ local function command(input)
     action = action:lower()
     if action == "edit" then app.Layout:Toggle()
     elseif action == "layout" then app.Settings:Toggle("layout")
-    elseif action == "bags" then app.components.inventory:Toggle()
+    elseif action == "bags" then
+        -- `takeover` is the switch itself; anything else toggles the browser.
+        if rest == "takeover" then
+            app.components.inventory:ToggleTakeover()
+        else
+            app.components.inventory:Toggle()
+        end
     elseif action == "bank" then app.components.bank:Toggle()
     elseif action == "party" then app.components.partyFrames:Diagnose()
     elseif action == "unit" then app.components.unitFrames:Diagnose()

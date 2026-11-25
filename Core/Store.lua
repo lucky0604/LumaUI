@@ -32,6 +32,12 @@ Store.defaults = {
         -- native plate stays the click/position/aura host; `plateCast` remains
         -- opt-in because that row is still awaiting in-game validation.
         plateOwned = true, plateCast = false,
+        -- 013 phase 02: restricted health goes straight into the own StatusBar
+        -- (`plateDirect`), and the client's matching native parts are handed
+        -- over while the own layer draws (`plateNative` = "hide"). "keep" leaves
+        -- every native part visible under the own layer and is the diagnostic
+        -- fallback until each hand-over has live evidence.
+        plateDirect = true, plateNative = "hide",
         -- 012 phase 08: own rune row and player cast bar. The client's runes and
         -- cast bar keep drawing until the own path is explicitly enabled.
         resourceRunes = "native", playerCastOwned = false,
@@ -48,7 +54,15 @@ Store.defaults = {
         -- 012 phase 06: own cooldown groups. Enabled but empty means nothing is
         -- drawn; a group only appears after an explicit import or `/luma cds
         -- add`, so the default screen keeps the client's own viewers.
-        cooldownGroups = { owned = false, groups = {} } },
+        -- 014: the own groups are the display and follow the client's Cooldown
+        -- Manager; an empty profile therefore starts with them on.
+        cooldownGroups = { owned = true, hideBuffViewers = true, groups = {} },
+        -- 014 phase 01: route the client's bag entry points (bag key, bag bar,
+        -- "open all bags" from the bank/mailbox/merchant) and an open bank to
+        -- the LumaUI windows. Off by default: the native containers keep their
+        -- bag bar, equipment slots and profession tabs, and this replacement is
+        -- not equivalent yet.
+        containerTakeover = false },
     positions = {},
 }
 
@@ -117,7 +131,14 @@ function Store:Normalize(input)
     if type(ui.stripCompact) == "boolean" then result.ui.stripCompact = ui.stripCompact end
     if type(ui.plateOwned) == "boolean" then result.ui.plateOwned = ui.plateOwned end
     if type(ui.plateCast) == "boolean" then result.ui.plateCast = ui.plateCast end
+    if type(ui.plateDirect) == "boolean" then result.ui.plateDirect = ui.plateDirect end
+    if ui.plateNative == "keep" then result.ui.plateNative = "keep" end
     if ui.resourceRunes == "owned" then result.ui.resourceRunes = "owned" end
+    -- Container takeover is a single switch for both windows: one profile that
+    -- asked for it must not end up with the bags replaced and the bank native.
+    if type(ui.containerTakeover) == "boolean" then
+        result.ui.containerTakeover = ui.containerTakeover
+    end
     if type(ui.playerCastOwned) == "boolean" then result.ui.playerCastOwned = ui.playerCastOwned end
     -- Cooldown-group shape lives in one model so the store and the renderer
     -- cannot disagree about an icon size, a cap or a spell ID.
@@ -263,6 +284,31 @@ function Store:Open(character)
                 profile.ui.plateOwned = true
             end
             migrations.plateOwnedDefault = true
+        end
+        -- 014: the own cooldown groups became the shipped display, and each group
+        -- follows the client's Cooldown Manager by default. Profiles written
+        -- while the default was "off, empty, manual" carry explicit `false`
+        -- values, so the new default alone never reaches them: enable once, and
+        -- leave every later choice alone.
+        migrations.cooldownGroupsDefault = type(saved.migrations) == "table"
+            and saved.migrations.cooldownGroupsDefault == true
+        if not migrations.cooldownGroupsDefault then
+            for _, profile in pairs(profiles) do
+                if type(profile.ui) ~= "table" then profile.ui = {} end
+                local ui = profile.ui
+                local groups = ui.cooldownGroups
+                if type(groups) ~= "table" then
+                    ui.cooldownGroups = { owned = true, hideBuffViewers = true, groups = {} }
+                else
+                    groups.owned = true
+                    groups.hideBuffViewers = true
+                    for _, id in ipairs({ "essential", "utility", "buffs" }) do
+                        local group = type(groups.groups) == "table" and groups.groups[id]
+                        if type(group) == "table" then group.auto = true end
+                    end
+                end
+            end
+            migrations.cooldownGroupsDefault = true
         end
         self.data = { schema = self.schema, profiles = profiles, characters = {}, migrations = migrations }
         if type(saved.characters) == "table" then

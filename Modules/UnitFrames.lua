@@ -543,7 +543,20 @@ function component:Describe()
     if #missing > 0 then
         text = text .. ", " .. app.L.nativeMissing .. ": " .. table.concat(missing, ",")
     end
-    return text .. " · " .. app.L.nativeAwaitingValidation .. " · " .. app.L.unitCoverage
+    text = text .. " · " .. app.L.nativeAwaitingValidation .. " · " .. app.L.unitCoverage
+    -- What the absorb and prediction strips did on the last draw: plain,
+    -- restricted (the value went straight into the StatusBar), empty or
+    -- unavailable (the client has no such API). Plain words only, no values.
+    local parts = {}
+    for _, unit in ipairs({ "player", "target" }) do
+        local frame = self.frames and self.frames[unit]
+        if frame and (frame.absorbState or frame.predictionState) then
+            parts[#parts + 1] = string.format("%s absorb=%s prediction=%s", unit,
+                tostring(frame.absorbState or "-"), tostring(frame.predictionState or "-"))
+        end
+    end
+    if #parts > 0 then text = text .. " · " .. table.concat(parts, ", ") end
+    return text
 end
 
 -- `/luma unit`: the shared block width and each frame's actual centre, so "the

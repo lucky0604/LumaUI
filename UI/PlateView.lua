@@ -2,30 +2,42 @@ local _, app = ...
 local PlateView = {}
 app.PlateView = PlateView
 
--- LumaUI's own nameplate layer. It is parented to the client's plate unit
--- frame, so world position, stacking, range fading and click selection stay the
--- client's; everything drawn inside is LumaUI's own StatusBar, text and cast
--- row. The layer never enables mouse, so the native plate keeps every click.
+-- LumaUI's own nameplate layer (013 geometry). One production renderer serves
+-- both the live plates and the `/luma style` sample, so what the card shows is
+-- what the world draws.
 --
--- The view is deliberately size-driven by its own configuration instead of the
--- native bar: the whole point of 012 phase 04 is a narrow 116 x 8 track that no
--- longer inherits the client's bar metrics. When a native bar exists it is used
--- only as an anchor and, in takeover mode, as the hit target that stays intact.
+-- The layer is parented to the client's plate unit frame, so world position,
+-- stacking, range fading and click selection stay the client's. It never
+-- enables the mouse. Its size comes only from SPEC below: the native bar is an
+-- anchor point and nothing else, so a client bar that is 525 px wide cannot make
+-- this track wide, and a restricted size is never read.
 --
--- Secret values never reach this file's arithmetic. `SetHealth` refuses a
--- restricted number and reports it, so the caller keeps the native drawing
--- instead of showing a bar that silently lies.
+-- Rows, top to bottom: name (left) and percentage (right) on one text row, a
+-- short gap, the health track, then the optional cast row. A target gets a
+-- slightly larger track and one short warm-white chip on the track's top edge,
+-- never a full frame.
+--
+-- Restricted health is drawn without being read: `DrawUnit` hands the unit's
+-- health and maximum to the layer's own StatusBar, whose SetMinMaxValues /
+-- SetValue accept restricted numbers, and the percentage goes through
+-- UnitHealthPercent into SetFormattedText. Nothing here compares, adds,
+-- formats or stores those values.
 
-local HEALTH_WIDTH, HEALTH_HEIGHT = 116, 8
-local NAME_HEIGHT = 12
-local CAST_HEIGHT = 7
-local CAST_GAP = 2
-local TEXT_INSET = 3
-local TARGET_CHIP = 14
+local SPEC = {
+    width = 112, height = 7,
+    targetWidth = 120, targetHeight = 8,
+    nameHeight = 12, nameGap = 3,
+    valueReserve = 30,
+    cast = 7, castGap = 2,
+    chip = 14,
+    nameColumns = 22,
+}
+PlateView.Spec = SPEC
 
 function PlateView:Metrics()
-    return { width = HEALTH_WIDTH, height = HEALTH_HEIGHT,
-        name = NAME_HEIGHT, cast = CAST_HEIGHT, gap = CAST_GAP }
+    return { width = SPEC.width, height = SPEC.height,
+        targetWidth = SPEC.targetWidth, targetHeight = SPEC.targetHeight,
+        name = SPEC.nameHeight, cast = SPEC.cast, gap = SPEC.castGap }
 end
 
 local function plainNumber(value)
@@ -36,119 +48,101 @@ local function plainText(value)
     return app.Capabilities.Plain(value, "string")
 end
 
-local function applyHealthColor(view, base)
+-- Visible width in "columns": one for ASCII, two for a CJK or other multi-byte
+-- character. A byte count would cut a Chinese name at a third of the room.
+local function clip(text, columns)
+    local used, index, length = 0, 1, #text
+    while index <= length do
+        local byte = text:byte(index)
+        local step, weight = 1, 1
+        if byte >= 0xF0 then step, weight = 4, 2
+        elseif byte >= 0xE0 then step, weight = 3, 2
+        elseif byte >= 0xC0 then step, weight = 2, 1 end
+        if used + weight > columns then
+            return text:sub(1, index - 1) .. "…"
+        end
+        used = used + weight
+        index = index + step
+    end
+    return text
+end
+PlateView.Clip = clip
+
+-- Draws the unit's health into `health` without reading it. Kept at file scope
+-- and called through pcall: a client that refuses either call must not escape.
+local function drawHealth(health, unit)
+    health:SetMinMaxValues(0, UnitHealthMax(unit))
+    health:SetValue(UnitHealth(unit))
+end
+
+-- The percentage goes from UnitHealthPercent into SetFormattedText. A plain
+-- result is as welcome as a restricted one; only a missing API or a refused call
+-- leaves the text empty.
+local function drawPercent(control, unit)
+    if type(UnitHealthPercent) ~= "function" then return "none" end
+    local curve = type(CurveConstants) == "table" and CurveConstants.ScaleTo100 or nil
+    local ok, percent = pcall(UnitHealthPercent, unit, true, curve)
+    if not ok then return "none" end
+    if not app.Capabilities.IsSecret(percent) and percent == nil then return "none" end
+    if not pcall(control.SetFormattedText, control, "%.0f%%", percent) then return "none" end
+    return "api"
+end
+
+local function applyColor(view, base)
     if not base then return end
-    app.Theme:PaintCombatBar(view.health, base)
+    view.baseColor = { base[1], base[2], base[3] }
+    app.Theme:PaintMatteBar(view.health, base)
+end
+
+-- Track size follows the target state. The frame is the track plus the name row
+-- above it; the cast row hangs below and is not part of the frame's height.
+local function layout(view, isTarget)
+    local width = isTarget and SPEC.targetWidth or SPEC.width
+    local height = isTarget and SPEC.targetHeight or SPEC.height
+    if view.laidOutTarget == isTarget then return end
+    view.laidOutTarget = isTarget
+    view.width, view.height = width, height
+    view.frame:SetSize(width, SPEC.nameHeight + SPEC.nameGap + height)
+    view.health:SetSize(width, height)
+    view.name:SetWidth(width - SPEC.valueReserve)
+    view.cast:SetSize(width, SPEC.cast)
+    view.castText:SetWidth(width - 8)
 end
 
 -- Builds one view under `parent`. `anchors.bar` is the client's health bar when
--- the build exposes one: the view lines its own track up with that bar without
--- reading its size. Without a bar the view centres itself on the unit frame.
+-- the build exposes one: it is the anchor point and its size is not read.
 function PlateView:Create(parent, anchors)
     if not parent or type(parent.CreateTexture) ~= "function" then return nil end
     local frame = CreateFrame("Frame", nil, parent)
     frame:EnableMouse(false)
-    -- Cover the client's plate art instead of drawing a small bar inside it.
-    -- The native plate's dark panel is wider/taller than its 8px track; leaving
-    -- it visible made the own layer look like an untouched native plate with a
-    -- small green strip. The frame takes the native unit frame's size when it is
-    -- readable and paints its own opaque plate over it; the native frame stays
-    -- the click/world host underneath.
+    frame:SetSize(SPEC.width, SPEC.nameHeight + SPEC.nameGap + SPEC.height)
     local anchorBar = anchors and anchors.bar
-    local width = HEALTH_WIDTH
-    local barHeight = HEALTH_HEIGHT
-    if anchorBar and type(anchorBar.GetWidth) == "function" then
-        local ok, value = pcall(anchorBar.GetWidth, anchorBar)
-        value = ok and plainNumber(value) or nil
-        if value and value > 0 then width = math.max(96, math.min(180, value)) end
-    end
-    if anchorBar and type(anchorBar.GetHeight) == "function" then
-        local ok, value = pcall(anchorBar.GetHeight, anchorBar)
-        value = ok and plainNumber(value) or nil
-        if value and value > 0 then barHeight = math.max(4, math.min(16, value)) end
-    end
-    -- A cut-out overlay, on its own stratum above the client plate. The dark
-    -- strips frame a transparent window over the native bar: the fill stays the
-    -- client's (truthful even when restricted), the name sits on the top band,
-    -- and nothing can be hidden behind the client's panel because this layer is
-    -- above it. A full card would cover the fill; a small strip behind it stayed
-    -- behind the panel (the repeated "no change" report).
-    local TOP_H, BOTTOM_H = NAME_HEIGHT, 2
-    if type(parent.GetWidth) == "function" then
-        local ok, value = pcall(parent.GetWidth, parent)
-        value = ok and plainNumber(value) or nil
-        if value and value > width then width = math.max(96, math.min(200, value)) end
-    end
-    local height = TOP_H + barHeight + BOTTOM_H
-    frame:SetSize(width, height)
-    if type(frame.SetFrameStrata) == "function" then pcall(frame.SetFrameStrata, frame, "HIGH") end
-    if anchorBar and type(frame.SetPoint) == "function" then
-        frame:SetPoint("BOTTOM", anchorBar, "BOTTOM", 0, -BOTTOM_H)
+    if anchorBar then
+        frame:SetPoint("BOTTOM", anchorBar, "BOTTOM", 0, 0)
     else
         frame:SetPoint("BOTTOM", parent, "BOTTOM", 0, 2)
     end
+    -- Above the client's own plate art in the same strata: no strata jump, so the
+    -- layer never leaps over other UI.
     if type(parent.GetFrameLevel) == "function" and type(frame.SetFrameLevel) == "function" then
         local ok, level = pcall(parent.GetFrameLevel, parent)
         level = ok and plainNumber(level) or nil
         if level then pcall(frame.SetFrameLevel, frame, level + 30) end
     end
-    local surface = app.Theme.colors.surface
-    frame.backdrop = frame:CreateTexture(nil, "BACKGROUND")
-    frame.backdrop:SetPoint("TOPLEFT", 0, 0)
-    frame.backdrop:SetPoint("TOPRIGHT", 0, 0)
-    frame.backdrop:SetHeight(TOP_H)
-    frame.backdrop:SetColorTexture(surface[1], surface[2], surface[3], 0.95)
-    local bottomStrip = frame:CreateTexture(nil, "BACKGROUND")
-    bottomStrip:SetPoint("BOTTOMLEFT", 0, 0)
-    bottomStrip:SetPoint("BOTTOMRIGHT", 0, 0)
-    bottomStrip:SetHeight(BOTTOM_H)
-    bottomStrip:SetColorTexture(surface[1], surface[2], surface[3], 0.95)
-    -- Side strips fill the width between the panel edge and the bar window.
-    local windowWidth = anchorBar and select(2, pcall(anchorBar.GetWidth, anchorBar)) or nil
-    windowWidth = plainNumber(windowWidth) or width
-    windowWidth = math.max(20, math.min(width, windowWidth))
-    side = (width - windowWidth) / 2
-    if side > 0 then
-        local left = frame:CreateTexture(nil, "BACKGROUND")
-        left:SetPoint("BOTTOMLEFT", 0, BOTTOM_H)
-        left:SetWidth(side)
-        left:SetHeight(barHeight)
-        left:SetColorTexture(surface[1], surface[2], surface[3], 0.95)
-        local right = frame:CreateTexture(nil, "BACKGROUND")
-        right:SetPoint("BOTTOMRIGHT", 0, BOTTOM_H)
-        right:SetWidth(side)
-        right:SetHeight(barHeight)
-        right:SetColorTexture(surface[1], surface[2], surface[3], 0.95)
-    end
-    local rule = frame:CreateTexture(nil, "ARTWORK")
-    rule:SetPoint("BOTTOMLEFT", frame.backdrop, "BOTTOMLEFT", 0, 0)
-    rule:SetPoint("BOTTOMRIGHT", frame.backdrop, "BOTTOMRIGHT", 0, 0)
-    rule:SetHeight(app.Pixel:Pixels(1, rule))
-    local ruleColor = app.Theme.colors.line
-    rule:SetColorTexture(ruleColor[1], ruleColor[2], ruleColor[3], 0.85)
-    frame.edge = rule
 
     local health = CreateFrame("StatusBar", nil, frame)
-    health:SetSize(windowWidth, HEALTH_HEIGHT)
-    health:SetPoint("CENTER", frame, "BOTTOM", 0, BOTTOM_H + barHeight / 2)
+    health:SetSize(SPEC.width, SPEC.height)
+    health:SetPoint("BOTTOM", frame, "BOTTOM", 0, 0)
     health:SetStatusBarTexture(app.Theme.media.combatFill)
     health:SetMinMaxValues(0, 1)
     health:SetValue(0)
     health.background = health:CreateTexture(nil, "BACKGROUND")
     health.background:SetAllPoints()
-    local dim = app.Theme.colors.surface
-    health.background:SetColorTexture(dim[1], dim[2], dim[3], 0.92)
-    -- Tint over the native fill in restricted mode. The client resets its own
-    -- bar texture/colour on updates, so writing those was overwritten; a tint
-    -- above the fill is our texture and survives while keeping the true length.
-    local tint = frame:CreateTexture(nil, "OVERLAY")
-    tint:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", side, BOTTOM_H)
-    tint:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -side, BOTTOM_H)
-    tint:SetHeight(barHeight)
-    tint:SetColorTexture(0, 0, 0, 0)
-    tint:Hide()
-    -- One hairline around the track: the same physical-pixel edge every other
-    -- LumaUI control draws, so the plate reads as part of the suite.
+    local rail = app.Theme.matte.rail
+    health.background:SetColorTexture(rail[1], rail[2], rail[3], rail[4])
+
+    -- One physical-pixel hairline around the track, the edge every other LumaUI
+    -- control draws.
     local edge = CreateFrame("Frame", nil, frame, "BackdropTemplate")
     edge:EnableMouse(false)
     edge:SetPoint("TOPLEFT", health, "TOPLEFT", -1, 1)
@@ -157,39 +151,37 @@ function PlateView:Create(parent, anchors)
     local line = app.Theme.colors.line
     edge:SetBackdropBorderColor(line[1], line[2], line[3], 0.9)
 
+    -- Name row. The name takes the left side and stops short of the value column,
+    -- so a long Chinese name is cut before it can touch the percentage.
     local name = app.Theme:Text(frame, 10)
-    name:SetPoint("CENTER", frame.backdrop, "CENTER", 0, 0)
-    name:SetSize(width - 6, NAME_HEIGHT)
-    name:SetJustifyH("CENTER")
+    name:SetPoint("BOTTOMLEFT", health, "TOPLEFT", 0, SPEC.nameGap)
+    name:SetSize(SPEC.width - SPEC.valueReserve, SPEC.nameHeight)
+    name:SetJustifyH("LEFT")
     name:SetWordWrap(false)
     name:SetText("")
+    if type(name.SetShadowOffset) == "function" then pcall(name.SetShadowOffset, name, 1, -1) end
 
-    -- A short right-aligned percentage on the track. It only ever receives a
-    -- plain number computed outside; `SetHealth` hides it for restricted units.
     local value = app.Theme:Text(frame, 9)
-    value:SetPoint("RIGHT", health, "RIGHT", -TEXT_INSET, 0)
+    value:SetPoint("BOTTOMRIGHT", health, "TOPRIGHT", 0, SPEC.nameGap)
+    value:SetSize(SPEC.valueReserve, SPEC.nameHeight)
+    value:SetJustifyH("RIGHT")
+    value:SetWordWrap(false)
     value:SetText("")
+    if type(value.SetShadowOffset) == "function" then pcall(value.SetShadowOffset, value, 1, -1) end
 
-    -- Target selection: one warm-white chip above the track, away from the
-    -- name so a long Chinese name is never covered.
+    -- Target selection: one short warm-white chip on the track's top edge.
     local chip = frame:CreateTexture(nil, "OVERLAY")
-    chip:SetColorTexture(1, 0.97, 0.9, 0.95)
-    chip:SetSize(TARGET_CHIP, 2)
-    chip:SetPoint("BOTTOM", frame, "TOP", 0, 1)
+    local mark = app.Theme.colors.text
+    chip:SetColorTexture(mark[1], mark[2], mark[3], 0.98)
+    chip:SetSize(SPEC.chip, 2)
+    chip:SetPoint("BOTTOMLEFT", health, "TOPLEFT", 0, 0)
     chip:Hide()
-
-    local accent = frame:CreateTexture(nil, "OVERLAY")
-    local color = app.Theme:Accent()
-    accent:SetColorTexture(color[1], color[2], color[3], 0.85)
-    accent:SetPoint("TOPLEFT", health, "TOPLEFT", -3, 2)
-    accent:SetPoint("BOTTOMLEFT", health, "BOTTOMLEFT", -3, -2)
-    accent:SetWidth(app.Pixel:Pixels(2, accent))
 
     -- Cast row: its own bar, own text and own duration values; it never mixes
     -- with the health update and only appears while a readable cast exists.
     local cast = CreateFrame("Frame", nil, frame)
-    cast:SetSize(HEALTH_WIDTH, CAST_HEIGHT)
-    cast:SetPoint("TOP", health, "BOTTOM", 0, -CAST_GAP)
+    cast:SetSize(SPEC.width, SPEC.cast)
+    cast:SetPoint("TOP", health, "BOTTOM", 0, -SPEC.castGap)
     cast:Hide()
     local castBar = CreateFrame("StatusBar", nil, cast)
     castBar:SetAllPoints()
@@ -198,73 +190,69 @@ function PlateView:Create(parent, anchors)
     castBar:SetValue(0)
     local castBack = castBar:CreateTexture(nil, "BACKGROUND")
     castBack:SetAllPoints()
-    local dark = app.Theme.colors.embedded
-    castBack:SetColorTexture(dark[1], dark[2], dark[3], 0.9)
+    castBack:SetColorTexture(rail[1], rail[2], rail[3], rail[4])
     local castText = app.Theme:Text(cast, 9)
     castText:SetPoint("CENTER", castBar, "CENTER", 0, 0)
-    castText:SetSize(HEALTH_WIDTH - 8, CAST_HEIGHT)
+    castText:SetSize(SPEC.width - 8, SPEC.cast)
     castText:SetJustifyH("CENTER")
     castText:SetWordWrap(false)
 
     local view = {
-        frame = frame, health = health, name = name, value = value, tint = tint,
-        chip = chip, accent = accent, edge = edge,
+        frame = frame, health = health, name = name, value = value,
+        chip = chip, edge = edge,
         cast = cast, castBar = castBar, castText = castText,
         parent = parent, anchors = anchors or {}, unit = nil,
-        width = HEALTH_WIDTH, height = HEALTH_HEIGHT, trackHeight = height,
-        chromeHeight = TOP_H + HEALTH_HEIGHT + BOTTOM_H,
+        width = SPEC.width, height = SPEC.height, laidOutTarget = false,
     }
     frame.view = view
-    -- The cast row is advanced by its owner's slow ticker (one per active
-    -- cast), not an OnUpdate loop: an idle frame must not keep a per-frame
-    -- handler alive after the cast ends.
     return view
 end
 
--- Restricted-health mode: the client keeps drawing the fill, so the own track
--- and its dark plate stay hidden; only the parts that need no health value are
--- drawn (name, target chip). This still changes the plate's typography and
--- leaves the native bar as the truthful source. `ShowTrack` restores the full
--- layer when readable health comes back.
-function PlateView:SetChrome(view, text, isTarget)
-    if not view then return false end
-    view.health:Hide()
-    view.value:Hide()
-    view.edge:Hide()
-    view.accent:Hide()
-    view.cast:Hide()
-    -- The strips are the plate; only the numeric track and its decorations go.
-    -- The cut-out window keeps showing the native fill.
-    if view.plate then view.plate:Show() end
-    if view.chromeHeight then view.frame:SetHeight(view.chromeHeight) end
-    view.frame:Show()
-    local named = self:SetName(view, text)
-    self:SetTarget(view, isTarget == true)
-    return named
-end
-
+-- Shows the track and its edge again after a hidden period. Idempotent.
 function PlateView:ShowTrack(view)
     if not view then return end
-    if view.trackHeight then view.frame:SetHeight(view.trackHeight) end
-    if view.plate then view.plate:Show() end
-    if view.frame.backdrop then view.frame.backdrop:Show() end
-    if view.frame.edge then view.frame.edge:Show() end
     view.health:Show()
     view.edge:Show()
-    view.accent:Show()
     view.value:Show()
-    if view.tint then view.tint:Hide() end
 end
 
 function PlateView:SetUnit(view, unit)
     if not view then return end
     view.unit = unit
-    applyHealthColor(view, app.Theme:UnitColor(unit))
+    applyColor(view, app.Theme:UnitColor(unit))
 end
 
--- Both numbers must be readable plain values. A restricted unit keeps the
--- native bar: the caller sees `false` and leaves its own layer hidden for that
--- update instead of freezing a stale value on screen.
+-- Draws a live unit. Returns true plus the percentage source when the track
+-- accepted the values, false plus a reason otherwise. A failure leaves the
+-- caller to keep the client's own drawing for this plate.
+function PlateView:DrawUnit(view, unit)
+    if not view then return false, "no-view" end
+    if type(UnitHealth) ~= "function" or type(UnitHealthMax) ~= "function" then
+        return false, "no-api"
+    end
+    if not pcall(drawHealth, view.health, unit) then
+        view.value:SetText("")
+        return false, "write-failed"
+    end
+    -- A readable pair gives the exact percentage with no API dependence; a
+    -- restricted pair goes through UnitHealthPercent into SetFormattedText.
+    local okValue, value = pcall(UnitHealth, unit)
+    local okMax, maximum = pcall(UnitHealthMax, unit)
+    value = okValue and plainNumber(value) or nil
+    maximum = okMax and plainNumber(maximum) or nil
+    if value and maximum and maximum > 0 then
+        if value < 0 then value = 0 elseif value > maximum then value = maximum end
+        view.value:SetText(string.format("%d%%", math.floor(value / maximum * 100 + 0.5)))
+        view.percentSource = "plain"
+    else
+        view.percentSource = drawPercent(view.value, unit)
+        if view.percentSource == "none" then view.value:SetText("") end
+    end
+    return true, view.percentSource
+end
+
+-- Plain-number drawing for sample data (`/luma style`) and for tests. A
+-- restricted number is refused and reported instead of being used.
 function PlateView:SetHealth(view, value, maximum)
     if not view then return false end
     value, maximum = plainNumber(value), plainNumber(maximum)
@@ -277,42 +265,30 @@ function PlateView:SetHealth(view, value, maximum)
     view.health:SetValue(value)
     view.value:SetText(string.format("%d%%", math.floor(value / maximum * 100 + 0.5)))
     view.value:Show()
+    view.percentSource = "plain"
     return true
 end
 
 function PlateView:SetName(view, text)
     if not view then return end
     text = plainText(text)
-    if not text then
+    if not text or text == "" then
         view.name:SetText("")
         return false
     end
-    -- The plate is narrow by design: a long name is cut with a plain ellipsis
-    -- rather than widening the bar or shrinking the text below 9.
-    if #text > 22 then text = text:sub(1, 21) .. "…" end
-    view.name:SetText(text)
+    view.name:SetText(clip(text, SPEC.nameColumns))
     return true
 end
 
 function PlateView:SetTarget(view, isTarget)
     if not view then return end
+    isTarget = isTarget == true
+    layout(view, isTarget)
     if isTarget then view.chip:Show() else view.chip:Hide() end
 end
 
 function PlateView:SetColor(view, base)
-    if view and base then applyHealthColor(view, base) end
-end
-
--- A translucent tint above the native fill (restricted health). `tint` is
--- { r, g, b, a }; nil hides it. It never reads or writes the health value.
-function PlateView:SetTint(view, tint)
-    if not view or not view.tint then return end
-    if tint then
-        view.tint:SetColorTexture(tint[1], tint[2], tint[3], tint[4] or 0.42)
-        view.tint:Show()
-    else
-        view.tint:Hide()
-    end
+    if view and base then applyColor(view, base) end
 end
 
 local CAST_COLORS = {
@@ -324,8 +300,7 @@ local CAST_COLORS = {
 
 -- `state` carries only plain values: { name, elapsed, duration, channel,
 -- interruptible }. Unreadable numbers clear the row and the caller keeps the
--- native cast bar. The bar uses its own min/max so a channel fills backwards
--- without any Lua arithmetic on the value the client reports.
+-- native cast bar.
 function PlateView:SetCast(view, state)
     if not view then return false end
     if type(state) ~= "table" then self:ClearCast(view); return false end
@@ -340,8 +315,7 @@ function PlateView:SetCast(view, state)
     view.castBar:SetMinMaxValues(0, duration)
     view.castBar:SetValue(elapsed)
     local label = plainText(state.name) or ""
-    if #label > 18 then label = label:sub(1, 17) .. "…" end
-    view.castText:SetText(label)
+    view.castText:SetText(clip(label, 18))
     view.cast:Show()
     return true
 end
@@ -353,11 +327,23 @@ function PlateView:ClearCast(view)
     view.cast:Hide()
 end
 
+-- Back to a clean, hidden state: used when a plate is released or recycled, so
+-- the next unit never inherits this one's text, fill or chip.
+function PlateView:Reset(view)
+    if not view then return end
+    self:ClearCast(view)
+    view.name:SetText("")
+    view.value:SetText("")
+    view.chip:Hide()
+    view.unit = nil
+    view.percentSource = nil
+    view.frame:Hide()
+end
+
 function PlateView:Release(plate)
     if not plate then return end
     local view = plate.lumaPlateView
     if not view then return end
     plate.lumaPlateView = nil
-    if view.plate then view.plate:Hide() end
-    if view.frame then view.frame:Hide() end
+    self:Reset(view)
 end

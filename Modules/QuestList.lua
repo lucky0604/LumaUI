@@ -419,7 +419,7 @@ local function showItemTooltip(button, link)
     if type(tooltip.Show) == "function" then pcall(tooltip.Show, tooltip) end
 end
 
-local refresh, row, paintRow, requestSync
+local refresh, row, paintRow, requestSync, releaseRow, rowFeedback, clearFeedback
 
 -- Title ink carries the state hierarchy: the focused quest reads strongest, a
 -- turn-in or a failure gets its semantic tone, a watched quest is normal ink
@@ -632,6 +632,132 @@ local function ensureBanner(self)
     return self.banner
 end
 
+-- Row feedback. Identity is the quest id (and objective index): a row that was
+-- not there on the previous paint fades in, and a quest or objective that goes
+-- from unfinished to finished is emphasised once. The first paint, locked
+-- (combat) paints and unstable rows are applied at once. The visuals are only
+-- alpha and the shared edge pulse on the row's own frame; they carry no input.
+local ENTER_SECONDS = 0.14
+function releaseRow(current)
+    if not current then return end
+    app.Transitions:Cancel(current.frame, "enter")
+    app.Transitions:Cancel(current.frame, "shift")
+    current.visualY = nil
+    current.frame:SetAlpha(1)
+    if app.EdgePulse then app.EdgePulse:Release(current.frame) end
+end
+
+-- Leaving rows: a short-lived, input-free copy of the old text fades out where
+-- the row was. It has no secure attributes, no mouse and no item button, and
+-- at most GHOST_MAX exist at once.
+local GHOST_MAX = 4
+local function spawnGhost(self, info)
+    self.ghosts = self.ghosts or {}
+    local ghost
+    for _, candidate in ipairs(self.ghosts) do
+        if not candidate.busy then ghost = candidate; break end
+    end
+    if not ghost then
+        if #self.ghosts >= GHOST_MAX then return end
+        local frame = CreateFrame("Frame", nil, self.body)
+        frame:EnableMouse(false)
+        frame:SetSize(BODY_WIDTH, LINE_HEIGHT)
+        local text = app.Theme:Text(frame, 11, true)
+        text:SetPoint("LEFT", QUEST_INDENT, 0)
+        ghost = { frame = frame, text = text }
+        self.ghosts[#self.ghosts + 1] = ghost
+    end
+    ghost.busy = true
+    ghost.text:SetText(info.text or "")
+    ghost.frame:ClearAllPoints()
+    ghost.frame:SetPoint("TOPLEFT", self.body, "TOPLEFT", 0, -(info.y or 0))
+    ghost.frame:SetAlpha(1)
+    ghost.frame:Show()
+    local function done()
+        ghost.busy = false
+        ghost.frame:Hide()
+        ghost.frame:SetAlpha(1)
+    end
+    if not app.Transitions:Fade(ghost.frame, ghost.frame, 0, ENTER_SECONDS, done, "ghost") then done() end
+end
+
+function rowFeedback(self, rows)
+    local previous, ready = self.seenRows, self.seenReady
+    local previousInfo = self.seenInfo or {}
+    local seen, info = {}, {}
+    for index, entry in ipairs(rows) do
+        local current = self.rows[index]
+        local key = entry.key
+        local state
+        if entry.kind == "quest" then state = entry.quest.state == "ready" or entry.quest.state == "complete" or false
+        elseif entry.kind == "line" then state = entry.done == true end
+        if current then
+            -- A pooled row that now shows another identity drops the old run.
+            if current.identity ~= key then releaseRow(current) end
+            current.identity = key
+            if key then
+                -- Reflow: a row whose slot moved glides from where it was
+                -- drawn. Rows carrying the secure item button, combat and
+                -- motion off snap, so the hit area never lags the drawing.
+                local oldInfo = previousInfo[key]
+                local target = current.paintY
+                local from = current.visualY or (oldInfo and oldInfo.y)
+                if ready and from and target and from ~= target and not current.itemLink
+                    and not inCombat() and app.Transitions.MotionEnabled() then
+                    local frame = current.frame
+                    frame:ClearAllPoints()
+                    frame:SetPoint("TOPLEFT", self.body, "TOPLEFT", 0, -from)
+                    current.visualY = from
+                    app.Transitions:Animate(frame, "shift", {
+                        from = from, to = target, duration = 0.14,
+                        apply = function(value, progress)
+                            if inCombat() then value, progress = target, 1 end
+                            frame:ClearAllPoints()
+                            frame:SetPoint("TOPLEFT", self.body, "TOPLEFT", 0, -value)
+                            current.visualY = progress < 1 and value or nil
+                        end,
+                    })
+                end
+                seen[key] = state == true
+                info[key] = { text = current.label:GetText(), y = current.paintY }
+                if ready and previous and previous[key] == nil then
+                    current.frame:SetAlpha(0)
+                    app.Transitions:Fade(current.frame, current.frame, 1, ENTER_SECONDS, nil, "enter")
+                elseif ready and previous and previous[key] == false and state == true and app.EdgePulse then
+                    app.EdgePulse:Show(current.frame)
+                end
+            end
+        end
+    end
+    -- Rows that were visible and are gone now leave a ghost, except the whole
+    -- list being rebuilt (first paint) which is applied at once.
+    if ready and previous then
+        local spawned = 0
+        for key, old in pairs(previousInfo) do
+            if seen[key] == nil and spawned < GHOST_MAX then
+                spawned = spawned + 1
+                spawnGhost(self, old)
+            end
+        end
+    end
+    self.seenRows, self.seenInfo, self.seenReady = seen, info, true
+end
+
+function clearFeedback(self)
+    for _, ghost in ipairs(self.ghosts or {}) do
+        app.Transitions:Cancel(ghost.frame, "ghost")
+        ghost.busy = false
+        ghost.frame:Hide()
+        ghost.frame:SetAlpha(1)
+    end
+    self.seenInfo = nil
+    for _, current in ipairs(self.rows or {}) do
+        releaseRow(current)
+        current.identity = nil
+    end
+    self.seenRows, self.seenReady = nil, nil
+end
+
 refresh = function(self)
     if not self.frame then return end
     local accent = app.Theme:Accent()
@@ -666,19 +792,20 @@ refresh = function(self)
                 if not self.folds["q:" .. quest.id] then
                     if quest.state == "ready" then
                         if used < MAX_ROWS then
-                            rows[#rows + 1] = { kind = "line", text = L.questListReady, color = "ready" }
+                            rows[#rows + 1] = { kind = "line", text = L.questListReady, color = "ready", key = "s:" .. quest.id .. ":ready" }
                             used = used + 1
                         end
                     elseif quest.state == "failed" then
                         if used < MAX_ROWS then
-                            rows[#rows + 1] = { kind = "line", text = L.questListFailed, color = "failed" }
+                            rows[#rows + 1] = { kind = "line", text = L.questListFailed, color = "failed", key = "s:" .. quest.id .. ":failed" }
                             used = used + 1
                         end
                     end
                     if quest.state ~= "ready" then
-                        for _, line in ipairs(objectives(quest)) do
+                        for lineIndex, line in ipairs(objectives(quest)) do
                             if used < MAX_ROWS then
-                                rows[#rows + 1] = { kind = "line", text = line.text, done = line.done }
+                                rows[#rows + 1] = { kind = "line", text = line.text, done = line.done,
+                                    key = "o:" .. quest.id .. ":" .. lineIndex }
                                 used = used + 1
                             end
                         end
@@ -736,8 +863,10 @@ refresh = function(self)
         for index = #rows + 1, #(self.rows or {}) do
             local current = self.rows[index]
             current.itemLink = nil
+            releaseRow(current)
             current.frame:Hide()
         end
+        rowFeedback(self, rows)
     end
 
     -- Secure attributes and visibility change outside combat; during combat
@@ -1017,6 +1146,7 @@ paintRow = function(self, current, entry, y)
     local markColor
 
     frame.entry = entry
+    current.paintY = y
     frame.iconButton.entry = entry
     current.itemLink = nil
     frame:ClearAllPoints()
@@ -1491,6 +1621,7 @@ component = app:RegisterComponent({ id = "questList", label = "questList", defau
         local entry = app.Layout.entries.questList
         if entry then entry.allowHiddenMove = nil end
         if self.frame then self.frame:Hide() end
+        clearFeedback(self)
         self.pendingReflow, self.lockedPaint = nil, nil
         if self.sessionBanner then
             self.sessionBanner.frame:Hide()

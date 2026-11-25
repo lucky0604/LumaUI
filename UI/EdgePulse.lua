@@ -94,8 +94,19 @@ function Pulse:StopDriver()
     self.driver = nil
 end
 
+-- Reduce motion (or motion off) means no run at all: the host keeps its static
+-- state and no segment, run record or ticker is created.
+local function motionAllowed()
+    local transitions = app.Transitions
+    return transitions and type(transitions.MotionEnabled) == "function" and transitions.MotionEnabled()
+end
+
 function Pulse:Show(frame, color)
     if not frame or type(frame.CreateTexture) ~= "function" then return false end
+    if not motionAllowed() then
+        self:Hide(frame)
+        return false
+    end
     local segments = segmentsOf(frame)
     color = color or app.Theme:Accent()
     for _, key in ipairs(self.segments) do
@@ -133,6 +144,11 @@ end
 -- driver uses to stop itself. Tests call this with an explicit clock.
 function Pulse:Tick(now)
     now = tonumber(now) or 0
+    -- Reduce motion switched on mid-run: converge at once instead of finishing.
+    if next(self.active) ~= nil and not motionAllowed() then
+        self:Stop()
+        return false
+    end
     local any = false
     local finished = nil
     for frame, state in pairs(self.active) do

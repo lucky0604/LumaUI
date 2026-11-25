@@ -80,7 +80,7 @@ Theme.units = {
     -- tightened to 180 UI so they read as one column with it. 002 validated a
     -- 200-wide block on the old mockup; old profiles keep their saved centres
     -- (positions.json), so this only moves frames that were never dragged.
-    width = 180, nameSize = 11, health = 18, power = 3,
+    width = 180, nameSize = 11, health = 14, power = 3,
     cast = 12, aura = 16, auraStep = 18,
     nameRow = 15, healthGap = 1, powerGap = 2, castGap = 4, auraGap = 4,
     -- Pet, target-of-target and focus use the same draw path at a smaller,
@@ -344,6 +344,31 @@ function Theme:PaintCombatBar(bar, base)
     local back = bar.background
     if back and type(back.SetColorTexture) == "function" then
         back:SetColorTexture(base[1] * 0.22, base[2] * 0.22, base[3] * 0.22, 1)
+    end
+    if type(bar.SetStatusBarTexture) == "function" then
+        pcall(bar.SetStatusBarTexture, bar, self.media.combatFill)
+    end
+    bar.gradient = nil
+    bar:SetStatusBarColor(base[1], base[2], base[3], 1)
+end
+
+-- 013 Pearl health role: the matte fill carries the unit colour, the empty rail
+-- stays one near-neutral cool grey whatever the unit is, so a half-empty bar
+-- reads as "fill on a rail" instead of one big same-hue gradient. The rail and
+-- the fill share one hairline edge owned by the caller. Only plain colours are
+-- accepted; the base comes from public identity APIs, never from health.
+Theme.matte = {
+    rail = { 0.075, 0.085, 0.10, 0.94 },
+    absorb = { 0.88, 0.94, 1.00, 0.34 },
+    deadFill = { 0.42, 0.42, 0.44 },
+}
+
+function Theme:PaintMatteBar(bar, base)
+    if not bar or type(base) ~= "table" then return end
+    local back = bar.background
+    if back and type(back.SetColorTexture) == "function" then
+        local rail = self.matte.rail
+        back:SetColorTexture(rail[1], rail[2], rail[3], rail[4])
     end
     if type(bar.SetStatusBarTexture) == "function" then
         pcall(bar.SetStatusBarTexture, bar, self.media.combatFill)

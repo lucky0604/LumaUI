@@ -285,7 +285,9 @@ local function setNativeNameShown(record, shown)
     if not object(name) or type(name.SetShown) ~= "function" then return true end
     if record.nativeNameShown == nil then
         local ok, value = pcall(name.IsShown, name)
-        value = ok and app.Capabilities.Plain(value, "boolean") or nil
+        -- `false` is a real answer (the client already hides this name); an
+        -- `and/or` chain would turn it into nil and report a failed hide.
+        if ok then value = app.Capabilities.Plain(value, "boolean") else value = nil end
         if value == nil then return false end
         record.nativeNameShown = value
     end
@@ -303,6 +305,20 @@ local function setNativeNameShown(record, shown)
         record.nativeNameAlpha = nil
     end
     return (pcall(name.SetShown, name, shown and record.nativeNameShown or false))
+end
+
+-- Whether the own name row really has visible ink: text present and, when the
+-- build can measure it, a non-zero width. A build without GetStringWidth keeps
+-- the text test only, so the check can never block drawing on its own.
+local function ownNameHasInk(name)
+    if not object(name) then return false end
+    local okText, text = pcall(name.GetText, name)
+    text = okText and app.Capabilities.Plain(text, "string") or nil
+    if not text or text == "" then return false end
+    if type(name.GetStringWidth) ~= "function" then return true end
+    local okWidth, width = pcall(name.GetStringWidth, name)
+    width = okWidth and plainNumber(width) or nil
+    return width ~= nil and width > 0
 end
 
 local function ensureView(record)
@@ -395,178 +411,240 @@ local function updateCast(self, unit)
     end
 end
 
--- The client's plate panel is a separate texture/frame behind the health bar.
--- Covering it with a tall own card looked like a black block; instead hide the
--- candidates while LumaUI owns the plate and put them back on release. Only
--- recorded, shown objects are touched, so an unknown build simply keeps its
--- panel.
+-- 013 phase 02: native hand-over, part by part.
+--
+-- While the own layer draws a plate, the client's matching parts step aside:
+-- the health fill (alpha), the plate panel (`bgTexture` and the Background
+-- fields), the unselected dim (`deselectedOverlay`), the selection border
+-- (`selectedBorder`) and the name. Each part is recorded with its original
+-- shown state and alpha, written once, read back, and restored one object at a
+-- time. `false` is a real recorded value, not "missing". `plateNative = "keep"`
+-- leaves every part alone, and any own-draw failure puts all of them back.
+--
+-- 12.1.5 (Blizzard_NamePlates): the visible plate border is
+-- `healthBar.selectedBorder` (positioned from `bgTexture`), the panel is
+-- `healthBar.bgTexture`, the unselected dim is `healthBar.deselectedOverlay`.
+-- Hiding `bgTexture` does not hide `selectedBorder`, which is why the border is
+-- its own part.
 local PANEL_FIELDS = { "Background", "background", "healthBarBackground" }
+local HANDOFF_PARTS = { "panel", "dim", "border" }
 
-local function hideNativePanel(record)
-    if record.nativePanel ~= nil then return end
-    record.nativePanel = {}
-    local frame = record.frame
+local function partObjects(record, part)
+    local frame, bar = record.frame, record.bar
     local list = {}
-    for _, field in ipairs(PANEL_FIELDS) do
-        list[#list + 1] = frame[field]
+    if not object(frame) or isForbidden(frame) then return list end
+    if part == "panel" then
+        for _, field in ipairs(PANEL_FIELDS) do list[#list + 1] = frame[field] end
+        local container = frame.HealthBarsContainer
+        if object(container) then
+            list[#list + 1] = container.Background
+            list[#list + 1] = container.background
+        end
+        if object(bar) then list[#list + 1] = bar.bgTexture end
+    elseif part == "dim" then
+        if object(bar) then list[#list + 1] = bar.deselectedOverlay end
+    elseif part == "border" then
+        if object(bar) then list[#list + 1] = bar.selectedBorder end
     end
-    local container = frame.HealthBarsContainer
-    if object(container) then
-        list[#list + 1] = container.Background
-        list[#list + 1] = container.background
-    end
-    -- 12.1.5 (Blizzard_NamePlates.xml): the visible plate border is
-    -- healthBar.bgTexture and the uns elected dim is healthBar.deselectedOverlay.
-    -- These are the real fields, not guesses from field names.
-    local bar = record.bar
-    if object(bar) then
-        list[#list + 1] = bar.bgTexture
-        list[#list + 1] = bar.deselectedOverlay
-    end
-    for _, panel in ipairs(list) do
-        if object(panel) and type(panel.IsShown) == "function" and type(panel.SetShown) == "function" then
-            local ok, shown = pcall(panel.IsShown, panel)
-            shown = ok and app.Capabilities.Plain(shown, "boolean") or nil
+    return list
+end
+
+local function plainBool(call, target)
+    local ok, value = pcall(call, target)
+    if not ok then return nil end
+    return app.Capabilities.Plain(value, "boolean")
+end
+
+-- Hides one part once. Re-entry keeps the first recording, so a second pass can
+-- never capture the already-hidden state as the original.
+local function hidePart(record, part)
+    record.handoff = record.handoff or {}
+    if record.handoff[part] then return end
+    local entries = {}
+    record.handoff[part] = entries
+    for _, target in ipairs(partObjects(record, part)) do
+        if object(target) and not isForbidden(target)
+            and type(target.IsShown) == "function" and type(target.SetShown) == "function" then
+            local shown = plainBool(target.IsShown, target)
             if shown ~= nil then
                 local alpha
-                if type(panel.GetAlpha) == "function" then
-                    local okAlpha, value = pcall(panel.GetAlpha, panel)
-                    alpha = okAlpha and app.Capabilities.Plain(value, "number") or nil
+                if type(target.GetAlpha) == "function" then
+                    local okAlpha, value = pcall(target.GetAlpha, target)
+                    if okAlpha then alpha = plainNumber(value) end
                 end
-                record.nativePanel[#record.nativePanel + 1] = { object = panel, shown = shown, alpha = alpha }
-                pcall(panel.SetShown, panel, false)
-                -- Alpha 0 survives the client re-showing deselectedOverlay on a
-                -- target change; SetShown(false) alone does not.
-                if alpha and type(panel.SetAlpha) == "function" then
-                    pcall(panel.SetAlpha, panel, 0)
+                local entry = { object = target, shown = shown, alpha = alpha }
+                entries[#entries + 1] = entry
+                pcall(target.SetShown, target, false)
+                -- Alpha 0 survives the client re-showing the object on a target
+                -- change; SetShown(false) alone does not.
+                if alpha and type(target.SetAlpha) == "function" then
+                    pcall(target.SetAlpha, target, 0)
+                end
+                entry.hidden = plainBool(target.IsShown, target) == false
+            end
+        end
+    end
+end
+
+-- Re-applies the hidden state after a client update shows an object again.
+local function reapplyParts(record)
+    for _, entries in pairs(record.handoff or {}) do
+        for _, entry in ipairs(entries) do
+            if object(entry.object) and not isForbidden(entry.object) then
+                pcall(entry.object.SetShown, entry.object, false)
+                if entry.alpha and type(entry.object.SetAlpha) == "function" then
+                    pcall(entry.object.SetAlpha, entry.object, 0)
                 end
             end
         end
     end
 end
 
-local function restoreNativePanel(record)
-    for _, entry in ipairs(record.nativePanel or {}) do
-        if object(entry.object) then
-            if entry.alpha and type(entry.object.SetAlpha) == "function" then
-                pcall(entry.object.SetAlpha, entry.object, entry.alpha)
+local function restoreParts(record)
+    for _, entries in pairs(record.handoff or {}) do
+        for _, entry in ipairs(entries) do
+            if object(entry.object) and not isForbidden(entry.object) then
+                if entry.alpha and type(entry.object.SetAlpha) == "function" then
+                    pcall(entry.object.SetAlpha, entry.object, entry.alpha)
+                end
+                pcall(entry.object.SetShown, entry.object, entry.shown)
             end
-            pcall(entry.object.SetShown, entry.object, entry.shown)
         end
     end
-    record.nativePanel = nil
+    record.handoff = nil
 end
 
--- Overlay tints that survive the client's own bar updates. The native fill is
--- the only truthful health source when UnitHealth is secret; a translucent own
--- texture above it changes the palette without touching the value.
-local RESTRICTED_TINTS = {
-    hostile = { 0.32, 0.04, 0.04, 0.46 },
-    neutral = { 0.26, 0.20, 0.03, 0.42 },
-    friendly = { 0.03, 0.22, 0.08, 0.40 },
-}
-local restrictedSkin
-
--- Restyle the client's own name text instead of drawing a second FontString.
--- Hiding the native name was what made the field report's plates look nameless
--- when the own overlay was not visible.
-local function styleName(record)
-    local name = record.frame and record.frame.name
-    if not object(name) then return end
-    if not record.nameStyle then
-        local style = {}
-        if type(name.GetFont) == "function" then
-            local ok, path, size, flags = pcall(name.GetFont, name)
-            if ok and path then style.path, style.size, style.flags = path, size, flags end
-        end
-        if type(name.GetTextColor) == "function" then
-            local ok, red, green, blue = pcall(name.GetTextColor, name)
-            if ok and red ~= nil then style.color = { red, green, blue } end
-        end
-        record.nameStyle = style
+-- The state word of one part for diagnostics: `hidden(n)` counts the objects
+-- whose hidden state was read back, `unverified(n)` those that were not, and
+-- `absent` means this build has no such object.
+local function partState(record, part)
+    local entries = record.handoff and record.handoff[part]
+    if not entries then return record.viewActive and "kept" or "native" end
+    if #entries == 0 then return "absent" end
+    local confirmed = 0
+    for _, entry in ipairs(entries) do
+        if entry.hidden then confirmed = confirmed + 1 end
     end
-    if type(name.SetFont) == "function" then
-        pcall(name.SetFont, name, app.Type:Face(), 10, "OUTLINE")
-    end
-    local text = app.Theme.colors.text
-    if type(name.SetTextColor) == "function" then
-        pcall(name.SetTextColor, name, text[1], text[2], text[3])
-    end
-    if type(name.SetShadowOffset) == "function" then pcall(name.SetShadowOffset, name, 1, -1) end
+    if confirmed == #entries then return string.format("hidden(%d)", confirmed) end
+    return string.format("unverified(%d/%d)", confirmed, #entries)
 end
 
-local function restoreName(record)
-    local name = record.frame and record.frame.name
-    local style = record.nameStyle
-    if not object(name) or not style then return end
-    if style.path and type(name.SetFont) == "function" then
-        pcall(name.SetFont, name, style.path, style.size, style.flags)
-    end
-    if style.color and type(name.SetTextColor) == "function" then
-        pcall(name.SetTextColor, name, style.color[1], style.color[2], style.color[3])
-    end
-    record.nameStyle = nil
+-- The fill colour comes from the client's own bar when it can be read as plain
+-- numbers (it carries the reaction/class colour the client chose), otherwise
+-- from the unit's public identity.
+local function nativeBarColor(bar)
+    if not object(bar) or type(bar.GetStatusBarColor) ~= "function" then return nil end
+    local ok, red, green, blue = pcall(bar.GetStatusBarColor, bar)
+    if not ok then return nil end
+    red, green, blue = plainNumber(red), plainNumber(green), plainNumber(blue)
+    if red and green and blue then return { red, green, blue } end
+end
+
+-- Puts every native part back and hides the own layer. One path for a plate
+-- that leaves, a mode that switches, a failed own draw and component stop.
+local function releaseOwn(record)
+    stopCastTicker(record)
+    record.castActive = nil
+    setNativeBarAlpha(record, true)
+    setNativeNameShown(record, true)
+    restoreParts(record)
+    if record.view then app.PlateView:Reset(record.view) end
+    record.viewActive = nil
 end
 
 local function updateView(self, unit)
     local record = self.plates and self.plates[unit]
     if not record then return end
-    local view = record.view
     if not self.owned then
-        if view then app.PlateView:ClearCast(view); view.frame:Hide() end
-        stopCastTicker(record)
-        setNativeBarAlpha(record, true)
-        setNativeNameShown(record, true)
-        restoreNativePanel(record)
-        record.viewActive = nil
+        releaseOwn(record)
+        record.viewReason = nil
         return
     end
-    view = view or ensureView(record)
+    local view = record.view or ensureView(record)
     record.view = view
     if not view then
+        releaseOwn(record)
         record.viewReason = "view-unavailable"
         return
     end
+    -- With direct drawing off, restricted health keeps the client's own plate.
+    if not self.direct then
+        local health, maximum = unitHealth(unit)
+        if plainNumber(health) == nil or plainNumber(maximum) == nil then
+            releaseOwn(record)
+            record.viewReason = "restricted-health"
+            return
+        end
+    end
     app.PlateView:ShowTrack(view)
-    app.PlateView:SetTint(view, nil)
-    local health, maximum = unitHealth(unit)
-    if not app.PlateView:SetHealth(view, health, maximum) then
-        -- Restricted health: no truthful own fill and no own text layer. Keep
-        -- the client's fill and name, restyle both in place, and drop the
-        -- client's plate border/dim. The hooks reapply after the client's own
-        -- update functions reset the bar.
-        app.PlateView:ClearCast(view)
-        view.frame:Hide()
-        restrictedSkin(self, record)
-        styleName(record)
-        hideNativePanel(record)
-        setNativeBarAlpha(record, true)
-        setNativeNameShown(record, true)
-        record.viewActive = nil
-        record.viewReason = "restricted-health"
+    local ok, detail = app.PlateView:DrawUnit(view, unit)
+    if not ok then
+        releaseOwn(record)
+        record.viewReason = detail
         return
     end
     record.viewReason = nil
     record.viewActive = true
+    record.healthPath = "direct"
+    record.percentSource = detail
     app.PlateView:SetUnit(view, unit)
-    -- Keep the client's reaction colour for the own track. UnitColor is only a
-    -- fallback: a neutral NPC can be drawn green by the client, and the own
-    -- layer must not turn the same plate yellow just because the numeric
-    -- reaction reads "neutral".
-    local original = self.originals[record.bar]
-    if original and original.color then app.PlateView:SetColor(view, original.color) end
-    local named = app.PlateView:SetName(view, unitName(unit))
-    if named and not setNativeNameShown(record, false) then
+    local color = nativeBarColor(record.bar)
+    if color then app.PlateView:SetColor(view, color) end
+    local hide = self.nativeMode == "hide"
+    local named = hide and app.PlateView:SetName(view, unitName(unit)) or false
+    record.nameState = hide and "native:unreadable" or "keep"
+    -- A successful SetText is not proof the glyphs are on screen: the string can
+    -- be empty, clipped to nothing, or drawn by a control this build cannot
+    -- measure. The native name only steps aside once the own row reports ink,
+    -- otherwise a render failure would leave the plate with no name at all.
+    if named and not ownNameHasInk(view.name) then
         app.PlateView:SetName(view, nil)
         named = false
+        record.nameState = "native:own-empty"
+    end
+    if named then
+        if setNativeNameShown(record, false) then
+            record.nameState = object(record.frame and record.frame.name) and "luma" or "luma:no-native-object"
+        else
+            app.PlateView:SetName(view, nil)
+            named = false
+            record.nameState = "native:hide-failed"
+        end
     end
     app.PlateView:SetTarget(view, record.target == true)
     view.frame:Show()
-    hideNativePanel(record)
-    -- Only the parts the own layer actually drew are dimmed.
-    setNativeBarAlpha(record, false)
-    setNativeNameShown(record, not named)
+    if hide then
+        for _, part in ipairs(HANDOFF_PARTS) do hidePart(record, part) end
+        setNativeBarAlpha(record, false)
+        setNativeNameShown(record, not named)
+    else
+        restoreParts(record)
+        setNativeBarAlpha(record, true)
+        setNativeNameShown(record, true)
+    end
     updateCast(self, unit)
+end
+
+-- Records who draws each plate piece under the shared Ownership vocabulary.
+-- This is the mode's intent: a plate that falls back to native says so in the
+-- per-plate `draw:` line, and nothing here claims live-client validation.
+local OWNERSHIP_IDS = { "nameplates.health", "nameplates.border", "nameplates.name" }
+
+local function recordOwnership(self)
+    if not app.Ownership then return end
+    local owned = self.owned == true
+    local hide = self.nativeMode == "hide"
+    local function set(id, ownedHere, reason)
+        app.Ownership:Set(id, {
+            intent = ownedHere and "owned" or "native",
+            active = ownedHere and "owned" or "native",
+            evidence = ownedHere and "simulated" or "none",
+            reason = reason or (ownedHere and "awaiting-validation" or "native-kept"),
+        })
+    end
+    set("nameplates.health", owned, owned and not self.direct and "restricted-native" or nil)
+    set("nameplates.border", owned and hide)
+    set("nameplates.name", owned and hide)
 end
 
 -- Called on health/name/cast events. Only the plate that owns the unit is
@@ -579,7 +657,8 @@ end
 
 -- The snapshot is taken once per bar, before the first write. Only a readable
 -- colour counts as paintable; the texture is recorded separately and restored
--- even when no colour was available.
+-- even when no colour was available. Only the native-repaint mode (own layer
+-- off) records and writes a bar.
 local function remember(self, bar)
     local existing = self.originals[bar]
     if existing then return existing end
@@ -602,66 +681,57 @@ local function remember(self, bar)
         local ok, texture = pcall(bar.GetStatusBarTexture, bar)
         if ok and texture ~= nil then original.texture = texture end
     end
-    if type(bar.GetHeight) == "function" then
-        local ok, height = pcall(bar.GetHeight, bar)
-        height = ok and plainNumber(height) or nil
-        if height and height > 0 then original.height = height end
-    end
     self.originals[bar] = original
     return original
 end
 
--- Fallback when the client restricts the health payload: the own layer cannot
--- draw a truthful number, but the native bar can still lose the client's glossy
--- texture and oversized height. Only recorded properties are rewritten, so the
--- client's look comes back with the same release path.
--- Reapply after the client's own update functions. Hooks are global, but only
--- bars/frames marked with the current record are touched, and only while the
--- component is running and the own style is enabled.
-local function reskin(record)
+-- Hooks only re-apply the hidden state after the client's own update functions
+-- show a part again. They are installed once on the mixin tables and once per
+-- bar/frame instance (an instance copied its methods when it was created, so a
+-- mixin hook alone never sees it), and they return at once unless the component
+-- is running with the own layer on and the plate is currently drawn.
+local function reapply(record)
     if not record or not component or not component.running or not component.owned then return end
-    restrictedSkin(component, record, true)
-    styleName(record)
-    hideNativePanel(record)
+    if not record.viewActive or component.nativeMode ~= "hide" then return end
+    reapplyParts(record)
+    setNativeBarAlpha(record, false)
 end
 
-local function reskinBar(bar)
-    reskin(bar and bar.lumaNameplateRecord)
+local function reapplyBar(bar)
+    reapply(bar and bar.lumaNameplateRecord)
 end
 
-local function reskinName(frame)
-    reskin(frame and frame.lumaNameplateRecord)
+local function reapplyFrame(frame)
+    reapply(frame and frame.lumaNameplateRecord)
 end
 
--- The fallback also owns a muted palette: the client's bright yellow/green
--- neutral fill looked like a raw bar glued to the dark plate. The colour is a
--- fixed constant per classification, never derived from health, and is only
--- written when the original colour was readable and recorded.
-local RESTRICTED_COLORS = {
-    hostile = { 0.62, 0.26, 0.24 },
-    neutral = { 0.62, 0.55, 0.28 },
-    friendly = { 0.35, 0.60, 0.42 },
-}
-restrictedSkin = function(self, record, force)
-    if record.restrictedSkin and not force then return end
-    local bar = record.bar
-    local original = bar and self.originals[bar]
-    if not original or isForbidden(bar) then return end
-    record.restrictedSkin = true
-    if original.texture and type(bar.SetStatusBarTexture) == "function" then
-        pcall(bar.SetStatusBarTexture, bar, app.Theme.media.combatFill)
-    end
-    if original.height and original.height > 9 and type(bar.SetHeight) == "function" then
-        pcall(bar.SetHeight, bar, 8)
-    end
-    local color = RESTRICTED_COLORS[record.class]
-    if original.color and color and type(bar.SetStatusBarColor) == "function" then
-        pcall(bar.SetStatusBarColor, bar, color[1], color[2], color[3], 1)
+local BAR_METHODS = { "UpdateHealthColor", "UpdateSelectionBorder" }
+local FRAME_METHODS = { "UpdateAnchors" }
+
+-- Hooks one instance method and reports the real outcome. `hooked[key]` is true
+-- only when `hooksecurefunc` accepted the call.
+local function hookInstance(target, methods, callback, hooked)
+    if type(hooksecurefunc) ~= "function" or not object(target) or isForbidden(target) then return end
+    for _, method in ipairs(methods) do
+        local key = method
+        if type(target[method]) == "function" and not (target.lumaNameplateHooked and target.lumaNameplateHooked[key]) then
+            local ok = pcall(hooksecurefunc, target, method, callback)
+            target.lumaNameplateHooked = target.lumaNameplateHooked or {}
+            target.lumaNameplateHooked[key] = ok
+            hooked[#hooked + 1] = method .. ":" .. (ok and "ok" or "fail")
+        end
     end
 end
 
--- Puts one recorded bar back. Only the properties that were actually changed
--- are restored; a restricted object is skipped instead of being written to.
+local function hookRecord(record)
+    record.hooks = record.hooks or {}
+    hookInstance(record.bar, BAR_METHODS, reapplyBar, record.hooks)
+    hookInstance(record.frame, FRAME_METHODS, reapplyFrame, record.hooks)
+end
+
+-- Puts one recorded bar back (native-repaint mode only). Only the properties
+-- that were actually changed are restored; a restricted object is skipped
+-- instead of being written to.
 local function restore(self, bar)
     local original = bar and self.originals[bar]
     if not original then return end
@@ -674,9 +744,6 @@ local function restore(self, bar)
         pcall(bar.SetStatusBarColor, bar, original.color[1], original.color[2],
             original.color[3], original.color[4])
     end
-    if type(bar.SetHeight) == "function" and original.height then
-        pcall(bar.SetHeight, bar, original.height)
-    end
     if bar.lumaNameplateBg then bar.lumaNameplateBg:Hide() end
     if bar.lumaNameplateEdge then bar.lumaNameplateEdge:Hide() end
     if bar.lumaNameplateMark then bar.lumaNameplateMark:Hide() end
@@ -686,17 +753,9 @@ end
 
 local function restoreAll(self)
     for _, record in pairs(self.plates or {}) do
-        stopCastTicker(record)
-        setNativeBarAlpha(record, true)
-        setNativeNameShown(record, true)
-        restoreName(record)
+        releaseOwn(record)
         if record.bar and record.bar.lumaNameplateRecord == record then record.bar.lumaNameplateRecord = nil end
         if record.frame and record.frame.lumaNameplateRecord == record then record.frame.lumaNameplateRecord = nil end
-        restoreNativePanel(record)
-        if record.view then
-            app.PlateView:ClearCast(record.view)
-            record.view.frame:Hide()
-        end
     end
     for bar in pairs(self.originals or {}) do
         restore(self, bar)
@@ -740,7 +799,7 @@ local function classify(unit)
     end
     if type(UnitIsEnemy) == "function" then
         local ok, enemy = pcall(UnitIsEnemy, "player", unit)
-        enemy = ok and app.Capabilities.Plain(enemy, "boolean") or nil
+        if ok then enemy = app.Capabilities.Plain(enemy, "boolean") else enemy = nil end
         if enemy == true then return "hostile" end
         if enemy == false then return "friendly" end
     end
@@ -760,16 +819,9 @@ local function releaseUnit(self, unit)
     self.plates[unit] = nil
     if record.bar and record.bar.lumaNameplateRecord == record then record.bar.lumaNameplateRecord = nil end
     if record.frame and record.frame.lumaNameplateRecord == record then record.frame.lumaNameplateRecord = nil end
-    stopCastTicker(record)
-    setNativeBarAlpha(record, true)
-    setNativeNameShown(record, true)
-    restoreName(record)
-    restoreNativePanel(record)
-    if record.view then
-        app.PlateView:ClearCast(record.view)
-        record.view.frame:Hide()
-    elseif record.plate and record.plate.lumaPlateView then
-        record.plate.lumaPlateView.frame:Hide()
+    releaseOwn(record)
+    if not record.view and record.plate and record.plate.lumaPlateView then
+        app.PlateView:Reset(record.plate.lumaPlateView)
     end
     restore(self, record.bar)
 end
@@ -800,10 +852,19 @@ attach = function(self, unit)
     local owner = barOwner(self, bar)
     if owner and owner ~= unit then releaseUnit(self, owner) end
     if existing and existing.bar ~= bar then releaseUnit(self, unit) end
-    local record = remember(self, bar)
+    -- The two looks are exclusive: with the own layer on, nothing is painted or
+    -- decorated on the native bar (a leftover record from the repaint mode is
+    -- put back first); with it off, the native bar gets the reversible repaint.
+    local record
+    if self.owned then
+        if self.originals[bar] then restore(self, bar) end
+    else
+        record = remember(self, bar)
+    end
     local target = isTargetUnit(unit)
     local enemy = hostile(unit)
-    local decorated = paint(bar, unit, record, target, enemy)
+    local decorated = false
+    if record then decorated = paint(bar, unit, record, target, enemy) end
     self.lastReason = "ok"
     -- A styled plate clears its attempt count, so a later appearance of the same
     -- unit token gets a fresh pair of retries instead of inheriting failures.
@@ -822,9 +883,10 @@ attach = function(self, unit)
     -- "painted" means the LumaUI fill really replaced the client's: a hostile
     -- plate with a readable colour. Everything else kept the client's own fill
     -- and is reported as such.
-    state.painted = enemy and record.paintable
-        and type(bar.SetStatusBarColor) == "function"
+    state.painted = record ~= nil and enemy and record.paintable
+        and type(bar.SetStatusBarColor) == "function" or false
     self.plates[unit] = state
+    hookRecord(state)
     updateView(self, unit)
     return true
 end
@@ -868,7 +930,7 @@ local function markTarget(self)
         local target = isTargetUnit(unit)
         if target ~= record.target then
             record.target = target
-            if not isForbidden(record.bar) then decorateSafely(record.bar, target) end
+            if not self.owned and not isForbidden(record.bar) then decorateSafely(record.bar, target) end
             if record.view and record.viewActive then
                 app.PlateView:SetTarget(record.view, target)
             end
@@ -932,6 +994,8 @@ component = app:RegisterComponent({ id = "nameplates", label = "nameplates", def
         local ui = app.Store:Profile().ui
         self.owned = ui.plateOwned == true
         self.plateCast = ui.plateCast == true
+        self.direct = ui.plateDirect ~= false
+        self.nativeMode = ui.plateNative == "keep" and "keep" or "hide"
         -- Safe draw updates run immediately: a colour/texture write on a plate we
         -- own is not a protected action, and delaying a target change until after
         -- combat is what made the old pass look late. Creation stays here, in
@@ -965,29 +1029,30 @@ component = app:RegisterComponent({ id = "nameplates", label = "nameplates", def
             "UNIT_SPELLCAST_NOT_INTERRUPTIBLE" }) do
             self:Listen(event, function(current, _, unit) updateUnit(current, unit) end)
         end
-        -- The client resets barTexture/bgTexture in UpdateAnchors and the fill
-        -- colour in UpdateHealthColor (12.1.5 source). Reapply after those
-        -- functions for our marked bars only; this is why the earlier direct
-        -- writes never stayed on screen.
-        if not self.hooksInstalled and type(hooksecurefunc) == "function" then
-            self.hooksInstalled = true
+        -- The client re-shows `selectedBorder`/`bgTexture` in UpdateAnchors and
+        -- UpdateSelectionBorder and resets the fill colour in
+        -- UpdateHealthColor (12.1.5 source). The mixin tables are hooked once;
+        -- every attached bar and frame is additionally hooked as an instance,
+        -- because an instance copied the methods when the client created it.
+        -- Each hook outcome is kept for `/luma plates`.
+        if not self.hookStates and type(hooksecurefunc) == "function" then
+            self.hookStates = {}
             local barMixin = _G.NamePlateHealthBarMixin
             if type(barMixin) == "table" then
-                for _, method in ipairs({ "UpdateHealthColor", "UpdateSelectionBorder" }) do
+                for _, method in ipairs(BAR_METHODS) do
                     if type(barMixin[method]) == "function" then
-                        pcall(hooksecurefunc, barMixin, method, function(bar) reskinBar(bar) end)
+                        local ok = pcall(hooksecurefunc, barMixin, method, function(bar) reapplyBar(bar) end)
+                        self.hookStates[#self.hookStates + 1] = "bar." .. method .. ":" .. (ok and "ok" or "fail")
                     end
                 end
             end
             local frameMixin = _G.NamePlateUnitFrameMixin
             if type(frameMixin) == "table" and type(frameMixin.UpdateAnchors) == "function" then
-                pcall(hooksecurefunc, frameMixin, "UpdateAnchors", function(frame)
-                    local bar = frame and frame.HealthBarsContainer and frame.HealthBarsContainer.healthBar
-                    reskinBar(bar)
+                local ok = pcall(hooksecurefunc, frameMixin, "UpdateAnchors", function(frame)
+                    local container = frame and frame.HealthBarsContainer
+                    reapplyBar(object(container) and container.healthBar or nil)
                 end)
-            end
-            if type(_G.CompactUnitFrame_UpdateName) == "function" then
-                pcall(hooksecurefunc, "CompactUnitFrame_UpdateName", function(frame) reskinName(frame) end)
+                self.hookStates[#self.hookStates + 1] = "frame.UpdateAnchors:" .. (ok and "ok" or "fail")
             end
         end
         scan(self)
@@ -996,19 +1061,24 @@ component = app:RegisterComponent({ id = "nameplates", label = "nameplates", def
             app.Ownership:Set("nameplates", { intent = "styled", active = "styled",
                 evidence = "simulated", reason = self.lastReason })
         end
+        recordOwnership(self)
     end,
     Refresh = function(self)
         local ui = app.Store:Profile().ui
         self.owned = ui.plateOwned == true
         self.plateCast = ui.plateCast == true
+        self.direct = ui.plateDirect ~= false
+        self.nativeMode = ui.plateNative == "keep" and "keep" or "hide"
         scan(self)
         attachTarget(self)
+        recordOwnership(self)
         for unit in pairs(self.plates or {}) do updateView(self, unit) end
     end,
     Disable = function(self)
         restoreAll(self)
         if app.Ownership then
             app.Ownership:Active("nameplates", "native", "component-off")
+            for _, id in ipairs(OWNERSHIP_IDS) do app.Ownership:Active(id, "native", "component-off") end
         end
     end,
 })
@@ -1087,6 +1157,29 @@ function component:Command(argument)
         if self.running then self:Refresh() end
         return
     end
+    -- 013 trial switches. `direct` lets restricted health go straight into the
+    -- own StatusBar; `native` chooses whether the client's matching parts step
+    -- aside (`hide`, default) or stay visible under the own layer (`keep`).
+    if wanted == "direct" then
+        local value = not (app.Store:Profile().ui.plateDirect ~= false)
+        if not app.Store:Set("ui", "plateDirect", value) then
+            app:Print(app.L.readonly)
+            return
+        end
+        app:Print(value and app.L.platesDirectOn or app.L.platesDirectOff)
+        if self.running then self:Refresh() end
+        return
+    end
+    if wanted == "native" then
+        local keep = app.Store:Profile().ui.plateNative ~= "keep"
+        if not app.Store:Set("ui", "plateNative", keep and "keep" or "hide") then
+            app:Print(app.L.readonly)
+            return
+        end
+        app:Print(keep and app.L.platesNativeKeep or app.L.platesNativeHide)
+        if self.running then self:Refresh() end
+        return
+    end
     if wanted ~= "on" and wanted ~= "off" and wanted ~= "friends" then
         self:Diagnose()
         return
@@ -1109,7 +1202,30 @@ function component:Command(argument)
     if self.running then scan(self) end
 end
 
-function component:Diagnose()
+-- A readable "WxH@scale" for one frame. Every unreadable number is "?" and a
+-- restricted object is never asked: diagnostics stay plain and read-only.
+local function rectWord(target)
+    if not object(target) or isForbidden(target) then return "?" end
+    local function read(method)
+        if type(target[method]) ~= "function" then return nil end
+        local ok, value = pcall(target[method], target)
+        return ok and plainNumber(value) or nil
+    end
+    local width, height, scale = read("GetWidth"), read("GetHeight"), read("GetEffectiveScale")
+    return string.format("%s x %s @%s",
+        width and string.format("%.0f", width) or "?",
+        height and string.format("%.0f", height) or "?",
+        scale and string.format("%.2f", scale) or "?")
+end
+
+local function objectKind(target)
+    if not object(target) or type(target.GetObjectType) ~= "function" then return "?" end
+    local ok, kind = pcall(target.GetObjectType, target)
+    return ok and app.Capabilities.Plain(kind, "string") or "?"
+end
+
+function component:Diagnose(limit)
+    limit = tonumber(limit) or 5
     local function yes(value) return value and "yes" or "no" end
     local api = _G.C_NamePlate
     local available = type(api) == "table" and type(api.GetNamePlateForUnit) == "function"
@@ -1144,7 +1260,7 @@ function component:Diagnose()
     -- but not classified" cannot be confused.
     local stats = { bases = 0, readable = 0, friendly = 0, neutral = 0,
         hostile = 0, unknown = 0, decorated = 0, paintedFill = 0, keptFill = 0,
-        views = 0, casts = 0, restrictedViews = 0 }
+        views = 0, casts = 0, fallbacks = 0, restricted = 0 }
     local found = {}
     for index = 1, 40 do
         local unit = "nameplate" .. index
@@ -1163,9 +1279,13 @@ function component:Diagnose()
             if record then
                 if record.viewActive then stats.views = stats.views + 1 end
                 if record.castActive then stats.casts = stats.casts + 1 end
-                if record.viewReason then stats.restrictedViews = stats.restrictedViews + 1 end
+                if record.viewReason then stats.fallbacks = stats.fallbacks + 1 end
             end
-            if #found < 5 then
+            local hp, hpMax = unitHealth(unit)
+            if not (app.Capabilities.Plain(hp, "number") and app.Capabilities.Plain(hpMax, "number")) then
+                stats.restricted = stats.restricted + 1
+            end
+            if #found < limit then
                 found[#found + 1] = { unit = unit, info = unitInfo, class = class, record = record }
             end
         end
@@ -1177,8 +1297,11 @@ function component:Diagnose()
     -- The own layer is reported next to the repaint: a plate can be repainted
     -- and still show the native text, and only this line says which one the
     -- player is looking at.
-    app:Print(string.format("  view: mode=%s active=%d cast=%d restricted=%d",
-        self.owned and "owned" or "native", stats.views, stats.casts, stats.restrictedViews))
+    app:Print(string.format("  view: mode=%s active=%d cast=%d restricted=%d fallback=%d direct=%s native=%s",
+        self.owned and "owned" or "native", stats.views, stats.casts, stats.restricted, stats.fallbacks,
+        self.direct and "on" or "off", tostring(self.nativeMode or "hide")))
+    app:Print("  hooks: " .. (self.hookStates and #self.hookStates > 0
+        and table.concat(self.hookStates, ",") or "none"))
     if stats.bases == 0 then
         app:Print("  " .. app.L.nameplatesNoVisible)
     else
@@ -1203,6 +1326,47 @@ function component:Diagnose()
             app:Print(string.format("    view=%s cast=%s",
                 record and record.viewActive and "luma" or (record and record.viewReason or "native"),
                 record and record.castActive and "luma" or "native"))
+            -- Where each visible piece comes from, and the real rectangles. The
+            -- own rectangle is the layer's frame; the native one is the bar the
+            -- client sizes. "?" means the number was not readable.
+            local drawn = record and record.viewActive
+            app:Print(string.format("    rect=%s native=%s kind=%s",
+                rectWord(record and record.view and record.view.frame),
+                rectWord(unitInfo.bar), objectKind(unitInfo.bar)))
+            local nativeName = record and record.frame and record.frame.name
+            local nameShown = "none"
+            if object(nativeName) and not isForbidden(nativeName) and type(nativeName.IsShown) == "function" then
+                local okShown, shown = pcall(nativeName.IsShown, nativeName)
+                shown = okShown and app.Capabilities.Plain(shown, "boolean")
+                nameShown = shown == true and "shown" or (shown == false and "hidden" or "?")
+            end
+            -- The own name's real state: shown, text length (a count, never
+            -- the text), measured width and effective alpha, plus the rail's.
+            local ownName = record and record.view and record.view.name
+            local ownInfo = "none"
+            if object(ownName) then
+                local function plainCall(method)
+                    if type(ownName[method]) ~= "function" then return nil end
+                    local okCall, value = pcall(ownName[method], ownName)
+                    return okCall and app.Capabilities.Plain(value) or nil
+                end
+                local text = plainCall("GetText")
+                local width, alpha = plainCall("GetStringWidth"), plainCall("GetEffectiveAlpha")
+                ownInfo = string.format("shown=%s len=%s width=%s alpha=%s",
+                    tostring(plainCall("IsShown")), type(text) == "string" and #text or "?",
+                    width and string.format("%.0f", width) or "?",
+                    alpha and string.format("%.2f", alpha) or "?")
+            end
+            app:Print("    nativeName=" .. nameShown .. " ownName: " .. ownInfo)
+            app:Print(string.format("    draw: health=%s name=%s pct=%s fill=%s panel=%s dim=%s border=%s hooks=%s",
+                drawn and (record.healthPath or "direct") or "native",
+                drawn and tostring(record.nameState or "?") or "native",
+                drawn and tostring(record.percentSource or "none") or "-",
+                drawn and self.nativeMode == "hide" and "hidden" or "native",
+                record and partState(record, "panel") or "native",
+                record and partState(record, "dim") or "native",
+                record and partState(record, "border") or "native",
+                record and record.hooks and #record.hooks > 0 and table.concat(record.hooks, ",") or "-"))
         end
     end
     if type(GetCVar) == "function" then

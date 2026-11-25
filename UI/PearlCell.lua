@@ -65,19 +65,37 @@ function Cell:Create(parent, size)
     swipe:SetAllPoints(icon)
     -- The edge belongs to LumaUI; the client's own rim would double it.
     if type(swipe.SetDrawEdge) == "function" then pcall(swipe.SetDrawEdge, swipe, false) end
+    if type(swipe.SetHideCountdownNumbers) == "function" then
+        pcall(swipe.SetHideCountdownNumbers, swipe, true)
+    end
 
-    local count = app.Theme:Text(frame, 10)
+    -- Count and timer must live above the swipe. A child frame draws over its
+    -- parent's own regions, so FontStrings created on `frame` sat under the dark
+    -- sweep: the number was only readable where the wipe happened to uncover it,
+    -- which read as "no cooldown timer at all".
+    local overlay = CreateFrame("Frame", nil, frame)
+    overlay:EnableMouse(false)
+    overlay:SetAllPoints()
+    overlay:SetFrameLevel((swipe:GetFrameLevel() or frame:GetFrameLevel() or 0) + 3)
+
+    local count = app.Theme:Text(overlay, 10)
     count:SetPoint("BOTTOMRIGHT", -PAD - 1, PAD + 1)
     count:SetText("")
 
-    local time = app.Theme:Text(frame, 10)
+    local time = app.Theme:Text(overlay, 10)
     time:SetPoint("CENTER")
     time:SetText("")
 
-    local ring = frame:CreateTexture(nil, "OVERLAY")
+    -- State edge, not a state fill: a backdrop hairline just outside the icon.
+    -- A full-cell colour texture here painted a solid slab over the icon, the
+    -- count and the timer for every tracked cooldown, so the state read as a
+    -- rectangle instead of an outline. `proc` only thickens the same hairline.
+    local ring = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    ring:EnableMouse(false)
     ring:SetPoint("TOPLEFT", -1, 1)
     ring:SetPoint("BOTTOMRIGHT", 1, -1)
-    ring:SetColorTexture(1, 1, 1, 0)
+    ring:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(1, ring) })
+    ring:SetBackdropBorderColor(1, 1, 1, 0)
     ring:Hide()
 
     frame.base, frame.icon, frame.edge, frame.swipe = base, icon, edge, swipe
@@ -85,14 +103,17 @@ function Cell:Create(parent, size)
     return frame
 end
 
+-- A texture is either a path (an item icon) or a raw fileID (a spell icon).
+-- FileID is what the client's own buttons pass: it cannot break when an icon
+-- moves between interface directories.
 function Cell:SetIcon(cell, texture)
     if not cell then return false end
-    texture = plainText(texture)
-    if not texture then
+    local asset = plainText(texture) or plainNumber(texture)
+    if not asset then
         cell.icon:Hide()
         return false
     end
-    cell.icon:SetTexture(texture)
+    cell.icon:SetTexture(asset)
     cell.icon:Show()
     return true
 end
@@ -147,6 +168,11 @@ function Cell:Clear(cell)
     cell.ring:Hide()
     if type(cell.swipe.Clear) == "function" then pcall(cell.swipe.Clear, cell.swipe) end
     cell.state = nil
+    -- The caller's own bookkeeping goes with the drawing: a cell that no longer
+    -- shows a spell must not keep reporting a remaining time, or the shared
+    -- cooldown ticker would run for it forever.
+    cell.lumaRemaining = nil
+    cell.lumaSpellID = nil
 end
 
 function Cell:SetState(cell, state)
@@ -160,7 +186,14 @@ function Cell:SetState(cell, state)
         return
     end
     local color = token == "accent" and app.Theme:Accent() or app.Theme.colors[token]
-    cell.ring:SetColorTexture(color[1], color[2], color[3], state == "proc" and 0.95 or 0.65)
+    -- Proc is a thicker outline of the same accent, so the cue survives both a
+    -- colour-blind player and a reduced-motion session.
+    local thickness = state == "proc" and 2 or 1
+    if cell.ringThickness ~= thickness then
+        cell.ringThickness = thickness
+        cell.ring:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(thickness, cell.ring) })
+    end
+    cell.ring:SetBackdropBorderColor(color[1], color[2], color[3], state == "proc" and 0.95 or 0.65)
     cell.ring:Show()
     -- "unavailable" also loses saturation: colour alone is not a cue.
     cell.icon:SetDesaturated(state == "unavailable")

@@ -157,6 +157,13 @@ function Frame:GetStringHeight()
     local lines = math.max(1, math.ceil(stringPixelWidth(value, size) / width))
     return lines * lineHeight
 end
+-- The width of the current single line. Zero for empty text, which is exactly
+-- the case a caller uses to tell "the row has ink" from "the row is blank".
+function Frame:GetStringWidth()
+    local value = self.text
+    if type(value) ~= "string" or value == "" then return 0 end
+    return stringPixelWidth(value, self.fontSize or 13)
+end
 function Frame:SetValue(value)
     self.value = value
     if self.scripts.OnValueChanged then self.scripts.OnValueChanged(self, value) end
@@ -344,6 +351,12 @@ function H.Click(frame, button)
 end
 
 function H.Load(saved)
+    -- Cooldown Manager fixtures belong to one test: a provider, aura reader or
+    -- viewer frame left behind by an earlier test would steer the next one.
+    _G.C_CooldownViewer, _G.CooldownViewerSettings, _G.C_UnitAuras = nil, nil, nil
+    _G.EssentialCooldownViewer, _G.UtilityCooldownViewer = nil, nil
+    _G.BuffIconCooldownViewer, _G.BuffBarCooldownViewer = nil, nil
+    if type(_G.Enum) == "table" then _G.Enum.CooldownViewerCategory = nil end
     H.frames, H.timers, H.messages, H.combat = {}, {}, {}, false
     H.groups = {}
     H.calls, H.modifiedClicks = {}, {}
@@ -369,14 +382,19 @@ function H.Load(saved)
             -- default-on policy is covered by its own test.
             modules = { questList = true, unitFrames = false, partyFrames = false,
                 nameplates = false, actionBars = false },
-            ui = { takeoverUnitFrames = false },
+            -- The own cooldown groups ship on and follow the client's Cooldown
+            -- Manager; the stock fixture keeps the client's own viewers so the
+            -- placement tests stay about the client. The shipped default is
+            -- asserted by its own test.
+            ui = { takeoverUnitFrames = false,
+                cooldownGroups = { owned = false, groups = {} } },
             -- The slot-grid tests drive the per-icon layout directly, so the
             -- shared fixture opts in. The shipped default (off) and the stable
             -- whole-viewer path are asserted by their own test.
             appearance = { perIconSlots = true },
         } },
         migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
-            actionBars = true },
+            actionBars = true, cooldownGroupsDefault = true },
     }
     _G.unpack = table.unpack or unpack
     _G.WOW_PROJECT_ID, _G.WOW_PROJECT_MAINLINE = 1, 1

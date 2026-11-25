@@ -164,6 +164,20 @@ function StyleSheet:PaintPearl(frame, y)
             channel = false, interruptible = true })
         view.frame:Show()
     end
+    -- Second sample: the untargeted geometry with a long mixed-width name, so
+    -- clipping and the percentage column are visible next to the target one.
+    local plain = CreateFrame("Frame", nil, frame)
+    plain:SetSize(150, 48)
+    plain:SetPoint("TOPLEFT", PAD, y - 56)
+    self.plateHolderPlain = plain
+    local second = app.PlateView:Create(plain)
+    if second then
+        self.plateViewPlain = second
+        app.PlateView:SetName(second, "珍珠 Pearl Warden of the Eastern Reach")
+        app.PlateView:SetHealth(second, 100, 100)
+        app.PlateView:SetTarget(second, false)
+        second.frame:Show()
+    end
     self.pearlCells = self.pearlCells or {}
     local icons = { "Interface\\Icons\\INV_Misc_Gem_Pearl_02", "Interface\\Icons\\Spell_Fire_FireBolt",
         "Interface\\Icons\\Spell_Nature_Lightning", nil }
@@ -192,7 +206,69 @@ function StyleSheet:PaintPearl(frame, y)
         end
         label:SetText(states[index])
     end
-    return y - 58
+    y = self:PaintUnitSamples(frame, y - 108)
+    return y
+end
+
+-- Owned unit-frame health samples: the same matte role the player and target
+-- frames use (Theme:PaintMatteBar on a StatusBar over the neutral rail), in the
+-- four states that matter - full, partial with an absorb strip, dead and a long
+-- mixed-width name. These are drawn from fixed plain numbers; the restricted
+-- path cannot be faked here and is only validated in game.
+local SAMPLE_WIDTH = 150
+
+function StyleSheet:PaintUnitSamples(frame, y)
+    self.unitSamples = self.unitSamples or {}
+    local rows = {
+        { name = app.L.styleMixed, value = 100, base = app.Theme:Accent() },
+        { name = "Pearl", value = 62, absorb = 22, base = app.Theme.colors.hostile },
+        { name = app.L.unitDead, value = 0, base = app.Theme.matte.deadFill },
+        { name = "珍珠 Pearl Warden of the Eastern Reach", value = 38, base = app.Theme.colors.friendly },
+    }
+    for index, row in ipairs(rows) do
+        local sample = self.unitSamples[index]
+        if not sample then
+            sample = {}
+            sample.bar = CreateFrame("StatusBar", nil, frame)
+            sample.bar:SetSize(SAMPLE_WIDTH, app.Theme.units.health)
+            sample.bar:SetMinMaxValues(0, 100)
+            sample.bar.background = sample.bar:CreateTexture(nil, "BACKGROUND")
+            sample.bar.background:SetAllPoints()
+            sample.clip = CreateFrame("Frame", nil, sample.bar)
+            sample.clip:SetAllPoints(sample.bar)
+            if type(sample.clip.SetClipsChildren) == "function" then sample.clip:SetClipsChildren(true) end
+            sample.strip = CreateFrame("StatusBar", nil, sample.clip)
+            sample.strip:SetSize(SAMPLE_WIDTH, app.Theme.units.health)
+            sample.strip:SetMinMaxValues(0, 100)
+            sample.name = app.Type:Text(frame, "micro")
+            sample.value = app.Type:Text(frame, "micro")
+            self.unitSamples[index] = sample
+        end
+        local top = y - (index - 1) * 26
+        sample.name:ClearAllPoints()
+        sample.name:SetPoint("TOPLEFT", PAD, top)
+        sample.name:SetWidth(SAMPLE_WIDTH - 36)
+        sample.name:SetText(row.name)
+        sample.value:ClearAllPoints()
+        sample.value:SetPoint("TOPRIGHT", sample.bar, "TOPRIGHT", 0, 12)
+        sample.value:SetText(row.value .. "%")
+        sample.bar:ClearAllPoints()
+        sample.bar:SetPoint("TOPLEFT", PAD, top - 12)
+        app.Theme:PaintMatteBar(sample.bar, row.base)
+        sample.bar:SetValue(row.value)
+        sample.strip:ClearAllPoints()
+        local fill = sample.bar:GetStatusBarTexture()
+        if fill then
+            sample.strip:SetPoint("TOPLEFT", fill, "TOPRIGHT", 0, 0)
+            sample.strip:SetPoint("BOTTOMLEFT", fill, "BOTTOMRIGHT", 0, 0)
+        end
+        local absorb = app.Theme.matte.absorb
+        sample.strip:SetStatusBarTexture(app.Theme.media.combatFill)
+        sample.strip:SetStatusBarColor(absorb[1], absorb[2], absorb[3], absorb[4])
+        sample.strip:SetValue(row.absorb or 0)
+        sample.strip:SetShown(row.absorb ~= nil)
+    end
+    return y - #rows * 26 - 6
 end
 
 function StyleSheet:PaintControls(frame, y)

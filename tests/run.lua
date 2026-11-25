@@ -774,6 +774,119 @@ test("quest list replaces the native quest block while offering folds, tracking 
     eq(#app.errors, 0)
 end)
 
+test("quest rows fade in once, emphasise completion once and leave nothing behind", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("appearance", "motion", true)
+    local list = app.components.questList
+    local function findRow(text)
+        for _, current in ipairs(list.rows) do
+            if current.frame:IsShown() and current.label:GetText() == text then return current end
+        end
+    end
+    H.Fire("QUEST_LOG_UPDATE")
+    -- Unchanged refreshes never animate anything.
+    for _, current in ipairs(list.rows) do eq(current.frame:GetAlpha(), 1) end
+    eq(next(app.EdgePulse.active), nil)
+    -- A newly tracked quest fades in; the existing rows stay put and opaque.
+    H.questLog.entries[#H.questLog.entries + 1] = { title = "Third quest", questID = 103, level = 40 }
+    H.questLog.objectives[103] = { { text = "Find the key" } }
+    H.questLog.watch[103] = 2
+    H.Fire("QUEST_LOG_UPDATE")
+    local third = findRow("Third quest")
+    eq(third ~= nil, true)
+    eq(third.frame:GetAlpha(), 0)
+    eq(findRow("First quest").frame:GetAlpha(), 1)
+    H.Advance(0.3)
+    eq(third.frame:GetAlpha(), 1)
+    -- Completion is emphasised once; repeated identical events do not re-fire.
+    H.questLog.ready[102] = true
+    H.Fire("QUEST_LOG_UPDATE")
+    local second = findRow("Second quest")
+    eq(app.EdgePulse.active[second.frame] ~= nil, true)
+    app.EdgePulse:Tick(GetTime() + 5)
+    eq(next(app.EdgePulse.active), nil)
+    H.Fire("QUEST_LOG_UPDATE")
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(app.EdgePulse.active[second.frame], nil)
+    -- A pooled row reused for another quest drops the running fade.
+    H.questLog.watch[103] = nil
+    H.questLog.entries[#H.questLog.entries + 1] = { title = "Fourth quest", questID = 104, level = 40 }
+    H.questLog.watch[104] = 3
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(#app.errors, 0)
+    -- Stopping settles every row and leaves no driver.
+    H.questLog.entries[#H.questLog.entries + 1] = { title = "Fifth quest", questID = 105, level = 40 }
+    H.questLog.watch[105] = 4
+    H.Fire("QUEST_LOG_UPDATE")
+    app.Store:Set("modules", "questList", false)
+    for _, current in ipairs(list.rows) do eq(current.frame:GetAlpha(), 1) end
+    eq(next(app.EdgePulse.active), nil)
+    eq(app.Transitions:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("a removed quest row leaves one input-free ghost that fades and is cleaned up", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("appearance", "motion", true)
+    local list = app.components.questList
+    H.Fire("QUEST_LOG_UPDATE")
+    H.questLog.entries[#H.questLog.entries + 1] = { title = "Gone quest", questID = 190, level = 40 }
+    H.questLog.objectives[190] = { { text = "Find it" } }
+    H.questLog.watch[190] = 2
+    H.Fire("QUEST_LOG_UPDATE")
+    H.Advance(0.3)
+    H.questLog.entries[#H.questLog.entries] = nil
+    H.questLog.watch[190] = nil
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(list.ghosts ~= nil and #list.ghosts >= 1, true)
+    local ghost = list.ghosts[1]
+    eq(ghost.busy, true)
+    eq(ghost.frame:IsShown(), true)
+    eq(ghost.frame:IsMouseEnabled(), false)
+    H.Advance(0.3)
+    eq(ghost.busy, false)
+    eq(ghost.frame:IsShown(), false)
+    -- Unchanged refreshes spawn nothing; stopping clears any ghost.
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(ghost.busy, false)
+    app.Store:Set("modules", "questList", false)
+    eq(app.Transitions:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("quest rows glide into their new slot and snap when motion is off", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("appearance", "motion", true)
+    local list = app.components.questList
+    local function findRow(text)
+        for _, current in ipairs(list.rows) do
+            if current.frame:IsShown() and current.label:GetText() == text then return current end
+        end
+    end
+    H.Fire("QUEST_LOG_UPDATE")
+    local second = findRow("Second quest")
+    local oldY = second.paintY
+    -- A quest above it appears: the row's slot moves down.
+    table.insert(H.questLog.entries, 2, { title = "Early quest", questID = 120, level = 5 })
+    H.questLog.objectives[120] = { { text = "Early goal" } }
+    H.questLog.watch[120] = 1
+    H.Fire("QUEST_LOG_UPDATE")
+    second = findRow("Second quest")
+    eq(second.paintY > oldY, true)
+    eq(second.visualY, oldY)
+    H.Advance(0.3)
+    eq(second.visualY, nil)
+    eq(app.Transitions:Count(), 0)
+    -- Motion off: no glide, the row sits in its slot at once.
+    app.Store:Set("appearance", "reduceMotion", true)
+    table.insert(H.questLog.entries, 2, { title = "Another quest", questID = 121, level = 5 })
+    H.questLog.watch[121] = 2
+    H.Fire("QUEST_LOG_UPDATE")
+    eq(findRow("Second quest").visualY, nil)
+    eq(app.Transitions:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
 test("quest list filters persist and restore the native tracker on disable", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local list = app.components.questList
@@ -1818,7 +1931,7 @@ test("unit frames keep running when cast, aura and mark APIs are missing", funct
     eq(frame.castTime, nil)
     eq(frame.auraIcons, nil)
     eq(frame.mark, nil)
-    eq(frame:GetHeight(), 38)
+    eq(frame:GetHeight(), 34)
     -- Unavailable parts registered no events, so their events stay inert.
     H.Fire("UNIT_AURA", "target")
     H.Fire("RAID_TARGET_UPDATE")
@@ -1839,7 +1952,7 @@ test("unit frames keep auras and marks without the cast API", function()
     eq(units.parts.marks.available, true)
     local frame = units.frames.target
     eq(frame.cast, nil)
-    eq(frame:GetHeight(), 64)
+    eq(frame:GetHeight(), 60)
     H.unitAuras.target = { helpful = { { icon = "buff1" } } }
     H.Fire("UNIT_AURA", "target")
     eq(frame.auraIcons[1]:IsShown(), true)
@@ -1860,7 +1973,7 @@ test("unit frames keep cast and marks without the aura API", function()
     eq(units.parts.marks.available, true)
     local frame = units.frames.target
     eq(frame.auraIcons, nil)
-    eq(frame:GetHeight(), 54)
+    eq(frame:GetHeight(), 50)
     H.cast.target = { name = "Fireball", startTime = 0, endTime = 2500 }
     H.Fire("UNIT_SPELLCAST_START", "target")
     eq(frame.cast:IsShown(), true)
@@ -1876,7 +1989,7 @@ test("unit frame height follows parts and disable releases everything", function
     local units = app.components.unitFrames
     local frame = units.frames.target
     eq(frame:GetWidth(), 180)
-    eq(frame:GetHeight(), 80)
+    eq(frame:GetHeight(), 76)
     eq(frame.watched, true)
     -- Hover shows the unit tooltip through the interaction part.
     frame.scripts.OnEnter(frame)
@@ -1899,7 +2012,7 @@ test("unit frame height follows parts and disable releases everything", function
     eq(frame.events.events["UNIT_SPELLCAST_START"], "target")
     eq(frame.events.events["UNIT_AURA"], "target")
     eq(frame.events.events["RAID_TARGET_UPDATE"], true)
-    eq(frame:GetHeight(), 80)
+    eq(frame:GetHeight(), 76)
     eq(frame.cast:IsShown(), false)
     eq(#app.errors, 0)
 end)
@@ -1911,8 +2024,8 @@ test("unit main frames share the health baseline and keep it during part changes
     local player, target = units.frames.player, units.frames.target
     eq(player:GetWidth(), 180)
     eq(target:GetWidth(), 180)
-    eq(player.health:GetHeight(), 18)
-    eq(target.health:GetHeight(), 18)
+    eq(player.health:GetHeight(), 14)
+    eq(target.health:GetHeight(), 14)
     local function healthTop(frame)
         return frame.point[5] + frame:GetHeight() / 2 - 15
     end
@@ -1925,17 +2038,17 @@ test("unit main frames share the health baseline and keep it during part changes
     eq(target.point[4], 245.76)
     local playerTop = player.point[5] + player:GetHeight() / 2
     -- Auras sit directly under power; the target cast owns the next row.
-    eq(target.auraIcons[1].point[3], -40)
-    eq(target.cast.point[3], -60)
+    eq(target.auraIcons[1].point[3], -36)
+    eq(target.cast.point[3], -56)
     H.cast.target = { name = "Fireball", startTime = 0, endTime = 2500 }
     H.Fire("UNIT_SPELLCAST_START", "target")
     eq(target.cast:IsShown(), true)
     eq(player.point[5] + player:GetHeight() / 2, playerTop)
-    eq(target.auraIcons[1].point[3], -40)
+    eq(target.auraIcons[1].point[3], -36)
     H.cast.target.gone = true
     H.Fire("UNIT_SPELLCAST_STOP", "target")
     eq(target.cast:IsShown(), false)
-    eq(target.auraIcons[1].point[3], -40)
+    eq(target.auraIcons[1].point[3], -36)
     -- The player's cast remains the client's central bar, not an inline row.
     eq(player.cast, nil)
     eq(#app.errors, 0)
@@ -1949,11 +2062,11 @@ test("a missing aura part keeps the main frame's top edge fixed", function()
     local saved = C_UnitAuras
     C_UnitAuras = nil
     app:Reconcile()
-    eq(player:GetHeight(), 38)
+    eq(player:GetHeight(), 34)
     eq(math.abs(player.point[5] + player:GetHeight() / 2 - top) < 0.01, true)
     C_UnitAuras = saved
     app:Reconcile()
-    eq(player:GetHeight(), 64)
+    eq(player:GetHeight(), 60)
     eq(math.abs(player.point[5] + player:GetHeight() / 2 - top) < 0.01, true)
     eq(#app.errors, 0)
 end)
@@ -2126,10 +2239,10 @@ test("unit bars keep names and values above compact health and power", function(
         eq(frame.name.point[3], 0)
         eq(frame.value.point[1], "TOPRIGHT")
         eq(frame.value.point[3], 0)
-        eq(frame.health:GetHeight(), 18)
+        eq(frame.health:GetHeight(), 14)
         eq(frame.power:GetHeight(), 3)
         eq(frame.powerValue.point[1], "TOPRIGHT")
-        eq(frame.powerValue.point[3], -36)
+        eq(frame.powerValue.point[3], -32)
     end
     eq(#app.errors, 0)
 end)
@@ -2157,60 +2270,56 @@ test("party rows keep the native private auras in their own right column", funct
     eq(#app.errors, 0)
 end)
 
-test("unit bars paint class, reaction and power gradient pairs", function()
+test("unit bars use the matte fill from the game's colours on a neutral rail", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("modules", "unitFrames", true)
     local units = app.components.unitFrames
     local player, target = units.frames.player, units.frames.target
-    -- The player's bar runs the class pair from the game's class colors: dark
-    -- end at 0.45x, light end toward white, the fill texture white under it.
-    local fill = player.health:GetStatusBarTexture()
+    local rail = app.Theme.matte.rail
+    -- The player's fill is the class colour on the matte texture with no
+    -- gradient record; the empty rail is the same near-neutral grey for everyone.
     local monk = RAID_CLASS_COLORS.MONK
-    eq(fill.gradient.hi[2], monk.g + (1 - monk.g) * 0.25)
-    eq(fill.gradient.lo[2], monk.g * 0.45)
-    eq(player.health.barColor[1], 1)
-    eq(player.health.background.color[1], 0.4 * (fill.gradient.lo[1] + fill.gradient.hi[1]) / 2)
-    -- A hostile creature runs the hostile pair; a friendly one the green pair.
-    local tfill = target.health:GetStatusBarTexture()
-    eq(tfill.gradient.lo[1], app.Theme.colors.hostile[1] * 0.45)
+    eq(player.health.barColor[1], monk.r)
+    eq(player.health.barColor[2], monk.g)
+    eq(player.health.gradient, nil)
+    eq(player.health:GetStatusBarTexture().texture, app.Theme.media.combatFill)
+    eq(player.health.background.color[1], rail[1])
+    eq(target.health.background.color[1], rail[1])
+    -- A hostile creature takes the hostile colour, a friendly one the green; the
+    -- rail does not change with either.
+    eq(target.health.barColor[1], app.Theme.colors.hostile[1])
     H.unitInfo.focus.reaction = 5
     H.Fire("UNIT_HEALTH", "focus")
-    local focus = units.frames.focus.health:GetStatusBarTexture()
-    eq(focus.gradient.hi[2], app.Theme.colors.friendly[2] + (1 - app.Theme.colors.friendly[2]) * 0.25)
-    -- The power bar follows the power type's game color; mana by default.
-    local pfill = player.power:GetStatusBarTexture()
-    local mana = PowerBarColor.MANA
-    eq(pfill.gradient.lo[3], mana.b * 0.45)
-    eq(pfill.gradient.hi[3], mana.b + (1 - mana.b) * 0.25)
+    eq(units.frames.focus.health.barColor[2], app.Theme.colors.friendly[2])
+    eq(units.frames.focus.health.background.color[1], rail[1])
+    -- The power bar follows the power type's game colour; mana by default.
+    eq(player.power.barColor[3], PowerBarColor.MANA.b)
     -- A tapped unit grays out; restricted identity falls back to the accent
-    -- pair without touching secret values.
+    -- without touching secret values.
     H.unitInfo.target = { isPlayer = false, tapped = true }
     H.Fire("UNIT_HEALTH", "target")
-    local tappedFill = target.health:GetStatusBarTexture()
-    eq(tappedFill.gradient.lo[1], app.Theme.colors.tapped[1] * 0.45)
+    eq(target.health.barColor[1], app.Theme.colors.tapped[1])
     H.unitInfo.target = { isPlayer = H.Secret(true) }
     H.unitInfo.focus.reaction = H.Secret(5)
     H.Fire("UNIT_HEALTH", "target")
-    local accent = app.Theme:Accent()
-    local after = target.health:GetStatusBarTexture()
-    eq(after.gradient.hi[1], accent[1] + (1 - accent[1]) * 0.25)
+    eq(target.health.barColor[1], app.Theme:Accent()[1])
+    -- A dead unit's fill is the neutral dead grey, not its class colour.
+    H.unitState.dead.player = true
+    H.Fire("UNIT_HEALTH", "player")
+    eq(player.health.barColor[1], app.Theme.matte.deadFill[1])
+    H.unitState.dead.player = nil
     eq(#app.errors, 0)
 end)
 
-test("bar gradients fall back to a flat middle without the gradient API", function()
+test("the matte health role never keeps a gradient and works without the gradient API", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     _G.CreateColor = nil
     app.Store:Set("modules", "unitFrames", true)
     local health = app.components.unitFrames.frames.player.health
     eq(health:GetStatusBarTexture().gradient, nil)
-    -- The fill falls back to the unit pair's flat middle; the lookup itself
-    -- does not depend on the gradient API.
-    local monk = RAID_CLASS_COLORS.MONK
-    local lo, hi = monk.r * 0.45, monk.r + (1 - monk.r) * 0.25
-    eq(health.barColor[1], (lo + hi) / 2)
+    eq(health.barColor[1], RAID_CLASS_COLORS.MONK.r)
     eq(#app.errors, 0)
 end)
-
 
 test("unit frame preview preserves native frames and cast bars", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
@@ -2227,7 +2336,7 @@ test("unit frame preview preserves native frames and cast bars", function()
     eq(units.takeover.cast, false)
     eq(units:Describe():find(app.L.nativeAwaitingValidation, 1, true) ~= nil, true)
     -- The player cast is the client's own bar; only bars and auras remain here.
-    eq(units.frames.player:GetHeight(), 64)
+    eq(units.frames.player:GetHeight(), 60)
     -- The preview never suppresses a client re-show.
     PlayerFrame:Show()
     eq(PlayerFrame:IsShown(), true)
@@ -2396,14 +2505,12 @@ test("unit frames include the target's target with parts, watch and events", fun
     -- A player target-of-target redraws with the class pair on its event.
     H.unitInfo.targettarget = { isPlayer = true, class = "WARRIOR" }
     H.Fire("UNIT_HEALTH", "targettarget")
-    local fill = frame.health:GetStatusBarTexture()
     local warrior = RAID_CLASS_COLORS.WARRIOR
-    eq(fill.gradient.lo[1], warrior.r * 0.45)
-    eq(fill.gradient.hi[1], warrior.r + (1 - warrior.r) * 0.25)
+    eq(frame.health.barColor[1], warrior.r)
     -- A hostile one switches to the hostile reaction pair.
     H.unitInfo.targettarget = { isPlayer = false, reaction = 3 }
     H.Fire("UNIT_HEALTH", "targettarget")
-    eq(fill.gradient.lo[1], app.Theme.colors.hostile[1] * 0.45)
+    eq(frame.health.barColor[1], app.Theme.colors.hostile[1])
     -- Disabling releases it like every other unit frame.
     app.Store:Set("modules", "unitFrames", false)
     eq(frame:IsShown(), false)
@@ -4081,6 +4188,8 @@ end)
 
 test("nameplates paint the target bar and restore it on disable", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     eq(app.components.nameplates.status, "disabled")
     app.Store:Set("modules", "nameplates", true)
     local bar = H.targetBar
@@ -4107,6 +4216,8 @@ end)
 
 test("the target plate keeps its track, hairline and mark in step", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local bar = H.targetBar
     local bg, edge, mark = bar.lumaNameplateBg, bar.lumaNameplateEdge, bar.lumaNameplateMark
@@ -4493,6 +4604,8 @@ end)
 
 test("nameplate styling restores the previous plate and skips forbidden bars", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     local firstBar = H.targetBar
@@ -4535,6 +4648,8 @@ end
 
 test("every hostile plate gets the visible layer and only the target carries the chip", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     local first = addPlate("nameplate1", { 0.5, 0.1, 0.1, 1 })
@@ -4567,6 +4682,8 @@ end)
 
 test("a recycled plate restores its previous owner before the new unit paints", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     local bar = H.PlainBar({ 0.7, 0.7, 0.1, 1 })
@@ -4586,6 +4703,8 @@ end)
 
 test("a friendly plate keeps its native fill and still gains the LumaUI plate", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     H.unitInfo.nameplate7 = { enemy = false }
@@ -4610,6 +4729,8 @@ end)
 
 test("a plate whose bar appears a moment later is styled by the retry", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     -- The client announced the plate before its unit frame existed. That is a
@@ -4642,6 +4763,8 @@ end)
 
 test("a texture-drawn nameplate bar is decorated without repainting the fill", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     H.unitInfo.nameplate9 = { enemy = true }
@@ -4694,6 +4817,8 @@ end)
 
 test("the modern nested nameplate bar wins over the legacy field", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local modern = H.PlainBar({ 0.8, 0.1, 0.1, 1 })
     local legacy = H.PlainBar({ 0.2, 0.3, 0.4, 1 })
@@ -4730,6 +4855,8 @@ end)
 
 test("a modern nameplate field without a drawing method falls back to the legacy bar", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local modern = { IsForbidden = function() return false end }
     local legacy = H.PlainBar({ 0.2, 0.3, 0.4, 1 })
@@ -4744,6 +4871,8 @@ end)
 
 test("a nameplate bar without a readable colour keeps its native fill", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     -- No GetStatusBarColor on this bar, so the colour cannot be put back.
     local bar = H.NewFrame(nil, UIParent)
@@ -4772,6 +4901,8 @@ end)
 
 test("the target's plate is owned by its nameplate token, not the alias", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     -- Before the client exposes a token the alias alone holds the plate.
@@ -4800,6 +4931,8 @@ end)
 
 test("the plate report counts bases, classes and fill outcomes", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local function addPlate(unit, reaction, plate)
         H.unitInfo[unit] = { reaction = reaction }
@@ -4852,6 +4985,8 @@ end)
 
 test("a retry bound to a recycled plate never decorates the new one", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     -- The token appears without a unit frame yet, which schedules the one retry.
@@ -4876,6 +5011,8 @@ end)
 
 test("a plate that turns forbidden is released without a write", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     H.unitInfo.nameplate2 = { reaction = 3 }
     local plate = H.Plate("modern")
@@ -4895,22 +5032,22 @@ end)
 
 test("the target chip is warm white and friendly bars keep their fill", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local text = app.Theme.colors.text
     eq(H.targetBar.lumaNameplateTarget.color[1], text[1])
     eq(H.targetBar.lumaNameplateTarget.color[2], text[2])
     eq(H.targetBar.lumaNameplateTarget.color[3], text[3])
-    -- A friendly plate keeps a friendly hue instead of the hostile combat red.
-    -- The fixture reports secret health, so the own numeric layer cannot draw
-    -- and the native track receives the muted fallback palette.
+    -- A friendly plate keeps the client's own fill instead of the hostile
+    -- combat repaint.
     H.unitInfo.nameplate3 = { reaction = 5 }
     local plate = H.Plate("modern")
     H.nameplates.nameplate3 = plate
     H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate3")
     local bar = plate.UnitFrame.HealthBarsContainer.healthBar
-    eq(bar.barColor[1], 0.35)
-    eq(bar.barColor[2], 0.60)
-    eq(bar.statusFill.texture, app.Theme.media.combatFill)
+    eq(bar.barColor[1], 0.8)
+    eq(bar.barColor[2], 0.1)
     eq(bar.lumaNameplateBg:IsShown(), true)
     eq(app.components.nameplates.plates.nameplate3.painted, false)
     app.Store:Set("modules", "nameplates", false)
@@ -4953,6 +5090,11 @@ test("/luma hud covers the resource, unit, chat plate and reserved cast area", f
     eq(text:find("castArea LumaUIPlaceholder_unit_player_cast:", 1, true) ~= nil, true)
     eq(text:find("reserved=yes", 1, true) ~= nil, true)
     eq(text:find("vis=", 1, true) ~= nil, true)
+    -- Own cooldown groups and the own cast bar are listed even when absent, so
+    -- a missing group reads as unknown rather than silently disappearing.
+    eq(text:find("ownGroup LumaUICooldownOwn_essential:", 1, true) ~= nil, true)
+    eq(text:find("ownGroup LumaUICooldownOwn_utility:", 1, true) ~= nil, true)
+    eq(text:find("ownCast LumaUIPlayerCast:", 1, true) ~= nil, true)
     eq(#app.errors, 0)
 end)
 
@@ -5222,6 +5364,133 @@ test("primary controls pulse on hover and drop the animation when disabled", fun
     button:SetEnabled(false)
     eq(app.EdgePulse.active[button], nil)
     eq(button.lumaEdgePulse.top:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("button hover run starts once, releases on hide and on reduce motion", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local button = app.Controls:Button(UIParent, "Go", 100, function() end, { kind = "primary" })
+    button:SetSize(120, 30)
+    button.scripts.OnEnter(button)
+    local record = app.EdgePulse.active[button]
+    button.scripts.OnEnter(button)
+    eq(app.EdgePulse.active[button], record)
+    -- Hiding mid-hover leaves no run, no visible segment and no driver.
+    button.scripts.OnHide(button)
+    eq(app.EdgePulse.active[button], nil)
+    eq(button.lumaEdgePulse.top:IsShown(), false)
+    eq(app.EdgePulse.driver, nil)
+    -- Re-entry after the release starts a fresh run.
+    button.scripts.OnEnter(button)
+    eq(app.EdgePulse.active[button] ~= nil, true)
+    -- Reduce motion switched on mid-run converges at the next tick, and the
+    -- static hover state stays.
+    app.Store:Set("appearance", "reduceMotion", true)
+    app.EdgePulse:Tick(GetTime() + 0.01)
+    eq(next(app.EdgePulse.active), nil)
+    eq(button.state.hover, true)
+    button.scripts.OnLeave(button)
+    button.scripts.OnEnter(button)
+    eq(app.EdgePulse.active[button], nil)
+    eq(#app.errors, 0)
+end)
+
+test("bank opens and closes re-entrantly, and the server close hides at once", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("appearance", "motion", true)
+    app.Store:Set("modules", "bank", true)
+    local bank = app.components.bank
+    local frame = bank.frame
+    H.Advance(0.3)
+    bank:SetOpen(false)
+    eq(bank.closing, true)
+    eq(frame:IsShown(), true)
+    eq(frame:IsMouseEnabled(), false)
+    bank:SetOpen(true)
+    eq(bank.closing, false)
+    eq(frame:IsMouseEnabled(), true)
+    app.Transitions:Settle(frame)
+    eq(frame:IsShown(), true)
+    bank:SetOpen(false)
+    app.Transitions:Settle(frame)
+    eq(frame:IsShown(), false)
+    eq(frame:GetAlpha(), 1)
+    eq(frame:IsMouseEnabled(), true)
+    -- Items ignore clicks while closing.
+    bank:SetOpen(true)
+    H.Advance(0.3)
+    bank:SetOpen(false)
+    bank.buttons[1].item = { bag = 0, slot = 1 }
+    local picked = 0
+    local old = app.Items.Pickup
+    app.Items.Pickup = function() picked = picked + 1 end
+    bank.buttons[1].scripts.OnClick(bank.buttons[1], "LeftButton")
+    app.Items.Pickup = old
+    eq(picked, 0)
+    -- BANKFRAME_CLOSED is not the player's choice: hide now, end clean.
+    H.Fire("BANKFRAME_CLOSED")
+    eq(frame:IsShown(), false)
+    eq(bank.closing, false)
+    eq(frame:GetAlpha(), 1)
+    eq(#app.errors, 0)
+end)
+
+test("inventory opens and closes re-entrantly and always ends in a clean state", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("appearance", "motion", true)
+    local inventory = app.components.inventory
+    local frame = inventory.frame
+    inventory:SetOpen(true)
+    eq(frame:IsShown(), true)
+    H.Advance(0.3)
+    -- Close starts a fade: hits are off, the window is still shown.
+    inventory:SetOpen(false)
+    eq(inventory.closing, true)
+    eq(frame:IsShown(), true)
+    eq(frame:IsMouseEnabled(), false)
+    -- Reversing mid-close keeps the window and restores hits.
+    inventory:SetOpen(true)
+    eq(inventory.closing, false)
+    eq(frame:IsMouseEnabled(), true)
+    app.Transitions:Settle(frame)
+    eq(frame:IsShown(), true)
+    -- A stale close can never hide a window that was reopened.
+    inventory:SetOpen(false)
+    inventory:SetOpen(true)
+    app.Transitions:Settle(frame)
+    eq(frame:IsShown(), true)
+    -- Close, settle: hidden, opaque and hittable for the next open.
+    inventory:SetOpen(false)
+    app.Transitions:Settle(frame)
+    eq(frame:IsShown(), false)
+    eq(frame:GetAlpha(), 1)
+    eq(frame:IsMouseEnabled(), true)
+    eq(inventory.closing, false)
+    -- Host hide mid-close (Esc) and reduce motion both end clean.
+    inventory:SetOpen(true)
+    H.Advance(0.3)
+    inventory:SetOpen(false)
+    frame:Hide()
+    eq(frame:GetAlpha(), 1)
+    eq(inventory.closing, false)
+    app.Store:Set("appearance", "reduceMotion", true)
+    inventory:SetOpen(true)
+    inventory:SetOpen(false)
+    eq(frame:IsShown(), false)
+    -- Item cells ignore clicks while closing.
+    app.Store:Set("appearance", "reduceMotion", false)
+    inventory:SetOpen(true)
+    H.Advance(0.3)
+    inventory:SetOpen(false)
+    eq(inventory.closing, true)
+    inventory.buttons[1].item = { bag = 0, slot = 1 }
+    local picked = 0
+    local old = app.Items.Pickup
+    app.Items.Pickup = function() picked = picked + 1 end
+    inventory.buttons[1].scripts.OnClick(inventory.buttons[1], "LeftButton")
+    app.Items.Pickup = old
+    eq(picked, 0)
+    app.Transitions:Settle(frame)
     eq(#app.errors, 0)
 end)
 
@@ -10613,6 +10882,8 @@ end)
 
 test("a plate bar that cannot host textures still gets its decorations", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- This test covers the native repaint, which is the own layer's opposite mode.
+    app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     local component = app.components.nameplates
     H.unitInfo.nameplate11 = { enemy = true }
@@ -11527,6 +11798,28 @@ test("pearl presets preview, apply and undo exact positions", function()
     eq(#app.errors, 0)
 end)
 
+test("blood DK preset moves the two groups and cast only when applied, and undoes", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local layout = app.Layout
+    SlashCmdList.LUMAUI("cds owned")
+    local names = {}
+    for _, preset in ipairs(layout:Presets()) do names[preset.id] = preset.label end
+    eq(names.pearlBloodDK, "presetPearlBloodDK")
+    eq(app.L.presetPearlBloodDK ~= nil, true)
+    local before = app.Store:Profile().positions
+    eq(before.cdGroup_essential, nil)
+    layout:ApplyPreset("pearlBloodDK")
+    local saved = app.Store:Profile().positions
+    eq(saved.cdGroup_essential ~= nil, true)
+    eq(saved.cdGroup_utility ~= nil, true)
+    -- Essential sits above utility (positive y is up).
+    eq(saved.cdGroup_essential.y > saved.cdGroup_utility.y, true)
+    layout:UndoPreset()
+    eq(app.Store:Profile().positions.cdGroup_essential, nil)
+    eq(app.Store:Profile().positions.cdGroup_utility, nil)
+    eq(#app.errors, 0)
+end)
+
 test("region layout reports unknown positions instead of zero", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local function region(id)
@@ -11616,14 +11909,16 @@ test("the own nameplate look is on by default", function()
     eq(view.frame:IsShown(), true)
     eq(view.name:GetText(), "Guard")
     eq(view.value:GetText(), "50%")
-    -- The own plate is a full dark panel over the client's panel, not a small
-    -- strip inside it; that is what makes the replacement visible.
-    eq(view.frame.backdrop:IsShown(), true)
-    eq(view.frame.backdrop:IsShown(), true)
-    eq(view.tint:IsShown(), false)
-    eq(view.frame.edge ~= nil, true)
-    eq(view.frame:GetWidth() >= 96, true)
-    eq(view.frame:GetHeight() >= 10, true)
+    -- 013 geometry: a fixed narrow track from the own spec. The native bar is
+    -- an anchor only, so its size (here the 100 x 30 harness default) is never
+    -- inherited, and no dark card or strips are drawn over the client's plate.
+    local spec = app.PlateView.Spec
+    eq(view.health:GetWidth(), spec.width)
+    eq(view.health:GetHeight(), spec.height)
+    eq(view.frame:GetWidth(), spec.width)
+    eq(view.frame.backdrop, nil)
+    eq(view.tint, nil)
+    eq(view.health.background.color[1], app.Theme.matte.rail[1])
     eq(bar:GetAlpha(), 0)
     -- Opting out gives the client's bar and name back.
     app.Store:Set("ui", "plateOwned", false)
@@ -11633,9 +11928,65 @@ test("the own nameplate look is on by default", function()
     eq(#app.errors, 0)
 end)
 
-test("a restricted nameplate still gets the matte native skin", function()
+test("a plate whose native name is already hidden still shows the own name", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
-    local bar = H.PlainBar()
+    local plate = H.Plate("modern", H.PlainBar({ 0.6, 0.5, 0.3, 1 }))
+    plate.UnitFrame.name = H.NewFrame(nil, plate.UnitFrame)
+    plate.UnitFrame.name:Hide()
+    H.nameplates.nameplate1 = plate
+    H.unitInfo.nameplate1 = { reaction = 4 }
+    _G.UnitName = function() return "Dummy" end
+    app.Store:Set("modules", "nameplates", true)
+    app:Reconcile()
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
+    local record = app.components.nameplates.plates.nameplate1
+    eq(record.nameState, "luma")
+    eq(plate.lumaPlateView.name.text, "Dummy")
+    eq(record.nativeNameShown, false)
+    -- A friendly unit whose UnitIsEnemy answer is plain false is friendly, not unknown.
+    _G.UnitIsEnemy = function() return false end
+    H.unitInfo.nameplate1 = {}
+    eq(#app.errors, 0)
+end)
+
+test("the plate view clips by display columns, resizes for the target and resets completely", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local PV, spec = app.PlateView, app.PlateView.Spec
+    local holder = CreateFrame("Frame", nil, UIParent)
+    local view = PV:Create(holder)
+    -- Wide characters count two columns, so a CJK name is cut earlier than a
+    -- Latin one, and never in the middle of a UTF-8 sequence.
+    eq(PV.Clip("abcdefghij", 22), "abcdefghij")
+    local cjk = PV.Clip(string.rep("珍", 30), spec.nameColumns)
+    eq(#cjk % 3, 0)
+    eq(#cjk <= spec.nameColumns * 3 / 2 + 3, true)
+    PV:SetName(view, string.rep("珍", 30))
+    eq(view.name.text, cjk)
+    -- The target is a touch larger and shows its chip; leaving it restores both.
+    PV:SetTarget(view, true)
+    eq(view.chip:IsShown(), true)
+    eq(view.health:GetWidth(), spec.targetWidth)
+    eq(view.health:GetHeight(), spec.targetHeight)
+    PV:SetTarget(view, false)
+    eq(view.chip:IsShown(), false)
+    eq(view.health:GetWidth(), spec.width)
+    eq(view.health:GetHeight(), spec.height)
+    -- Reset leaves no name, percentage, chip, unit or cast behind for the next
+    -- plate that borrows this view from the pool.
+    PV:SetTarget(view, true)
+    PV:SetCast(view, { name = "x", elapsed = 0.1, duration = 1, channel = false, interruptible = true })
+    PV:Reset(view)
+    eq(view.name.text, "")
+    eq(view.value.text, "")
+    eq(view.chip:IsShown(), false)
+    eq(view.unit, nil)
+    eq(view.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("a restricted nameplate is drawn straight into the own StatusBar and every native part is restored", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar = H.PlainBar({ 0.62, 0.55, 0.28, 1 })
     bar.height = 12
     bar.texture = "Interface\\Nameplates\\old"
     bar.GetHeight = function(self) return self.height end
@@ -11645,32 +11996,72 @@ test("a restricted nameplate still gets the matte native skin", function()
     local plate = H.Plate("modern", bar)
     plate.UnitFrame.level = 1
     bar.level = 3
-    local nativePanel = H.NewFrame(nil, plate.UnitFrame)
-    plate.UnitFrame.Background = nativePanel
+    -- The three client parts the report names. `deselectedOverlay` starts hidden
+    -- on purpose: `false` is a real recorded value and must come back as false.
+    bar.bgTexture = H.NewFrame(nil, bar)
+    bar.selectedBorder = H.NewFrame(nil, bar)
+    bar.deselectedOverlay = H.NewFrame(nil, bar)
+    bar.deselectedOverlay:Hide()
     H.nameplates.nameplate1 = plate
     H.unitInfo.nameplate1 = { reaction = 4 }
     _G.UnitName = function() return "Guard" end
     _G.UnitHealth, _G.UnitHealthMax = function() return H.Secret(50) end, function() return H.Secret(100) end
+    _G.UnitHealthPercent = function() return H.Secret(50) end
     app.Store:Set("modules", "nameplates", true)
     app:Reconcile()
     H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
-    -- Restricted health: no own layer; the client's fill and name stay, the
-    -- fill is restyled in place and the client's plate border is removed.
-    local restricted = plate.lumaPlateView
-    eq(restricted.frame:IsShown(), false)
-    eq(nativePanel:IsShown(), false)
-    eq(nativePanel.alpha, 0)
-    eq(bar:GetAlpha(), 1)
-    eq(bar.height, 8)
-    eq(bar.texture, app.Theme.media.combatFill)
-    -- A neutral plate takes the muted palette instead of the client's bright
-    -- yellow-green fill; removal restores the original colour.
-    eq(bar.barColor[1], 0.62)
-    eq(bar.barColor[2], 0.55)
-    H.Fire("NAME_PLATE_UNIT_REMOVED", "nameplate1")
+    local view = plate.lumaPlateView
+    local record = app.components.nameplates.plates.nameplate1
+    -- Restricted numbers reached the own StatusBar without Lua reading them.
+    eq(view.frame:IsShown(), true)
+    eq(app.Capabilities.IsSecret(view.health.value), true)
+    eq(app.Capabilities.IsSecret(view.health.maximum), true)
+    eq(view.value:GetText(), "50%")
+    eq(record.healthPath, "direct")
+    eq(record.percentSource, "api")
+    -- The report names where the name and the numbers come from, and counts
+    -- restricted plates separately from plates that fell back to native.
+    local report = table.concat(app:Collect(function() app.components.nameplates:Diagnose(40) end), "\n")
+    eq(report:find("restricted=1 fallback=0", 1, true) ~= nil, true)
+    eq(report:find("name=luma", 1, true) ~= nil or report:find("name=luma:no-native-object", 1, true) ~= nil, true)
+    eq(report:find("nativeName=", 1, true) ~= nil, true)
+    eq(app.Ownership:Get("nameplates.health").active, "owned")
+    eq(app.Ownership:Get("nameplates.border").active, "owned")
+    eq(app.Ownership:Get("nameplates.name").evidence, "simulated")
+    -- Native parts stepped aside one by one, each recorded and read back.
+    eq(bar:GetAlpha(), 0)
+    eq(bar.bgTexture:IsShown(), false)
+    eq(bar.selectedBorder:IsShown(), false)
+    eq(bar.selectedBorder.alpha, 0)
+    -- The own layer never touches the client's bar geometry or texture.
     eq(bar.height, 12)
     eq(bar.texture, "Interface\\Nameplates\\old")
-    eq(nativePanel:IsShown(), true)
+    eq(bar.barColor[1], 0.62)
+    -- Direct drawing off keeps a restricted plate fully native.
+    SlashCmdList.LUMAUI("plates direct")
+    eq(app.Store:Profile().ui.plateDirect, false)
+    eq(view.frame:IsShown(), false)
+    eq(bar:GetAlpha(), 1)
+    eq(bar.bgTexture:IsShown(), true)
+    eq(bar.selectedBorder:IsShown(), true)
+    eq(bar.deselectedOverlay:IsShown(), false)
+    SlashCmdList.LUMAUI("plates direct")
+    eq(view.frame:IsShown(), true)
+    eq(bar:GetAlpha(), 0)
+    -- Keep mode leaves every native part visible under the own layer.
+    SlashCmdList.LUMAUI("plates native")
+    eq(app.Store:Profile().ui.plateNative, "keep")
+    eq(bar:GetAlpha(), 1)
+    eq(bar.bgTexture:IsShown(), true)
+    SlashCmdList.LUMAUI("plates native")
+    eq(bar:GetAlpha(), 0)
+    H.Fire("NAME_PLATE_UNIT_REMOVED", "nameplate1")
+    eq(view.frame:IsShown(), false)
+    eq(bar:GetAlpha(), 1)
+    eq(bar.bgTexture:IsShown(), true)
+    eq(bar.selectedBorder:IsShown(), true)
+    -- `false` survived the round trip: the hidden overlay is still hidden.
+    eq(bar.deselectedOverlay:IsShown(), false)
     app.Store:Set("modules", "nameplates", false)
     eq(#app.errors, 0)
 end)
@@ -11696,9 +12087,16 @@ test("own nameplate layer draws its track and restores native parts", function()
     -- Only the native fill is dimmed; the plate button itself keeps its input.
     eq(bar:GetAlpha(), 0)
     eq(plate.UnitFrame.mouseEnabled, nil)
-    -- A restricted health payload hides the own layer and keeps the native fill
-    -- plus its restyled name instead of freezing the last readable value.
-    _G.UnitHealth = function() return H.Secret(60) end
+    -- A restricted health payload keeps drawing through the own StatusBar: the
+    -- secret goes in without being read, and the native fill stays hidden.
+    local secret = H.Secret(60)
+    _G.UnitHealth = function() return secret end
+    H.Fire("UNIT_HEALTH", "nameplate1")
+    eq(view.frame:IsShown(), true)
+    eq(view.health.value, secret)
+    eq(bar:GetAlpha(), 0)
+    -- A refused write (the client rejects the call) hands the plate back whole.
+    _G.UnitHealth = function() error("refused") end
     H.Fire("UNIT_HEALTH", "nameplate1")
     eq(view.frame:IsShown(), false)
     eq(bar:GetAlpha(), 1)
@@ -11738,6 +12136,30 @@ test("own nameplate cast row only draws readable casts", function()
     H.Fire("UNIT_SPELLCAST_STOP", "nameplate1")
     eq(view.cast:IsShown(), false)
     app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("the style card shows matte unit-frame health in its four states", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.StyleSheet:Toggle(true)
+    local samples = app.StyleSheet.unitSamples
+    eq(#samples, 4)
+    local rail = app.Theme.matte.rail
+    for _, sample in ipairs(samples) do
+        eq(sample.bar.gradient, nil)
+        eq(sample.bar.background.color[1], rail[1])
+        eq(sample.bar:GetStatusBarTexture().texture, app.Theme.media.combatFill)
+    end
+    eq(samples[1].bar.value, 100)
+    eq(samples[2].strip:IsShown(), true)
+    eq(samples[2].strip.value, 22)
+    eq(samples[3].bar.barColor[1], app.Theme.matte.deadFill[1])
+    eq(samples[3].strip:IsShown(), false)
+    eq(samples[4].value:GetText(), "38%")
+    -- Reopening reuses the same samples.
+    app.StyleSheet:Toggle(false)
+    app.StyleSheet:Toggle(true)
+    eq(#app.StyleSheet.unitSamples, 4)
     eq(#app.errors, 0)
 end)
 
@@ -11785,7 +12207,8 @@ test("own cooldown groups import order and draw live cells", function()
     eq(cds.containers.essential.frame:IsShown(), true)
     local cell = cds.containers.essential.cells[1]
     eq(cell.icon:IsShown(), true)
-    eq(cell.icon.texture, "Interface\\Icons\\13345")
+    -- The raw fileID, the same form the client's own buttons pass to SetTexture.
+    eq(cell.icon.texture, 13345)
     eq(cell.state, "tracking")
     eq(cell.lumaSpellID, 12345)
     eq(cell.time:GetText(), "20")
@@ -11809,6 +12232,385 @@ test("own cooldown groups import order and draw live cells", function()
     app.Store:Set("modules", "cooldownGroups", false)
     eq(cds.containers.essential.frame:IsShown(), false)
     eq(cds.ticker, nil)
+    eq(#app.errors, 0)
+end)
+
+test("routine cooldown updates on two groups add no layout writes", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 30, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    H.now = 10
+    SlashCmdList.LUMAUI("cds add 111")
+    SlashCmdList.LUMAUI("cds add 222 utility")
+    SlashCmdList.LUMAUI("cds owned")
+    local writes = 0
+    local function count(frame)
+        for _, name in ipairs({ "SetPoint", "ClearAllPoints", "SetSize" }) do
+            local original = frame[name]
+            frame[name] = function(self, ...) writes = writes + 1; return original(self, ...) end
+        end
+    end
+    for _, container in pairs(cds.containers) do
+        count(container.frame)
+        for _, cell in ipairs(container.cells) do count(cell) end
+    end
+    for step = 1, 600 do
+        H.now = 10 + step * 0.1
+        H.Fire("SPELL_UPDATE_COOLDOWN")
+    end
+    eq(writes, 0)
+    eq(#app.errors, 0)
+end)
+
+test("a group can be a side column, spells move between groups, and reset drops the drag", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local Grid = app.CentralGrid
+    -- Vertical plan: 7 icons, 3 per column -> 3 columns; the short last column
+    -- (one icon) is centred on the block's vertical axis, not bottom aligned.
+    local plan = Grid:Plan({ count = 7, size = 20, gap = 4, rowGap = 4, max = 3, vertical = true })
+    eq(plan.vertical, true)
+    eq(#plan.rows, 3)
+    eq(plan.width, 3 * 20 + 2 * 4)
+    eq(plan.height, 3 * 20 + 2 * 4)
+    eq(plan.capacity, plan.width)
+    eq(plan.slots[7].y, plan.height / 2)
+    eq(plan.slots[1].y, 10)
+    eq(plan.slots[1].x < plan.slots[4].x, true)
+    -- 1 and 15 icons stay inside their own block.
+    local one = Grid:Plan({ count = 1, size = 20, max = 5, vertical = true })
+    eq(one.width, 20); eq(one.height, 20)
+    local many = Grid:Plan({ count = 15, size = 20, gap = 4, rowGap = 4, max = 15, vertical = true })
+    eq(#many.rows, 1); eq(many.height, 15 * 20 + 14 * 4)
+
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for _, id in ipairs({ 11, 12, 13 }) do SlashCmdList.LUMAUI("cds add " .. id) end
+    SlashCmdList.LUMAUI("cds owned")
+    SlashCmdList.LUMAUI("cds layout essential v")
+    local groups
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.vertical, true)
+    SlashCmdList.LUMAUI("cds max essential 2")
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.max, 2)
+    eq(cds.containers.essential.plan.vertical, true)
+    eq(#cds.containers.essential.plan.rows, 2)
+    -- An out-of-range value is clamped by the model, not stored.
+    SlashCmdList.LUMAUI("cds size essential 999")
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.size, app.CooldownModel.sizeRange[2])
+    -- Cross-group move and in-group reorder keep spell IDs.
+    SlashCmdList.LUMAUI("cds move 12 utility")
+    groups = app.Store:Profile().ui.cooldownGroups.groups
+    eq(#groups.essential.order, 2)
+    eq(groups.utility.order[1], 12)
+    SlashCmdList.LUMAUI("cds move 13 essential 1")
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.order[1], 13)
+    -- Dragged position is saved, then reset returns the stacked default.
+    app.Store:Profile().positions["cdGroup_essential"] = { x = -300, y = 50 }
+    app.Layout:Apply("cdGroup_essential")
+    eq(cds.containers.essential.frame.point[4], -300)
+    SlashCmdList.LUMAUI("cds reset essential")
+    eq(app.Store:Profile().positions["cdGroup_essential"], nil)
+    eq(cds.containers.essential.frame.point[4], 0)
+    -- The groups are overlap regions, so a user-made overlap is reported.
+    eq(app.Layout.regions.cdEssential ~= nil, true)
+    eq(app.Layout.regions.cdUtility ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("group editor drafts preview without saving, apply commits once, cancel and combat drop them", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for _, id in ipairs({ 11, 12, 13 }) do SlashCmdList.LUMAUI("cds add " .. id) end
+    SlashCmdList.LUMAUI("cds owned")
+    local function saved() return app.Store:Profile().ui.cooldownGroups.groups.essential end
+    local before = saved().max
+    eq(cds:HasDraft(), false)
+    -- A staged value previews in the live plan but the profile is untouched.
+    eq(cds:SetDraft("essential", "vertical", true), true)
+    eq(cds:HasDraft(), true)
+    eq(cds:DraftValue("essential", "vertical"), true)
+    eq(saved().vertical == true, false)
+    eq(cds.containers.essential.plan.vertical, true)
+    eq(cds:SetDraft("bogus", "max", 3), false)
+    -- Cancel restores the saved layout.
+    cds:CancelDraft()
+    eq(cds:HasDraft(), false)
+    eq(cds.containers.essential.plan.vertical == true, false)
+    -- Apply writes once, then the draft is gone.
+    cds:SetDraft("essential", "max", before == 4 and 5 or 4)
+    cds:SetDraft("essential", "vertical", true)
+    eq(saved().max, before)
+    cds:ApplyDraft()
+    eq(cds:HasDraft(), false)
+    eq(saved().vertical, true)
+    eq(saved().max ~= before, true)
+    -- Combat refuses new drafts and drops a pending one.
+    cds:SetDraft("utility", "vertical", true)
+    eq(cds:HasDraft(), true)
+    H.combat = true
+    H.Fire("PLAYER_REGEN_DISABLED")
+    eq(cds:HasDraft(), false)
+    eq(cds:SetDraft("utility", "vertical", true), false)
+    H.combat = false
+    -- A profile change drops it too.
+    eq(cds:SetDraft("utility", "gap", 8), true)
+    app:Publish("PROFILE_CHANGED", app.Store:Profile())
+    eq(cds:HasDraft(), false)
+    eq(#app.errors, 0)
+end)
+
+test("layout page Central HUD editor stages, applies and cancels group changes", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    app.Settings:Toggle("layout")
+    app.Settings:Update()
+    local editor = app.Settings.hudEditor
+    eq(editor ~= nil, true)
+    eq(#editor.groups, 3)
+    eq(editor.apply:IsEnabled() == true, false)
+    -- Staging through the control previews and enables Apply/Cancel only.
+    local essential = editor.groups[1]
+    essential.vertical.scripts.OnClick(essential.vertical, "LeftButton")
+    app.Settings:Update()
+    eq(cds:HasDraft(), true)
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.vertical == true, false)
+    eq(editor.apply:IsEnabled() == true, true)
+    eq(editor.cancel:IsEnabled() == true, true)
+    editor.cancel.scripts.OnClick(editor.cancel, "LeftButton")
+    eq(cds:HasDraft(), false)
+    essential.vertical.scripts.OnClick(essential.vertical, "LeftButton")
+    editor.apply.scripts.OnClick(editor.apply, "LeftButton")
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.vertical, true)
+    eq(cds:HasDraft(), false)
+    eq(#app.errors, 0)
+end)
+
+test("groups stay inside a narrow window and the editor position matches the applied one at two scales", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for id = 21, 35 do SlashCmdList.LUMAUI("cds add " .. id) end
+    SlashCmdList.LUMAUI("cds owned")
+    SlashCmdList.LUMAUI("cds max essential 15")
+    local wide = cds.containers.essential.plan.width
+    -- Narrow window: the same 15 icons wrap into a block no wider than the cap.
+    UIParent:SetWidth(640)
+    cds:Refresh()
+    local narrow = cds.containers.essential.plan
+    eq(narrow.width <= cds.maxWidth, true)
+    eq(narrow.width < wide, true)
+    eq(#narrow.rows > 1, true)
+    -- A saved drag lands on the same point at two UI scales, and /luma hud
+    -- reports the saved position, not a scaled copy.
+    app.Store:Profile().positions["cdGroup_essential"] = { x = -120, y = 40 }
+    for _, scale in ipairs({ 0.8, 1.2 }) do
+        UIParent:SetScale(scale)
+        app.Layout:Apply("cdGroup_essential")
+        eq(cds.containers.essential.frame.point[4], -120)
+        eq(cds.containers.essential.frame.point[5], 40)
+    end
+    UIParent:SetScale(1)
+    UIParent:SetWidth(1024)
+    eq(#app.errors, 0)
+end)
+
+test("a spell with a client proc overlay shows the proc state, a restricted answer does not", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    SlashCmdList.LUMAUI("cds add 41 essential")
+    SlashCmdList.LUMAUI("cds owned")
+    local cell = cds.containers.essential.cells[1]
+    eq(cell.state, "ready")
+    local procs = { [41] = true }
+    _G.C_SpellActivationOverlay = { IsSpellOverlayed = function(id) return procs[id] end }
+    H.Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+    eq(cell.state, "proc")
+    procs[41] = nil
+    H.Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+    eq(cell.state, "ready")
+    _G.C_SpellActivationOverlay = { IsSpellOverlayed = function() return H.Secret(true) end }
+    H.Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+    eq(cell.state, "ready")
+    _G.C_SpellActivationOverlay = nil
+    eq(#app.errors, 0)
+end)
+
+test("layout page lists spells per group and reorders them with the row buttons", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for _, id in ipairs({ 51, 52, 53 }) do SlashCmdList.LUMAUI("cds add " .. id .. " essential") end
+    SlashCmdList.LUMAUI("cds owned")
+    app.Settings:Toggle("layout")
+    app.Settings:Update()
+    local rows = app.Settings.hudEditor.orderRows
+    local function order() return app.Store:Profile().ui.cooldownGroups.groups.essential.order end
+    eq(rows[1].frame:IsShown(), true)
+    eq(rows[3].frame:IsShown(), true)
+    eq(rows[4].frame:IsShown(), false)
+    eq(rows[1].up:IsEnabled(), false)
+    -- Down on the first row swaps it with the second.
+    rows[1].down.scripts.OnClick(rows[1].down, "LeftButton")
+    eq(order()[1], 52); eq(order()[2], 51)
+    -- The group switch button moves the spell to the other group.
+    local third = rows[3]
+    third.swap.scripts.OnClick(third.swap, "LeftButton")
+    eq(#order(), 2)
+    eq(app.Store:Profile().ui.cooldownGroups.groups.utility.order[1], 53)
+    eq(#app.errors, 0)
+end)
+
+test("dragging a spell row onto another row moves it there, a drop elsewhere does nothing", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for _, id in ipairs({ 61, 62, 63 }) do SlashCmdList.LUMAUI("cds add " .. id .. " essential") end
+    SlashCmdList.LUMAUI("cds add 64 utility")
+    SlashCmdList.LUMAUI("cds owned")
+    app.Settings:Toggle("layout")
+    app.Settings:Update()
+    local rows = app.Settings.hudEditor.orderRows
+    local groups = function() return app.Store:Profile().ui.cooldownGroups.groups end
+    -- Give each shown row a 26-high box, row n spanning (-26n, -26n+26).
+    local shown = {}
+    for _, record in ipairs(rows) do
+        if record.frame:IsShown() then
+            shown[#shown + 1] = record
+            local n = #shown
+            record.frame.GetTop = function() return 1000 - 26 * (n - 1) end
+            record.frame.GetBottom = function() return 1000 - 26 * n end
+        end
+    end
+    eq(#shown, 4)
+    -- Drag the third essential spell onto the first row: it becomes first.
+    shown[3].frame.scripts.OnDragStart(shown[3].frame)
+    eq(app.Settings:DropOrderRow(shown[3], 990), true)
+    eq(groups().essential.order[1], 63)
+    -- Drop outside every row, and onto itself: nothing changes.
+    local before = table.concat(groups().essential.order, ",")
+    app.Settings:Update()
+    eq(app.Settings:DropOrderRow(shown[1], 5000), false)
+    eq(app.Settings:DropOrderRow(shown[1], 990), false)
+    eq(table.concat(groups().essential.order, ","), before)
+    -- Dropping on the utility row moves the spell across groups.
+    app.Settings:Update()
+    local from = rows[2]
+    eq(app.Settings:DropOrderRow(from, 1000 - 26 * 3 - 5), true)
+    eq(#groups().utility.order, 2)
+    eq(#app.errors, 0)
+end)
+
+test("an empty owned group stays invisible but can be selected in the layout editor", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    SlashCmdList.LUMAUI("cds owned")
+    local entry = app.Layout.entries.cdGroup_essential
+    eq(cds.containers.essential.frame:IsShown(), false)
+    eq(entry.allowHiddenMove, true)
+    eq(cds.containers.essential.frame:GetWidth() > 0, true)
+    app.Layout:SetEditing(true)
+    eq(entry.overlay ~= nil and entry.overlay:IsShown(), true)
+    app.Layout:SetEditing(false)
+    eq(cds.containers.essential.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("own cooldown cells tell charges, plain cooldowns and unknown apart", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    H.now = 100
+    -- Two of three charges, recharging; the plain record is a 1.5s global cooldown.
+    _G.C_Spell.GetSpellCharges = function()
+        return { currentCharges = 2, maxCharges = 3, cooldownStartTime = 90, cooldownDuration = 30 }
+    end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 99.5, duration = 1.5, isEnabled = true } end
+    SlashCmdList.LUMAUI("cds add 11")
+    SlashCmdList.LUMAUI("cds owned")
+    local cell = cds.containers.essential.cells[1]
+    -- The charge clock (20s left) wins over the global cooldown, and several
+    -- charges never take the proc style.
+    eq(cell.count:GetText(), "2")
+    eq(cell.time:GetText(), "20")
+    eq(cell.state, "tracking")
+    -- All charges ready: no timer, ready style, not proc.
+    _G.C_Spell.GetSpellCharges = function()
+        return { currentCharges = 3, maxCharges = 3, cooldownStartTime = 0, cooldownDuration = 0 }
+    end
+    H.Fire("SPELL_UPDATE_CHARGES")
+    eq(cell.state, "ready")
+    eq(cell.time:GetText(), "")
+    -- A restricted cooldown is unknown, not ready.
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    _G.C_Spell.GetSpellCooldown = function()
+        return { startTime = H.Secret(0), duration = H.Secret(30), isEnabled = true }
+    end
+    H.Fire("SPELL_UPDATE_COOLDOWN")
+    eq(cell.state, "unknown")
+    eq(cell.icon:IsShown(), true)
+    eq(cell.time:GetText(), "")
+    eq(#app.errors, 0)
+end)
+
+test("edge pulse does not start with reduce motion and stops when it is switched on mid-run", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local look = app.Store:Profile().appearance
+    look.motion, look.reduceMotion = true, false
+    local host = CreateFrame("Frame", nil, UIParent)
+    host:SetSize(80, 24)
+    eq(app.EdgePulse:Show(host), true)
+    eq(app.EdgePulse.active[host] ~= nil, true)
+    -- Switching reduce motion on during the run ends it on the next tick.
+    look.reduceMotion = true
+    eq(app.EdgePulse:Tick(GetTime() + 0.01), false)
+    eq(next(app.EdgePulse.active), nil)
+    eq(app.EdgePulse.driver, nil)
+    eq(app.EdgePulse:Show(host), false)
+    eq(next(app.EdgePulse.active), nil)
+    eq(host.lumaEdgePulse == nil or host.lumaEdgePulse.top:IsShown() == false, true)
+    eq(#app.errors, 0)
+end)
+
+test("two own cooldown groups stack without sharing a rectangle and keep saved positions", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "Spell" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    SlashCmdList.LUMAUI("cds add 111")
+    SlashCmdList.LUMAUI("cds add 222 utility")
+    SlashCmdList.LUMAUI("cds owned")
+    local essential, utility = cds.containers.essential, cds.containers.utility
+    eq(essential.frame:IsShown(), true)
+    eq(utility.frame:IsShown(), true)
+    -- Both are layout entries, so `/luma layout` can move them.
+    eq(app.Layout.entries["cdGroup_essential"] ~= nil, true)
+    eq(app.Layout.entries["cdGroup_utility"] ~= nil, true)
+    -- The old defect: both anchors were (0, -423). Now the second sits above.
+    local e, u = essential.frame.point, utility.frame.point
+    eq(e[5] ~= u[5], true)
+    eq(u[5] - e[5] >= (essential.visibleHeight + utility.visibleHeight) / 2, true)
+    -- A saved position wins over the default and survives a reposition.
+    local positions = app.Store:Profile().positions
+    positions["cdGroup_utility"] = { x = -300, y = 50 }
+    app.Layout:Apply("cdGroup_utility")
+    eq(utility.frame.point[4], -300)
+    eq(utility.frame.point[5], 50)
+    cds:Reposition()
+    eq(utility.frame.point[4], -300)
     eq(#app.errors, 0)
 end)
 
@@ -11984,7 +12786,7 @@ test("the raid switch is independent from the party switch", function()
     eq(#app.errors, 0)
 end)
 
-test("absorb and heal prediction draw only from plain values", function()
+test("absorb and heal prediction start at the fill edge and take restricted values directly", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     _G.UnitHealthMax = function() return 1000 end
     _G.UnitGetTotalAbsorbs = function() return 120 end
@@ -11992,19 +12794,36 @@ test("absorb and heal prediction draw only from plain values", function()
     app.Store:Set("modules", "unitFrames", true)
     app:Reconcile()
     local frame = app.components.unitFrames.frames.player
-    -- The harness has no SetReverseFill; the production client does. Adding it
-    -- here proves the plain-number path without pretending the widget exists.
-    frame.absorb.SetReverseFill = function() end
-    frame.prediction.SetReverseFill = function() end
+    -- Both strips hang off the health fill's leading edge, inside a clipped
+    -- host, instead of being stacked from the far end of the rail.
+    eq(frame.overlayClip.clipsChildren ~= false, true)
+    eq(frame.prediction.point[1], "BOTTOMLEFT")
+    eq(frame.prediction.point[3], "BOTTOMRIGHT")
+    eq(frame.prediction.point[2], frame.health:GetStatusBarTexture())
+    eq(frame.absorb.point[2], frame.prediction:GetStatusBarTexture())
     H.Fire("UNIT_HEALTH", "player")
     eq(frame.absorb:IsShown(), true)
     eq(frame.absorb.value, 120)
     eq(frame.prediction:IsShown(), true)
     eq(frame.prediction.value, 60)
-    _G.UnitGetTotalAbsorbs = function() return H.Secret(120) end
+    eq(frame.absorbState, "plain")
+    eq(app.components.unitFrames:Describe():find("player absorb=plain prediction=plain", 1, true) ~= nil, true)
+    -- A restricted absorb is drawn too: the secret goes into SetValue untouched.
+    local secret = H.Secret(120)
+    _G.UnitGetTotalAbsorbs = function() return secret end
+    H.Fire("UNIT_ABSORB_UPDATE", "player")
+    eq(frame.absorb:IsShown(), true)
+    eq(frame.absorb.value, secret)
+    eq(frame.absorbState, "restricted")
+    eq(frame.prediction:IsShown(), true)
+    -- A plain zero hides the strip; a missing API reports itself.
+    _G.UnitGetTotalAbsorbs = function() return 0 end
     H.Fire("UNIT_ABSORB_UPDATE", "player")
     eq(frame.absorb:IsShown(), false)
-    eq(frame.prediction:IsShown(), true)
+    eq(frame.absorbState, "empty")
+    _G.UnitGetIncomingHeals = nil
+    H.Fire("UNIT_HEAL_PREDICTION", "player")
+    eq(frame.predictionState, "unavailable")
     app.Store:Set("modules", "unitFrames", false)
     eq(#app.errors, 0)
 end)
@@ -12021,6 +12840,584 @@ test("the minimap drawer opens LumaUI entries and leaves native buttons", functi
     -- Calendar stays the client's own frame; the drawer only calls its toggle.
     app.Store:Set("modules", "minimap", false)
     eq(minimap.drawer:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("the cooldown cell state edge is an outline, and a proc only thickens it", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cell = app.PearlCell:Create(UIParent, 26)
+    app.PearlCell:SetState(cell, "ready")
+    eq(cell.ring:IsShown(), false)
+    app.PearlCell:SetState(cell, "tracking")
+    eq(cell.ring:IsShown(), true)
+    -- A backdrop hairline, not a colour texture filling the cell: the state must
+    -- never paint over the icon, the charge count or the timer.
+    eq(type(cell.ring.backdrop), "table")
+    eq(cell.ring.backdrop.edgeSize, app.Pixel:Pixels(1, cell.ring))
+    eq(cell.ring.borderColor[4], 0.65)
+    app.PearlCell:SetState(cell, "proc")
+    eq(cell.ring.backdrop.edgeSize, app.Pixel:Pixels(2, cell.ring))
+    eq(cell.ring.borderColor[4], 0.95)
+    -- Back to a quiet state drops the edge and the thicker backdrop.
+    app.PearlCell:SetState(cell, "ready")
+    eq(cell.ring:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("a slider label follows its unit instead of always reading as a percentage", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local holder = H.NewFrame(nil, UIParent)
+    local percent = app.Controls:Range(holder, "opacity", 0, 0, 1, 0.05,
+        function() return 0.92 end, nil)
+    percent:Update()
+    eq(percent.valueLabel:GetText(), "92%")
+    local count = app.Controls:Range(holder, "size", 0, 18, 40, 1,
+        function() return 26 end, nil, { format = function(value) return string.format("%d", value) end })
+    count:Update()
+    eq(count.valueLabel:GetText(), "26")
+    eq(#app.errors, 0)
+end)
+
+test("hovering a button runs the edge feedback once and flat rows stay quiet", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local look = app.Store:Profile().appearance
+    look.motion, look.reduceMotion = true, false
+    local button = app.Controls:Button(UIParent, "Go", 100, nil)
+    button.scripts.OnEnter(button)
+    eq(app.EdgePulse.active[button] ~= nil, true)
+    -- The same hover again does not restart the run.
+    local started = app.EdgePulse.active[button].started
+    button.scripts.OnEnter(button)
+    eq(app.EdgePulse.active[button].started, started)
+    button.scripts.OnLeave(button)
+    eq(app.EdgePulse.active[button], nil)
+    -- A flat list row and an explicit opt-out both stay quiet.
+    local row = app.Controls:Button(UIParent, "Row", 100, nil, { flat = true })
+    row.scripts.OnEnter(row)
+    eq(app.EdgePulse.active[row], nil)
+    local muted = app.Controls:Button(UIParent, "No", 100, nil, { pulse = false })
+    muted.scripts.OnEnter(muted)
+    eq(app.EdgePulse.active[muted], nil)
+    eq(#app.errors, 0)
+end)
+
+test("the Central HUD editor switches the own groups on and imports the client order", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    -- The 12.1.5 source: the category set, not the settings provider method.
+    local asked
+    _G.C_CooldownViewer = { GetCooldownViewerCategorySet = function(category, allowUnlearned)
+        asked = { category = category, allowUnlearned = allowUnlearned }
+        return { 12345 }
+    end }
+    _G.Enum = { CooldownViewerCategory = { Essential = 0, Utility = 1 } }
+    -- Follow mode reads the provider on every render; this test is about the
+    -- import path, so the groups are pinned to their stored lists first.
+    for _, id in ipairs({ "essential", "utility" }) do
+        app.Store:Profile().ui.cooldownGroups.groups[id].auto = false
+    end
+    app.Settings:Toggle("layout")
+    app.Settings:Update()
+    local editor = app.Settings.hudEditor
+    eq(editor.owned ~= nil, true)
+    local essential = editor.groups[1]
+    -- The empty-group note names the reason the block is invisible.
+    eq(essential.empty:IsShown(), true)
+    essential.import.scripts.OnClick(essential.import, "LeftButton")
+    app.Settings:Update()
+    -- The import reads the documented category set, with the category enum of
+    -- the group it was asked for.
+    eq(asked ~= nil, true)
+    eq(asked.category, 0)
+    eq(asked.allowUnlearned, false)
+    eq(#app.Store:Profile().ui.cooldownGroups.groups.essential.order, 1)
+    eq(essential.empty:IsShown(), false)
+    -- An imported group still draws nothing until the mode switch is on.
+    eq(cds.containers.essential.frame:IsShown(), false)
+    editor.owned.scripts.OnClick(editor.owned, "LeftButton")
+    eq(app.Store:Profile().ui.cooldownGroups.owned, true)
+    eq(cds.containers.essential.frame:IsShown(), true)
+    -- Switching it off hides the groups again and keeps their list.
+    editor.owned.scripts.OnClick(editor.owned, "LeftButton")
+    eq(cds.containers.essential.frame:IsShown(), false)
+    eq(#app.Store:Profile().ui.cooldownGroups.groups.essential.order, 1)
+    eq(#app.errors, 0)
+end)
+
+test("a name row without ink keeps the native name instead of blanking the plate", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local plate = H.Plate("modern", H.PlainBar({ 0.6, 0.5, 0.3, 1 }))
+    plate.UnitFrame.name = H.NewFrame(nil, plate.UnitFrame)
+    H.nameplates.nameplate1 = plate
+    H.unitInfo.nameplate1 = { reaction = 4 }
+    _G.UnitName = function() return "Dummy" end
+    app.Store:Set("modules", "nameplates", true)
+    app:Reconcile()
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
+    local record = app.components.nameplates.plates.nameplate1
+    eq(record.nameState, "luma")
+    -- The own row now reports no measured width, so the next update must hand
+    -- the name back to the client rather than hiding both.
+    plate.lumaPlateView.name.GetStringWidth = function() return 0 end
+    H.Fire("UNIT_NAME_UPDATE", "nameplate1")
+    eq(record.nameState, "native:own-empty")
+    eq(plate.lumaPlateView.name:GetText(), "")
+    eq(record.frame.name:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the bag and bank windows fade in, close reversibly and settle opaque", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local inventory = app.components.inventory
+    eq(inventory.frame:IsShown(), false)
+    inventory:Toggle()
+    eq(inventory.frame:IsShown(), true)
+    -- The reveal really animates: the window starts transparent and reaches full
+    -- alpha only after the short fade, instead of snapping into place.
+    eq(inventory.frame:GetAlpha(), 0)
+    H.Advance(0.2)
+    eq(inventory.frame:GetAlpha(), 1)
+    inventory:Toggle()
+    eq(inventory.closing, true)
+    eq(inventory.frame:IsMouseEnabled(), false)
+    H.Advance(0.2)
+    eq(inventory.frame:IsShown(), false)
+    eq(inventory.frame:GetAlpha(), 1)
+    eq(inventory.frame:IsMouseEnabled(), true)
+    -- Re-opening mid-close reverses from the current alpha instead of restarting.
+    inventory:Toggle()
+    inventory:Toggle()
+    H.Advance(0.05)
+    inventory:Toggle()
+    eq(inventory.closing, false)
+    H.Advance(0.2)
+    eq(inventory.frame:IsShown(), true)
+    eq(inventory.frame:GetAlpha(), 1)
+    -- The bank shares the same lifecycle and follows the client's bank events.
+    app.Store:Set("modules", "bank", true)
+    local bank = app.components.bank
+    bank.frame:Hide()
+    H.Fire("BANKFRAME_OPENED")
+    eq(bank.frame:IsShown(), true)
+    H.Fire("BANKFRAME_CLOSED")
+    eq(bank.frame:IsShown(), false)
+    eq(bank.frame:GetAlpha(), 1)
+    eq(#app.errors, 0)
+end)
+
+test("the bag entry points hand the client's containers to the LumaUI inventory", function()
+    local app = H.Load()
+    local combined = H.NewFrame("ContainerFrameCombinedBags", UIParent)
+    combined:Hide()
+    _G.ContainerFrameCombinedBags = combined
+    _G.NUM_CONTAINER_FRAMES = 0
+    local calls = 0
+    local nativeToggle = function() calls = calls + 1; combined:Show() end
+    _G.ToggleBackpack = nativeToggle
+    _G.OpenAllBags = function() combined:Show() end
+    _G.CloseAllBags = function() combined:Hide() end
+    _G.IsAnyBagOpen = function() return combined:IsShown() end
+    H.Fire("PLAYER_LOGIN")
+    local inventory = app.components.inventory
+    -- Off: the client's function is untouched and still opens its own window.
+    eq(rawget(_G, "ToggleBackpack"), nativeToggle)
+    _G.ToggleBackpack()
+    eq(combined:IsShown(), true)
+    eq(inventory.frame:IsShown(), false)
+    combined:Hide()
+    -- On: the wrapper hides what the client just showed and opens ours.
+    app.Store:Set("ui", "containerTakeover", true)
+    eq(rawget(_G, "ToggleBackpack") ~= nativeToggle, true)
+    _G.ToggleBackpack()
+    eq(calls, 2)
+    eq(combined:IsShown(), false)
+    eq(inventory.frame:IsShown(), true)
+    eq(app.Ownership:Get("inventory.entry").active, "owned")
+    H.Advance(0.2)
+    eq(inventory.frame:GetAlpha(), 1)
+    -- Pressing it again closes ours without opening the client's window.
+    _G.ToggleBackpack()
+    eq(calls, 2)
+    eq(inventory.closing, true)
+    H.Advance(0.2)
+    eq(inventory.frame:IsShown(), false)
+    -- "Open all bags" is redirected too, and the client's close closes ours.
+    _G.OpenAllBags()
+    eq(combined:IsShown(), false)
+    eq(inventory.frame:IsShown(), true)
+    _G.CloseAllBags()
+    H.Advance(0.2)
+    eq(inventory.frame:IsShown(), false)
+    -- Off again: the original is back in place and nothing stays wrapped.
+    app.Store:Set("ui", "containerTakeover", false)
+    eq(rawget(_G, "ToggleBackpack"), nativeToggle)
+    eq(app.Ownership:Get("inventory.entry").active, "native")
+    _G.ToggleBackpack()
+    eq(calls, 3)
+    eq(combined:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("an open bank shows the LumaUI window and hands the client's frame back", function()
+    local app = H.Load()
+    local bankFrame = H.NewFrame("BankFrame", UIParent, "BackdropTemplate")
+    local panel = H.NewFrame(nil, bankFrame)
+    bankFrame.BankPanel = panel
+    bankFrame:EnableMouse(true)
+    bankFrame:Show()
+    panel:Show()
+    _G.BankFrame = bankFrame
+    local closed = 0
+    _G.C_Bank = _G.C_Bank or {}
+    _G.C_Bank.CloseBankFrame = function() closed = closed + 1; bankFrame:Hide() end
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "bank", true)
+    local bank = app.components.bank
+    app.Store:Set("ui", "containerTakeover", true)
+    H.Fire("BANKFRAME_OPENED")
+    -- Shown but invisible and unhittable: hiding the client's frame is what
+    -- closes the bank session, so it has to stay up.
+    eq(bankFrame:IsShown(), true)
+    eq(bankFrame:GetAlpha(), 0)
+    eq(bankFrame:IsMouseEnabled(), false)
+    eq(panel:IsShown(), false)
+    eq(bank.frame:IsShown(), true)
+    -- The client closing the bank restores everything it recorded.
+    H.Fire("BANKFRAME_CLOSED")
+    eq(bankFrame:GetAlpha(), 1)
+    eq(bankFrame:IsMouseEnabled(), true)
+    eq(panel:IsShown(), true)
+    eq(bank.frame:IsShown(), false)
+    -- Closing our window ends the session, exactly like the client's window.
+    H.Fire("BANKFRAME_OPENED")
+    H.Advance(0.2)
+    bank:SetOpen(false)
+    eq(bank.closing, true)
+    H.Advance(0.2)
+    eq(closed, 1)
+    eq(bankFrame:GetAlpha(), 1)
+    eq(bank.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("the container switch brings the bank window with it and writes once", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.Store:Profile().modules.bank == true, false)
+    eq(app.Store:Profile().ui.containerTakeover == true, false)
+    SlashCmdList.LUMAUI("bags takeover")
+    eq(app.Store:Profile().ui.containerTakeover, true)
+    eq(app.Store:Profile().modules.bank, true)
+    eq(app.components.bank.running, true)
+    eq(app.Ownership:Get("inventory.entry").active, "owned")
+    -- Off again only flips the switch: the bank component stays as the player
+    -- left it, so its own window can still be opened by hand.
+    SlashCmdList.LUMAUI("bags takeover")
+    eq(app.Store:Profile().ui.containerTakeover, false)
+    eq(app.Ownership:Get("inventory.entry").active, "native")
+    eq(app.Store:Profile().modules.bank, true)
+    eq(#app.errors, 0)
+end)
+
+test("an emptied cooldown group stops its ticker and leaves no stale cell", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = H.now, duration = 30, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    SlashCmdList.LUMAUI("cds add 11")
+    SlashCmdList.LUMAUI("cds add 22")
+    SlashCmdList.LUMAUI("cds owned")
+    eq(cds.ticker ~= nil, true)
+    local container = cds.containers.essential
+    eq(container.cells[1].lumaRemaining ~= nil, true)
+    -- Clearing the list hides the block; the cells it leaves behind must not
+    -- keep the shared ticker alive for the rest of the session.
+    SlashCmdList.LUMAUI("cds clear")
+    eq(container.frame:IsShown(), false)
+    eq(container.cells[1].lumaRemaining, nil)
+    eq(cds.ticker, nil)
+    eq(#app.errors, 0)
+end)
+
+test("the own cooldown block keeps its screen position when the UI scale changes", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for id = 1, 4 do SlashCmdList.LUMAUI("cds add " .. id) end
+    SlashCmdList.LUMAUI("cds owned")
+    local container = cds.containers.essential
+    local function screenBottom()
+        -- The entry stores its offset in the frame's own units, so the block's
+        -- bottom in screen units is (centre - half height) x scale.
+        local scale = app.Layout:Scale("cdGroup_essential")
+        return (container.frame.point[5] - container.plan.height / 2) * scale
+    end
+    local atOne = screenBottom()
+    eq(atOne < 0, true)
+    eq(container.frame:GetScale(), 1)
+    app.Store:Profile().appearance.scale = 1.3
+    cds:Refresh()
+    eq(math.abs(screenBottom() - atOne) < 0.5, true)
+    -- The icons themselves scale with the panel: the holder takes the panel
+    -- scale, the cells are its children and keep their own size in frame units.
+    eq(container.frame:GetScale(), 1.3)
+    eq(container.cells[1]:GetEffectiveScale(), 1.3)
+    eq(container.cells[1].lumaPlaced.size, 26)
+    -- The same applies with a second stacked block: the gap stays in the block's
+    -- own units, so the stack does not double its spacing at 1.3.
+    SlashCmdList.LUMAUI("cds add 21 utility")
+    local essential = cds.containers.essential
+    local utility = cds.containers.utility
+    local gap = (utility.frame.point[5] - utility.plan.height / 2)
+        - (essential.frame.point[5] + essential.plan.height / 2)
+    eq(math.abs(gap - 6) < 0.01, true)
+    app.Store:Profile().appearance.scale = 1
+    eq(#app.errors, 0)
+end)
+
+test("an owned cooldown group hides the client's matching viewer while it draws", function()
+    local app = H.Load()
+    -- The client's own viewers, with the exact method the client recomputes its
+    -- visibility through (edit-mode layout, cvar, combat, settings panel).
+    local essential = H.NewFrame("EssentialCooldownViewer", UIParent)
+    essential.UpdateShownState = function(self) self:SetShown(true) end
+    essential:Show()
+    local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
+    utility.UpdateShownState = function(self) self:SetShown(true) end
+    utility:Show()
+    local buffIcon = H.NewFrame("BuffIconCooldownViewer", UIParent)
+    buffIcon.UpdateShownState = function(self) self:SetShown(true) end
+    buffIcon:Show()
+    local buffBar = H.NewFrame("BuffBarCooldownViewer", UIParent)
+    buffBar.UpdateShownState = function(self) self:SetShown(true) end
+    buffBar:Show()
+    _G.EssentialCooldownViewer, _G.UtilityCooldownViewer = essential, utility
+    _G.BuffIconCooldownViewer, _G.BuffBarCooldownViewer = buffIcon, buffBar
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    H.Fire("PLAYER_LOGIN")
+    -- Own groups off: every client viewer stays exactly as the client left it.
+    eq(essential:IsShown(), true)
+    eq(buffIcon:IsShown(), true)
+    SlashCmdList.LUMAUI("cds add 11")
+    SlashCmdList.LUMAUI("cds owned")
+    eq(essential:IsShown(), false)
+    -- The utility group is deliberately empty, so its client block is replaced
+    -- by nothing — enabling own groups means one display, not two.
+    eq(utility:IsShown(), false)
+    -- The buff group is still empty, so nothing of ours draws buffs and the
+    -- client's own buff viewers keep showing them.
+    eq(buffIcon:IsShown(), true)
+    eq(buffBar:IsShown(), true)
+    -- Once a tracked buff is actually drawn, both client buff viewers step aside.
+    local auras = {}
+    _G.C_UnitAuras = { GetPlayerAuraBySpellID = function(id) return auras[id] end }
+    _G.Enum = _G.Enum or {}
+    _G.Enum.CooldownViewerCategory = { Essential = 0, Utility = 1, TrackedBuff = 2 }
+    _G.CooldownViewerSettings = H.NewFrame("CooldownViewerSettings", UIParent)
+    _G.CooldownViewerSettings.GetDataProvider = function()
+        return {
+            GetOrderedCooldownIDsForCategory = function() return { 9001 } end,
+            GetCooldownInfoForID = function(_, id) return { cooldownID = id, spellID = id } end,
+        }
+    end
+    -- The editor panel is closed in play; a visible one means "the player is
+    -- editing", which is the one state where the viewers must stay visible.
+    _G.CooldownViewerSettings:Hide()
+    SlashCmdList.LUMAUI("cds import buffs")
+    auras[9001] = { icon = 134337, applications = 1, expirationTime = H.now + 8, duration = 20 }
+    H.Fire("UNIT_AURA", "player")
+    eq(buffIcon:IsShown(), false)
+    eq(buffBar:IsShown(), false)
+    -- The switch still wins: turning it off brings both viewers back even while
+    -- the own buff cell draws.
+    SlashCmdList.LUMAUI("cds buffs")
+    eq(buffIcon:IsShown(), true)
+    eq(buffBar:IsShown(), true)
+    eq(app.Store:Profile().ui.cooldownGroups.hideBuffViewers, false)
+    SlashCmdList.LUMAUI("cds buffs")
+    eq(buffIcon:IsShown(), false)
+    -- A client visibility recompute must not bring the viewer back.
+    essential:UpdateShownState()
+    eq(essential:IsShown(), false)
+    -- Editing the client's cooldowns shows it again; closing the editor hands it
+    -- back to the takeover.
+    _G.CooldownViewerSettings = H.NewFrame("CooldownViewerSettings", UIParent)
+    local editing = true
+    _G.CooldownViewerSettings.IsVisible = function() return editing end
+    essential:UpdateShownState()
+    eq(essential:IsShown(), true)
+    editing = false
+    essential:UpdateShownState()
+    eq(essential:IsShown(), false)
+    -- Turning the own groups off lets the client's own rules decide again.
+    SlashCmdList.LUMAUI("cds owned")
+    eq(essential:IsShown(), true)
+    local report = table.concat(app:Collect(function() app.components.cooldownGroups:Diagnose() end), "\n")
+    eq(report:find("native%-viewers=essential=kept,utility=kept") ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("import follows the player's own Cooldown Manager order", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    _G.Enum = _G.Enum or {}
+    _G.Enum.CooldownViewerCategory = { Essential = 0, Utility = 1 }
+    -- Follow mode reads the provider on every render; pin the groups so the only
+    -- provider call this test observes is the import itself.
+    for _, id in ipairs({ "essential", "utility", "buffs" }) do
+        app.Store:Profile().ui.cooldownGroups.groups[id].auto = false
+    end
+    local asked
+    _G.CooldownViewerSettings = H.NewFrame("CooldownViewerSettings", UIParent)
+    _G.CooldownViewerSettings.GetDataProvider = function()
+        return {
+            GetOrderedCooldownIDsForCategory = function(_, category)
+                asked = category
+                return { 501, 502 }
+            end,
+        }
+    end
+    -- The provider returns cooldown IDs; a cell needs the spell behind them. The
+    -- documented category set must not win while the provider answers.
+    _G.C_CooldownViewer = {
+        GetCooldownViewerCooldownInfo = function(id) return { cooldownID = id, spellID = id + 1000 } end,
+        GetCooldownViewerCategorySet = function() return { 9 } end,
+    }
+    SlashCmdList.LUMAUI("cds import essential")
+    local order = app.Store:Profile().ui.cooldownGroups.groups.essential.order
+    eq(asked, 0)
+    eq(#order, 2)
+    eq(order[1], 1501)
+    eq(order[2], 1502)
+    -- A second import of the same list changes nothing and says so.
+    SlashCmdList.LUMAUI("cds import essential")
+    eq(#app.Store:Profile().ui.cooldownGroups.groups.essential.order, 2)
+    _G.C_CooldownViewer, _G.CooldownViewerSettings, _G.Enum = nil, nil, nil
+    eq(#app.errors, 0)
+end)
+
+test("a cooldown entry the client cannot resolve leaves no empty cell behind", function()
+    local app = H.Load()
+    local essential = H.NewFrame("EssentialCooldownViewer", UIParent)
+    essential.UpdateShownState = function(self) self:SetShown(true) end
+    essential:Show()
+    _G.EssentialCooldownViewer = essential
+    _G.C_Spell.GetSpellInfo = function() return nil end
+    _G.C_Spell.GetSpellTexture = function() return nil end
+    _G.C_Spell.GetSpellName = function() return nil end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("cds add 424242")
+    SlashCmdList.LUMAUI("cds owned")
+    local container = app.components.cooldownGroups.containers.essential
+    -- Nothing resolved: no dark square over the action bar, and the client's
+    -- block stays on screen rather than being replaced by an empty hole.
+    eq(container.drawn, 0)
+    eq(container.cells[1]:IsShown(), false)
+    eq(essential:IsShown(), true)
+    local report = table.concat(app:Collect(function() app.components.cooldownGroups:Diagnose() end), "\n")
+    eq(report:find("unresolved: 1 (424242)", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("the tracked-buff group draws the player's auras and collapses when idle", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    _G.Enum = _G.Enum or {}
+    _G.Enum.CooldownViewerCategory = { Essential = 0, Utility = 1, TrackedBuff = 2 }
+    _G.C_CooldownViewerSettings = H.NewFrame("CooldownViewerSettings", UIParent)
+    _G.C_CooldownViewerSettings.GetDataProvider = function()
+        return {
+            GetOrderedCooldownIDsForCategory = function() return { 7001, 7002 } end,
+            -- The provider record is the base spell; no ID remapping here.
+            GetCooldownInfoForID = function(_, id) return { cooldownID = id, spellID = id } end,
+        }
+    end
+    -- Only the player's own auras are read, and only when the group draws.
+    local auras = {}
+    _G.C_UnitAuras = {
+        GetPlayerAuraBySpellID = function(id) return auras[id] end,
+    }
+    H.now = 100
+    SlashCmdList.LUMAUI("cds import buffs")
+    eq(#app.Store:Profile().ui.cooldownGroups.groups.buffs.order, 2)
+    SlashCmdList.LUMAUI("cds owned")
+    local container = app.components.cooldownGroups.containers.buffs
+    -- No tracked buff is active: the block collapses instead of leaving a hole.
+    eq(container.frame:IsShown(), false)
+    eq(container.drawn, 0)
+    auras[7001] = { icon = 134337, applications = 3, expirationTime = 112, duration = 20 }
+    H.Fire("UNIT_AURA", "player")
+    eq(container.frame:IsShown(), true)
+    eq(container.drawn, 1)
+    local cell = container.cells[1]
+    eq(cell.icon.texture, 134337)
+    eq(cell.count:GetText(), "3")
+    eq(cell.time:GetText(), "12")
+    eq(cell.state, "tracking")
+    -- The aura ending removes the cell again without a Lua poll of its own.
+    auras[7001] = nil
+    H.Fire("UNIT_AURA", "player")
+    eq(container.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("the own cooldown groups ship on and follow the client's list without commands", function()
+    -- A profile that predates the switch: no explicit value, no migration mark.
+    local app = H.Load({ schema = 1, profiles = { Default = { modules = {} } }, characters = {} })
+    H.Fire("PLAYER_LOGIN")
+    -- The profile section is normalized on read, exactly like the renderer does.
+    local function current()
+        return app.CooldownModel:Normalize(app.Store:Profile().ui.cooldownGroups)
+    end
+    eq(current().owned, true)
+    eq(current().groups.essential.auto, true)
+    eq(current().groups.buffs.auto, true)
+    -- The client's list is the display; no import step, no stored copy.
+    _G.Enum = { CooldownViewerCategory = { Essential = 0, Utility = 1, TrackedBuff = 2 } }
+    _G.C_CooldownViewerSettings = H.NewFrame("CooldownViewerSettings", UIParent)
+    _G.C_CooldownViewerSettings:Hide()
+    local list = { 501, 502, 503 }
+    _G.C_CooldownViewerSettings.GetDataProvider = function()
+        return {
+            GetOrderedCooldownIDsForCategory = function() return list end,
+            GetCooldownInfoForID = function(_, id) return { cooldownID = id, spellID = id } end,
+        }
+    end
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    local cds = app.components.cooldownGroups
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 3)
+    eq(cds.containers.essential.frame:IsShown(), true)
+    eq(#current().groups.essential.order, 0)
+    -- An edit in the client's Cooldown Manager reaches the cells on the next
+    -- event-driven pass, without a command or a reload.
+    list = { 501, 777 }
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 2)
+    eq(cds.containers.essential.cells[2].lumaSpellID, 777)
+    -- A manual add leaves follow mode: the stored list is the display from then on.
+    SlashCmdList.LUMAUI("cds add 888")
+    eq(current().groups.essential.auto, false)
+    eq(#current().groups.essential.order, 1)
+    -- ... and the editor switch puts it back on the client's list.
+    local cdsEditor = app.Settings
+    cdsEditor:Toggle("layout")
+    cdsEditor:Update()
+    local follow = cdsEditor.hudEditor.groups[1].follow
+    eq(follow ~= nil, true)
+    follow.scripts.OnClick(follow, "LeftButton")
+    eq(current().groups.essential.auto, true)
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 2)
     eq(#app.errors, 0)
 end)
 
