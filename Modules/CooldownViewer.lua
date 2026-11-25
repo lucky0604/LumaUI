@@ -290,16 +290,14 @@ local function blockSize(boxes)
 end
 
 -- Top edge of a frame that kept its native anchor (a refused write), in the
--- same UIParent units the stack uses. Unreadable geometry leaves the fallback:
--- an unknown native position never shrinks the reserved block.
-local function nativeTop(frame, fallback)
-    local left, bottom, width, height = rectOf(frame)
-    if not left or not bottom or not width or not height then return fallback end
+-- same UIParent units the stack uses.
+local function nativeTop(frame)
+    local _, bottom, _, height = rectOf(frame)
+    if not bottom or not height then return nil end
     local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
     scale = okScale and plain(scale, "number") or nil
-    if not scale or scale <= 0 then return fallback end
-    local top = (bottom + height) / scale
-    return top > fallback and top or fallback
+    if not scale or scale <= 0 then return nil end
+    return (bottom + height) / scale
 end
 
 -- The rendered width of a viewer's buttons, free of the Edit Mode frame's empty
@@ -692,25 +690,27 @@ local function pass(self)
     for _, item in ipairs(chosen) do byFrame[item.frame] = item end
     -- A refused write leaves its old anchor in place; collapse that reserved
     -- row so the rest of the stack stays contiguous instead of leaving a gap.
-    -- The applied top follows the rows that were actually written; a refused
-    -- frame keeps its native anchor, and its own readable rect (when the build
-    -- reports one) still raises the top so the resource rail never crosses it.
+    -- Track the overall stack and the main skill group independently. Only a
+    -- refused main viewer can supply a fallback edge for the resource rail.
     local shift = 0
-    local appliedTop = central.cooldown.bottom
+    local appliedTop, mainTop, nativeMainTop = central.cooldown.bottom, nil, nil
     for _, row in ipairs(central.rows) do
         local bottom = row.bottom - shift
         if not place(self, row.frame, bottom) then
             shift = shift + row.height + central.cooldown.gap
-            appliedTop = math.max(appliedTop, nativeTop(row.frame, appliedTop))
+            local top = nativeTop(row.frame)
+            appliedTop = math.max(appliedTop, top or appliedTop)
+            if row.main and top then nativeMainTop = math.max(nativeMainTop or top, top) end
         else
             appliedTop = math.max(appliedTop, bottom + row.height)
+            if row.main then mainTop = bottom + row.height end
             local item = byFrame[row.frame]
             if item and item.plan and item.boxes then
                 placeIcons(self, row.frame, item.plan, item.boxes, bottom)
             end
         end
     end
-    local appliedChanged = app.Layout:SetAppliedTop(appliedTop)
+    local appliedChanged = app.Layout:SetAppliedTop(appliedTop, mainTop or nativeMainTop)
     -- The unit frames sit beside the visible block. Publish only after the
     -- stack is placed: the width came from this measurement, and re-entering
     -- the layout before the rows were written would leave the first pass half

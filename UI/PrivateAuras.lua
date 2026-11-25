@@ -65,6 +65,13 @@ end
 -- native frame, and a burst of roster events does not hammer a rejection.
 -- Attach returns true only when every slot was granted; a partial grant still
 -- records what it got (so Release removes it) but never counts as coverage.
+-- One line for the diagnostics page: how many anchors this session holds and
+-- whether the client exposes the API at all. No aura content is read.
+function PrivateAuras.Describe()
+    return string.format("privateAuras: attached=%d api=%s owner=native",
+        PrivateAuras.attached or 0, PrivateAuras.Available() and "yes" or "no")
+end
+
 function PrivateAuras.Attach(frame, unit, count, options)
     if not frame or not unit or not count or count < 1 then return false end
     if not PrivateAuras.Available() then return false end

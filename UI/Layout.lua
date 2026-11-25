@@ -40,6 +40,9 @@ Layout.axisLock = { topInfo = "x" }
 Layout.actionBottom = 56
 Layout.actionGap = 4
 Layout.cooldownGap = 8
+Layout.resourceGap = 6
+Layout.resourceHeight = 11
+Layout.resourceTrailingGap = 4
 Layout.centralGap = 24
 Layout.fallbackActionWidth = 524
 Layout.fallbackActionHeight = 40
@@ -320,6 +323,8 @@ function Layout:RelativeScale(id)
 end
 
 function Layout:Scale(id)
+    local entry = self.entries[id]
+    if entry and entry.absoluteScale then return self:RelativeScale(id) end
     return app.Store:Profile().appearance.scale * self:RelativeScale(id)
 end
 
@@ -361,18 +366,20 @@ function Layout:UpdatePlaceholders()
     end
 end
 
--- Positions use the entry's own units. Both preview and application use the
--- same bounds so their outlines represent where the frame will actually land.
+-- Entries usually store offsets in their own units. The action bars store
+-- UIParent offsets so their centres stay fixed when individual scales change.
 function Layout:Constrain(id, x, y)
     local entry = self.entries[id]
     if not entry or not validFrame(entry.frame) then return x, y end
     local scale = self:Scale(id)
-    local halfW = UIParent:GetWidth() / scale / 2
-    local halfH = UIParent:GetHeight() / scale / 2
+    local positionScale = entry.parentCoordinates and 1 or scale
+    local halfW = UIParent:GetWidth() / positionScale / 2
+    local halfH = UIParent:GetHeight() / positionScale / 2
+    local sizeScale = scale / positionScale
     -- A bottom bar owns the screen edge; other entries keep the window margin.
     local margin = entry.margin or self.margin
-    local maxX = math.max(0, halfW - entry.frame:GetWidth() / 2 - margin)
-    local maxY = math.max(0, halfH - entry.frame:GetHeight() / 2 - margin)
+    local maxX = math.max(0, halfW - entry.frame:GetWidth() * sizeScale / 2 - margin)
+    local maxY = math.max(0, halfH - entry.frame:GetHeight() * sizeScale / 2 - margin)
     x, y = math.max(-maxX, math.min(maxX, x)), math.max(-maxY, math.min(maxY, y))
     local lock = self.axisLock[id]
     if lock == "x" then x = 0 elseif lock == "y" then y = 0 end
@@ -382,6 +389,10 @@ end
 function Layout:Apply(id)
     local entry = self.entries[id]
     if not entry or not validFrame(entry.frame) then return end
+    if entry.apply then
+        if not entry.hidden then entry.apply() end
+        return
+    end
     local frame = entry.frame
     local group = entry.groupId and self.entries[entry.groupId]
     if entry.member and group and validFrame(group.frame) then
@@ -414,6 +425,19 @@ function Layout:ApplyAll()
     if self.editing then self:UpdateEdgeGuides() end
 end
 
+-- The resource rail's own height. `CentralRows` reserves this lane between the
+-- main skill row and an auxiliary row above it; a taller rune row therefore
+-- moves the reserved space instead of drawing into the buff row (012 phase 08).
+function Layout:SetResourceHeight(height)
+    height = plainNumber(height)
+    if not height or height <= 0 then return false end
+    height = math.max(3, math.min(48, height))
+    if math.abs(height - self.resourceHeight) < 0.25 then return false end
+    self.resourceHeight = height
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    return true
+end
+
 function Layout:ActionAreaBottom()
     return self.actionBottom
 end
@@ -440,18 +464,31 @@ end
 -- is the shared central anchor.
 function Layout:Central()
     local screenWidth, screenHeight = uiSize()
-    local rows, measured = {}, 0
-    for _, name in ipairs(self.actionBarNames) do
+    local rows, stack, measured = {}, {}, 0
+    for index, name in ipairs(self.actionBarNames) do
         local bar = _G[name]
         local width, height = frameSize(bar)
         if width and height then
-            rows[#rows + 1] = { name = name, frame = bar, width = width, height = height }
             measured = measured + 1
+            local entry = self.entries["actionBar" .. index]
+            local detached = entry and not entry.hidden and entry.detached
+            -- A detached bar still reserves its row in the central stack. The
+            -- player moved the buttons, not the HUD: collapsing the stack made
+            -- the cooldown blocks fall to the bottom strip the moment the bars
+            -- left the centre. Height stays, width does not (the unit frames
+            -- must not hug a bar that lives somewhere else).
+            stack[#stack + 1] = { height = height, detached = detached or nil }
+            if not detached then
+                rows[#rows + 1] = { name = name, frame = bar, width = width, height = height }
+            end
         end
     end
     local estimated = false
-    if #rows == 0 then
+    if measured == 0 then
         estimated = true
+        for _ = 1, 3 do
+            stack[#stack + 1] = { height = self.fallbackActionHeight, estimated = true }
+        end
         for _ = 1, 3 do
             rows[#rows + 1] = { height = self.fallbackActionHeight, estimated = true }
         end
@@ -462,14 +499,14 @@ function Layout:Central()
     for _, row in ipairs(rows) do
         if row.width and row.width > width then width = row.width end
     end
-    if width <= 0 then
+    if width <= 0 and #stack > 0 then
         width = self.fallbackActionWidth
         estimated = true
     end
     local height = 0
-    for index, row in ipairs(rows) do
+    for index, row in ipairs(stack) do
         height = height + row.height
-        if index < #rows then height = height + self.actionGap end
+        if index < #stack then height = height + self.actionGap end
     end
     local bottom = math.max(0, self.actionBottom)
     local top = bottom + height
@@ -548,6 +585,7 @@ function Layout:CentralRows(entries)
     local central = self:Central()
     local y = central.cooldown.bottom
     local rows = {}
+    local resource = app.components and app.components.playerResource
     for _, item in ipairs(entries or {}) do
         local frame = type(item) == "table" and item.frame or item
         local id = type(item) == "table" and item.id or nil
@@ -564,9 +602,14 @@ function Layout:CentralRows(entries)
         local rendered = type(item) == "table" and plainNumber(item.contentHeight) or nil
         if rendered and rendered > 0 and (not height or rendered > height) then height = rendered end
         if frame and height then
+            local main = type(item) == "table" and item.main == true
+            local previous = rows[#rows]
+            if not main and previous and previous.main and resource and resource.running then
+                y = previous.top + self.resourceGap + self.resourceHeight + self.resourceTrailingGap
+            end
             rows[#rows + 1] = {
                 id = id, frame = frame, width = width, height = height,
-                main = type(item) == "table" and item.main == true,
+                main = main,
                 bottom = y, top = y + height, center = y + height / 2,
             }
             y = y + height + self.cooldownGap
@@ -630,6 +673,7 @@ function Layout:CentralRows(entries)
         -- The placer's final top is carried across passes; without it a refused
         -- row would read as a new change on every beat and publish forever.
         finalTop = previous and previous.finalTop or nil,
+        finalMainTop = previous and previous.finalMainTop or nil,
         rowTop = rowTop,
         mainTop = mainTop, mainBottom = mainBottom, mainCount = mainCount,
         width = central.content.width,
@@ -640,20 +684,20 @@ function Layout:CentralRows(entries)
     return central
 end
 
--- The placer's correction to the applied top: a refused anchor collapses its
--- row, so the stack the player sees can end below the planned top. Returns
--- true when the final applied top moved, which the caller publishes as a
--- geometry change. The comparison is against the previous final top, so a
--- settled refusal costs nothing.
-function Layout:SetAppliedTop(top)
+-- Keep the final stack edge and the main skill edge separately. A refused
+-- anchor can collapse a row or leave it at a readable native position.
+function Layout:SetAppliedTop(top, mainTop)
     top = plainNumber(top)
     if not top then return false end
     local applied = self.appliedRows
     if not applied then return false end
-    local previous = applied.finalTop
-    if previous ~= nil and math.abs(previous - top) < 0.5 then return false end
+    local previous, previousMain = applied.finalTop, applied.finalMainTop
     applied.top, applied.finalTop = top, top
-    return true
+    applied.mainTop, applied.finalMainTop = mainTop, mainTop
+    applied.rowTop = mainTop or top
+    local mainChanged = previousMain ~= mainTop
+        and (not previousMain or not mainTop or math.abs(previousMain - mainTop) >= 0.5)
+    return previous == nil or math.abs(previous - top) >= 0.5 or mainChanged
 end
 
 -- Called when the cooldown component stops: with no applied rows the resource
@@ -707,7 +751,7 @@ function Layout:Overlay(id, entry)
         local cx, cy = UIParent:GetCenter()
         local ratio = self:GetEffectiveScale() / UIParent:GetEffectiveScale()
         x, y = x * ratio - cx, y * ratio - cy
-        local scale = entry.frame:GetScale()
+        local scale = entry.parentCoordinates and 1 or entry.frame:GetScale()
         x, y = math.floor(x / scale / 4 + 0.5) * 4, math.floor(y / scale / 4 + 0.5) * 4
         -- A locked axis writes the same centre the next apply will use, so the
         -- overlay cannot briefly settle outside the band it is pinned to.
@@ -758,6 +802,7 @@ function Layout:SetEditing(wanted)
                 local saved = app.Store:Profile().positions[id]
                 local px, py = saved and saved.x or entry.x or 0, saved and saved.y or entry.y or 0
                 px, py = self:Constrain(id, px, py)
+                if entry.parentCoordinates then px, py = px / scale, py / scale end
                 x, y, cx, cy = px, py, 0, 0
             end
             overlay:SetSize(frame:GetWidth() * scale, frame:GetHeight() * scale)
@@ -820,6 +865,57 @@ Layout.presets = {
             unit_targettarget = { 0.17, -0.31 },
         },
     },
+    -- 012 phase 02: the two Pearl compositions. Both leave the centre to combat
+    -- and give each screen edge one job; they only write the entries they list,
+    -- so a panel the player never moved keeps its own default and a profile that
+    -- never applies a preset is untouched.
+    --
+    -- City: the map column owns the right edge (objectives under it, bag and
+    -- character windows on the right half), the party stays a short column on
+    -- the left, chat and strip sit at the bottom, and the centre stays empty
+    -- except for the unit pair beside the skill block.
+    pearlCity = {
+        label = "presetPearlCity",
+        entries = {
+            topInfo = { 0.00, 0.435 },
+            bottomBar = { 0.00, -0.5 },
+            party = { -0.355, -0.20 },
+            -- Right column reads top to bottom: map, objectives, meter reserve.
+            questList = { 0.345, 0.175 },
+            damageMeterArea = { 0.345, -0.315 },
+            utilityCorner = { 0.395, -0.325 },
+            inventory = { 0.235, -0.14 },
+            characterWindow = { 0.245, 0.095 },
+            raidFrames = { -0.29, -0.06 },
+            unit_player = { 0.00, -0.213 },
+            unit_target = { 0.00, -0.213 },
+            unit_focus = { 0.265, 0.05 },
+            unit_pet = { -0.175, -0.275 },
+            unit_targettarget = { 0.175, -0.295 },
+        },
+    },
+    -- Combat: the party and raid grids own the left edge, the objective column
+    -- the right edge, the meter the bottom-right corner, and the centre holds
+    -- only the skill block, the resource rail and the player/target pair.
+    pearlCombat = {
+        label = "presetPearlCombat",
+        entries = {
+            topInfo = { 0.00, 0.45 },
+            bottomBar = { 0.00, -0.5 },
+            party = { -0.345, -0.135 },
+            raidFrames = { -0.305, -0.10 },
+            questList = { 0.365, 0.075 },
+            damageMeterArea = { 0.355, -0.345 },
+            utilityCorner = { 0.40, -0.355 },
+            inventory = { 0.30, -0.19 },
+            characterWindow = { 0.295, 0.16 },
+            unit_player = { 0.00, -0.23 },
+            unit_target = { 0.00, -0.23 },
+            unit_focus = { 0.285, -0.135 },
+            unit_pet = { -0.17, -0.315 },
+            unit_targettarget = { 0.17, -0.315 },
+        },
+    },
 }
 Layout.presetOverlays = {}
 -- The player and target main bars flank the measured action area in every
@@ -862,10 +958,7 @@ local function presetOverlay(id)
     return overlay
 end
 
--- A static illustration only. It does not inspect, move, or create native
--- buttons; the player configures the real bars through the game's Edit Mode.
--- Separators follow the measured bar rows, so the outline is the same rectangle
--- the bars will occupy instead of an unrelated 12x2 grid.
+-- Separators follow the measured rows that still use the default stack.
 local function paintActionGuide(overlay, action)
     overlay.label:ClearAllPoints()
     overlay.label:SetPoint("BOTTOM", overlay, "TOP", 0, 6)
@@ -919,11 +1012,10 @@ function Layout:PreviewPreset(name)
             shown = shown + 1
         end
     end
-    if name == "combat" then
+    local action = name == "combat" and self:Central().action
+    if action and #action.rows > 0 then
         -- The guide is the geometry every participant will read: measured bar
         -- rows when available, otherwise a labelled fallback estimate.
-        local central = self:Central()
-        local action = central.action
         local overlay = presetOverlay("nativeActionArea")
         local centerY = action.bottomY + action.height / 2
         overlay:SetSize(action.width, action.height)
@@ -1086,6 +1178,8 @@ end
 -- under one family still report: two unit frames overlapping is a real bug.
 Layout.regions = {
     map = { names = { "MinimapCluster", "Minimap" }, owner = "minimap", family = "map" },
+    mapDrawer = { names = { "LumaUIMinimapDrawer" }, owner = "minimap", family = "mapDrawer" },
+    utility = { names = { "LumaUIUtilityCorner" }, owner = "utilityCorner", family = "utility" },
     tracker = { names = { "ObjectiveTrackerFrame" }, owner = "questTracker", family = "tracker" },
     chat = { names = { "ChatFrame1" }, owner = "chat", family = "chat" },
     chatPlate = { names = { "LumaUIChatFrame1Plate" }, owner = "chat", family = "chat" },
@@ -1182,6 +1276,36 @@ function Layout:Overlaps()
         end
     end
     return list
+end
+
+-- Read-only layout result for the whole screen. Every known region reports its
+-- owner, whether the rectangle was measured or is only a size, whether the
+-- player can currently see it, and whether it is a reservation rather than a
+-- drawn frame. Unknown positions stay nil: a region without a readable rect is
+-- reported as unknown instead of being placed at zero (012 phase 02).
+function Layout:RegionLayout()
+    local screenWidth, screenHeight = uiSize()
+    local ids = {}
+    for id in pairs(self.regions) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local regions = {}
+    for _, id in ipairs(ids) do
+        local region = self.regions[id]
+        local sample = self:Sample(id)
+        regions[#regions + 1] = {
+            id = id, owner = region.owner, family = region.family,
+            reserved = region.reserved == true,
+            measured = sample and sample.measured or false,
+            shown = sample and sample.shown or nil,
+            visible = sample and sample.visible or nil,
+            left = sample and sample.left or nil,
+            bottom = sample and sample.bottom or nil,
+            width = sample and sample.width or nil,
+            height = sample and sample.height or nil,
+            source = sample and sample.measured and "client" or "unknown",
+        }
+    end
+    return { screen = { width = screenWidth, height = screenHeight }, regions = regions }
 end
 
 function Layout:CreateEdgeGuides()

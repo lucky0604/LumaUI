@@ -1,11 +1,8 @@
 local _, app = ...
 
--- Three centred bars, stacked upwards, hidden behind an alpha fade until the
--- pointer reaches the action area. The bars stay children of UIParent and are
--- never Show/Hide'd in combat: only alpha, points and parent changes are used,
--- and every protected write goes through the shared queue. This follows the
--- mechanism used by the reference action-bar modules without importing their
--- code, names or configuration.
+-- Three movable bars with independent profile scales. Unmoved bars start in a
+-- central stack, and all three share the fade. Secure button behaviour and
+-- protected layout writes stay with the client and the out-of-combat queue.
 
 local BARS = {
     { key = "main", frame = "MainActionBar", prefix = "ActionButton" },
@@ -47,8 +44,10 @@ local function recordBar(bar)
         scale = bar:GetScale(),
         alpha = bar:GetAlpha(),
         parent = bar:GetParent(),
-        shown = type(bar.IsShown) == "function" and bar:IsShown() or nil,
     }
+    if type(bar.IsShown) == "function" then
+        original.shown = app.Capabilities.Plain(bar:IsShown(), "boolean")
+    end
     if type(bar.GetPoint) == "function" then
         for index = 1, 4 do
             local ok, point, relative, relativePoint, x, y = pcall(bar.GetPoint, bar, index)
@@ -157,6 +156,17 @@ local function publishAlpha(self)
     app:Publish("ACTION_BARS_ALPHA", alpha)
 end
 
+local function anchor(bar, point, relative, relativePoint, x, y)
+    local ok, p, r, rp, px, py = pcall(bar.GetPoint, bar, 1)
+    if ok and p == point and r == relative and rp == relativePoint
+        and app.Capabilities.Plain(px, "number") == x
+        and app.Capabilities.Plain(py, "number") == y then return true end
+    return pcall(function()
+        bar:ClearAllPoints()
+        bar:SetPoint(point, relative, relativePoint, x, y)
+    end)
+end
+
 local function layout(self)
     if inCombat() then return false end
     local parkFrame = parked()
@@ -168,50 +178,88 @@ local function layout(self)
         end
     end
 
-    -- Normalise scale before measuring: the shared geometry must describe the
-    -- bars as LumaUI leaves them, not their previous Edit Mode scale.
-    for _, def in ipairs(BARS) do
+    local layoutService, profile = app.Layout, app.Store:Profile()
+    for index, def in ipairs(BARS) do
         local bar = named(def.frame)
+        local id = "actionBar" .. index
+        local entry = layoutService.entries[id]
         if bar then
             recordBar(bar)
-            pcall(bar.SetScale, bar, 1)
-            pcall(bar.Show, bar)
-            self.bars[def.key] = bar
-        end
-    end
-    local central = app.Layout:Central()
-    self.geometry = central
-    local bottom = central.action.bottom
-    local gap = central.action.gap or GAP
-
-    local previous
-    for _, def in ipairs(BARS) do
-        local bar = buttonsOf(def)
-        if bar then
-            pcall(bar.ClearAllPoints, bar)
-            if not previous then
-                pcall(bar.SetPoint, bar, "BOTTOM", UIParent, "BOTTOM", 0, bottom)
-            else
-                pcall(bar.SetPoint, bar, "BOTTOM", previous, "TOP", 0, gap)
+            if not entry or entry.frame ~= bar then
+                local slot = index
+                entry = layoutService:Register(id, bar, 0, 0, string.format(app.L.actionBarLabel, slot),
+                    function() return app.Store:Profile().ui.actionBarScales[slot] end)
+                entry.apply, entry.absoluteScale = self.applyLayout, true
+                entry.parentCoordinates = true
             end
-            pcall(bar.SetAlpha, bar, self.alpha or 0)
-            previous = bar
+            entry.hidden = nil
+            local scale = layoutService:Scale(id)
+            if app.Capabilities.Plain(bar:GetScale(), "number") ~= scale then pcall(bar.SetScale, bar, scale) end
+            if type(bar.IsShown) ~= "function" or not app.Capabilities.Plain(bar:IsShown(), "boolean") then
+                pcall(bar.Show, bar)
+            end
+            self.bars[def.key] = bar
+        elseif entry then
+            entry.hidden, entry.detached = true, nil
         end
     end
+    local old = self.geometry and self.geometry.action
+    local bottom = layoutService:ActionAreaBottom()
+    local gap = layoutService.actionGap or GAP
+    local previous
+    for index, def in ipairs(BARS) do
+        local bar = named(def.frame)
+        if bar then
+            local id = "actionBar" .. index
+            local entry = layoutService.entries[id]
+            local position = profile.positions[id]
+            local scale = app.Capabilities.Plain(bar:GetEffectiveScale(), "number")
+            local parentScale = app.Capabilities.Plain(UIParent:GetEffectiveScale(), "number")
+            local ratio = scale and parentScale and scale > 0 and parentScale > 0 and scale / parentScale or 1
+            entry.detached = nil
+            if position then
+                local x, y = layoutService:Constrain(id, position.x, position.y)
+                entry.detached = anchor(bar, "CENTER", UIParent, "CENTER", x / ratio, y / ratio) or nil
+            end
+            local placed = entry.detached
+            if not placed then
+                placed = anchor(bar, "BOTTOM", previous or UIParent, previous and "TOP" or "BOTTOM",
+                    0, (previous and gap or bottom) / ratio)
+                if placed then previous = bar end
+            end
+            if placed then
+                pcall(bar.SetAlpha, bar, self.alpha or 0)
+            else
+                restoreBar(bar)
+                entry.hidden = true
+                self.bars[def.key] = nil
+            end
+        end
+    end
+    self.geometry = layoutService:Central()
     skinButtons(self)
     self.pending = nil
     publishAlpha(self)
+    local current = self.geometry.action
+    if not old or old.top ~= current.top or old.width ~= current.width then
+        app:Publish("LAYOUT_CENTRAL_CHANGED")
+    end
     return true
 end
 
 local function apply(self)
-    if not layout(self) then
+    if self.layingOut then return end
+    if inCombat() then
         self.pending = true
         app.Queue:Run(LAYOUT_JOB, function()
             if not self.running then return end
-            layout(self)
+            apply(self)
         end)
+        return
     end
+    self.layingOut = true
+    app:Call("actionBars/layout", layout, self)
+    self.layingOut = nil
 end
 
 local function mouseOver(region)
@@ -255,6 +303,7 @@ end
 -- the caller can fall back to the native mouse predicates.
 local function cursorInside(geometry)
     if not geometry or not geometry.action then return nil end
+    if #geometry.action.rows == 0 then return false end
     if type(GetCursorPosition) ~= "function" or type(UIParent.GetCenter) ~= "function" then return nil end
     local okPos, rawX, rawY = pcall(GetCursorPosition)
     local okCenter, rawCX, rawCY = pcall(UIParent.GetCenter, UIParent)
@@ -289,9 +338,12 @@ local function isOver(self)
     if editModeOpen() then return true end
     if chatFocused() then return false end
     local inside = cursorInside(self.geometry)
-    if inside ~= nil then return inside end
-    for _, bar in pairs(self.bars) do
-        if mouseOver(bar) then return true end
+    if inside then return true end
+    for index, def in ipairs(BARS) do
+        local entry = app.Layout.entries["actionBar" .. index]
+        if (inside == nil or (entry and entry.detached)) and mouseOver(self.bars[def.key]) then
+            return true
+        end
     end
     return false
 end
@@ -340,6 +392,9 @@ app:RegisterComponent({
         self.geometry = nil
         self.publishedAlpha = nil
         self.ticking = true
+        self.applyLayout = self.applyLayout or function()
+            if self.running then apply(self) end
+        end
         apply(self)
         if type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
             self.ticker = C_Timer.NewTicker(FADE_STEP, function() step(self) end)
@@ -388,6 +443,13 @@ app:RegisterComponent({
         self.alpha = 1
         publishAlpha(self)
         self.geometry = nil
+        for index in ipairs(BARS) do
+            local entry = app.Layout.entries["actionBar" .. index]
+            if entry then
+                entry.hidden, entry.detached = true, nil
+                if entry.overlay then entry.overlay:Hide() end
+            end
+        end
         if inCombat() then
             app.Queue:Run(RESTORE_JOB, function()
                 if self.running then return end

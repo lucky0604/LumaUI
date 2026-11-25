@@ -283,8 +283,46 @@ local function applyTakeover(self)
     local wanted = app.Store:Profile().ui.takeoverUnitFrames == true
     local anchored = app.PrivateAuras.Available()
     local units = wanted and anchored and #missing == 0
+    -- The target's inline cast bar rides on the same part set, while the
+    -- player's own cast bar stays the client's in every mode. Recording both
+    -- under one flag is what made the old report look like it claimed the
+    -- player cast too (012 phase 00).
     local cast = wanted and anchored and #missing == 0
-    self.takeover = { units = units, cast = cast, missing = missing }
+    self.takeover = { units = units, cast = cast, playerCast = false, missing = missing }
+    if app.Ownership then
+        local reason
+        if not wanted then reason = "profile-native"
+        elseif not anchored then reason = "no-private-aura-api"
+        elseif #missing > 0 then reason = "missing-parts" end
+        app.Ownership:Set("unitFrames", {
+            intent = wanted and "owned" or "native",
+            active = units and "owned" or "native",
+            evidence = "simulated", reason = reason,
+        })
+        -- Player cast ownership is its own row: native in every mode until a
+        -- replacement is validated on the live client.
+        app.Ownership:Set("unitFrames.playerCast", {
+            intent = "native", active = "native", evidence = "none",
+        })
+        app.Ownership:Set("unitFrames.targetCast", {
+            intent = wanted and "owned" or "native",
+            active = cast and "owned" or "native",
+            evidence = "none", reason = cast and "awaiting-validation" or reason,
+        })
+        -- Aura layers are separate owners: the unit frames draw the normal
+        -- rows, the client draws the full buff row and every private anchor.
+        -- Reporting them apart is what stops "auras are native" from hiding
+        -- the fact that a unit frame replaced its own two rows (012 phase 09).
+        app.Ownership:Set("unitFrames.auras", {
+            intent = wanted and "owned" or "native",
+            active = units and "owned" or "native",
+            evidence = "simulated", reason = reason,
+        })
+        app.Ownership:Set("auraEdge", { intent = "native", active = "native",
+            evidence = "none", reason = "client-buffs-kept" })
+        app.Ownership:Set("auraPrivate", { intent = "native", active = "native",
+            evidence = "none", reason = "client-anchored" })
+    end
     if units then
         suppressNativeFrames(self)
     else
@@ -481,6 +519,11 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
         -- The native frames come back even though the component stops: the
         -- restore job runs after the stop, so the guard inside checks nothing.
         restoreNativeFrames(self)
+        if app.Ownership then
+            app.Ownership:Active("unitFrames", "native", "component-off")
+            app.Ownership:Active("unitFrames.targetCast", "native", "component-off")
+            app.Ownership:Active("unitFrames.auras", "native", "component-off")
+        end
     end,
 })
 

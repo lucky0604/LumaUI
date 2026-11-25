@@ -4900,13 +4900,17 @@ test("the target chip is warm white and friendly bars keep their fill", function
     eq(H.targetBar.lumaNameplateTarget.color[1], text[1])
     eq(H.targetBar.lumaNameplateTarget.color[2], text[2])
     eq(H.targetBar.lumaNameplateTarget.color[3], text[3])
-    -- A friendly plate is decorated but its fill stays the client's own.
+    -- A friendly plate keeps a friendly hue instead of the hostile combat red.
+    -- The fixture reports secret health, so the own numeric layer cannot draw
+    -- and the native track receives the muted fallback palette.
     H.unitInfo.nameplate3 = { reaction = 5 }
     local plate = H.Plate("modern")
     H.nameplates.nameplate3 = plate
     H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate3")
     local bar = plate.UnitFrame.HealthBarsContainer.healthBar
-    eq(bar.statusFill == nil or bar.statusFill.texture == nil, true)
+    eq(bar.barColor[1], 0.35)
+    eq(bar.barColor[2], 0.60)
+    eq(bar.statusFill.texture, app.Theme.media.combatFill)
     eq(bar.lumaNameplateBg:IsShown(), true)
     eq(app.components.nameplates.plates.nameplate3.painted, false)
     app.Store:Set("modules", "nameplates", false)
@@ -10076,6 +10080,42 @@ test("action bars stack at the centre and restore on disable", function()
     eq(#app.errors, 0)
 end)
 
+test("action bar positions and scales are independent and reversible", function()
+    local app = H.Load()
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    local bar3 = H.NewFrame("MultiBarBottomRight", UIParent)
+    bar2:SetSize(400, 40)
+    bar3:SetSize(400, 40)
+    bar2:SetScale(1.2)
+    bar2:SetPoint("TOP", UIParent, "TOP", 10, -20)
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionBars", true)
+    eq(app.Layout.entries.actionBar2.frame, bar2)
+    eq(app.Layout.entries.actionBar3.frame, bar3)
+
+    app.Store:SetPosition("actionBar2", 280, -150)
+    app.Layout:Apply("actionBar2")
+    eq(bar2.point[1], "CENTER")
+    eq(bar2.point[4], 280)
+    eq(bar3.point[2], MainActionBar)
+    eq(#app.Layout:Central().action.rows, 2)
+
+    H.Combat(true)
+    app.Store:Set("ui", "actionBarScales", { 1, 0.8, 1.25 })
+    eq(bar2:GetScale(), 1)
+    H.Combat(false)
+    eq(bar2:GetScale(), 0.8)
+    eq(bar3:GetScale(), 1.25)
+    eq(MainActionBar:GetScale(), 1)
+    eq(bar2.point[4] * bar2:GetScale(), 280)
+
+    app.Store:Set("modules", "actionBars", false)
+    eq(bar2:GetScale(), 1.2)
+    eq(bar2.point[1], "TOP")
+    eq(app.Layout.entries.actionBar2.hidden, true)
+    eq(#app.errors, 0)
+end)
+
 test("action bars skin every bar once and hand the buttons back on disable", function()
     local app = H.Load({
         profiles = { Default = {} },
@@ -10151,8 +10191,8 @@ test("the cooldown manager viewers are stacked above the measured action area an
     eq(essential.point[5], 104)
     eq(utility.point, nil)
     eq(utility:IsShown(), false)
-    eq(_G.BuffBarCooldownViewer.point[5], 142)
-    eq(buffs.point[5], 180)
+    eq(_G.BuffBarCooldownViewer.point[5], 155)
+    eq(buffs.point[5], 193)
     eq(component.placedRows[1].id, "essential")
     eq(component.placedRows[2].id, "buffBar")
     eq(component.placedRows[3].id, "buffIcon")
@@ -10966,6 +11006,22 @@ test("disabling the cooldown stack returns the rail to the reserved baseline", f
     eq(#app.errors, 0)
 end)
 
+test("tracked buff rows leave space for the resource rail without moving it", function()
+    local app = H.Load()
+    H.Fire("PLAYER_LOGIN")
+    local rail = app.components.playerResource.rail
+    local central = app.Layout:Central()
+    local bottom = rail.point[5]
+    eq(bottom, central.cooldown.mainTop + app.Layout.resourceGap)
+    eq(BuffBarCooldownViewer.point[5] >= bottom + rail:GetHeight(), true)
+    local top = central.cooldown.top
+    BuffBarCooldownViewer:SetHeight(BuffBarCooldownViewer:GetHeight() + 90)
+    app.components.cooldownViewer:Refresh()
+    eq(app.Layout:Central().cooldown.top > top, true)
+    eq(rail.point[5], bottom)
+    eq(#app.errors, 0)
+end)
+
 test("a settled resource rail is not rewritten by the slow layout beat", function()
     local app = H.Load()
     for _, name in ipairs({ "UtilityCooldownViewer", "BuffBarCooldownViewer", "BuffIconCooldownViewer" }) do
@@ -11060,7 +11116,7 @@ test("the player resource rail follows the central block and passes values throu
     local central = app.Layout:Central()
     eq(rail:GetWidth(), central.content.width)
     eq(rail.point[1], "BOTTOM")
-    eq(rail.point[5], central.cooldown.top + 6)
+    eq(rail.point[5], (central.cooldown.mainTop or central.cooldown.top) + app.Layout.resourceGap)
     -- Disabling hides the rail and releases the component's events.
     app.Store:Set("modules", "playerResource", false)
     eq(rail:IsShown(), false)
@@ -11416,6 +11472,556 @@ test("the top reading stays off by default on an old or read-only database", fun
     eq(readonly.components.topPerformance.running == true, false)
     eq(#old.errors, 0)
     eq(#readonly.errors, 0)
+end)
+
+test("ownership separates intent, active displayer and player cast", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    app:Reconcile()
+    local record = app.Ownership:Get("unitFrames")
+    eq(record.intent, "owned")
+    eq(record.active, "owned")
+    eq(record.evidence, "simulated")
+    -- The player's cast bar is its own row and never enters the takeover: the
+    -- native frame keeps drawing it while the unit frames are replaced.
+    local cast = app.Ownership:Get("unitFrames.playerCast")
+    eq(cast.intent, "native")
+    eq(cast.active, "native")
+    eq(PlayerCastingBarFrame:IsShown(), true)
+    app.Store:Set("modules", "unitFrames", false)
+    eq(app.Ownership:Get("unitFrames").active, "native")
+    eq(app.Ownership:Get("unitFrames").intent, "owned")
+    eq(app.Ownership:Get("unitFrames").reason, "component-off")
+    eq(app.Ownership:Describe("unitFrames"):find("active=native", 1, true) ~= nil, true)
+    H.messages = {}
+    SlashCmdList.LUMAUI("ownership")
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("unitFrames: intent=owned", 1, true) ~= nil, true)
+    eq(text:find("unitFrames.playerCast", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("pearl presets preview, apply and undo exact positions", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local layout = app.Layout
+    local names = {}
+    for _, preset in ipairs(layout:Presets()) do names[preset.id] = true end
+    eq(names.pearlCity, true)
+    eq(names.pearlCombat, true)
+    eq(layout:PreviewPreset("pearlCity") > 0, true)
+    eq(layout.previewName, "pearlCity")
+    eq(app.Store:Profile().positions.questList, nil)
+    layout:ApplyPreset("pearlCity")
+    local saved = app.Store:Profile().positions
+    eq(saved.questList ~= nil, true)
+    eq(saved.inventory ~= nil, true)
+    -- An entry the preset names but this profile never registered is not
+    -- written: a preset cannot create a position for a missing panel.
+    eq(saved.characterWindow, nil)
+    eq(layout.previewName, nil)
+    layout:UndoPreset()
+    local after = app.Store:Profile().positions
+    eq(after.questList, nil)
+    eq(after.inventory, nil)
+    eq(#app.errors, 0)
+end)
+
+test("region layout reports unknown positions instead of zero", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local function region(id)
+        for _, entry in ipairs(app.Layout:RegionLayout().regions) do
+            if entry.id == id then return entry end
+        end
+    end
+    local map = region("map")
+    eq(map ~= nil, true)
+    eq(map.owner, "minimap")
+    -- A frame with a size but no readable rect is "unknown", not "at 0,0".
+    eq(map.measured, false)
+    eq(map.left, nil)
+    eq(map.source, "unknown")
+    -- The region samples the cluster first (the frame the player drags); a
+    -- readable rect there is what turns "unknown" into a measured region.
+    MinimapCluster.rect = { left = 100, bottom = 500, width = 198, height = 198 }
+    map = region("map")
+    eq(map.measured, true)
+    eq(map.left, 100)
+    eq(map.width, 198)
+    eq(map.source, "client")
+    eq(app.Layout:RegionLayout().screen.width, 1920)
+    eq(#app.errors, 0)
+end)
+
+test("moving the action bar away leaves the central HUD stack in place", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionBars", true)
+    app:Reconcile()
+    local essential = _G.EssentialCooldownViewer
+    local before = essential.point[5]
+    eq(before, 104)
+    eq(#app.Layout:Central().action.rows, 1)
+    -- Detach the only measured bar: the reserved stack keeps its height, so the
+    -- cooldown block must not fall to the bottom strip with the buttons.
+    app.Store:SetPosition("actionBar1", 240, 120)
+    app.Layout:Apply("actionBar1")
+    local central = app.Layout:Central()
+    eq(#central.action.rows, 0)
+    eq(central.action.height, 40)
+    eq(central.action.top, 96)
+    app:Publish("LAYOUT_CENTRAL_CHANGED")
+    eq(essential.point[5], before)
+    app.Store:SetPositions({})
+    app.Layout:Apply("actionBar1")
+    eq(#app.Layout:Central().action.rows, 1)
+    eq(essential.point[5], before)
+    eq(#app.errors, 0)
+end)
+
+test("an old profile receives the own nameplate look exactly once", function()
+    local saved = {
+        schema = 1,
+        profiles = { Default = { modules = {}, ui = { plateOwned = false } } },
+        migrations = { pearlBatch = true, visualModules = true, actionBars = true },
+        characters = {},
+    }
+    local app = H.Load(saved)
+    H.Fire("PLAYER_LOGIN")
+    eq(app.Store:Profile().ui.plateOwned, true)
+    eq(LumaUIDB.migrations.plateOwnedDefault, true)
+    -- Turning it off afterwards is a real choice and survives the next load,
+    -- because the migration key is already recorded.
+    app.Store:Set("ui", "plateOwned", false)
+    local reload = H.Load(LumaUIDB)
+    H.Fire("PLAYER_LOGIN")
+    eq(reload.Store:Profile().ui.plateOwned, false)
+    eq(#app.errors, 0)
+end)
+
+test("the own nameplate look is on by default", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.Store:Profile().ui.plateOwned, true)
+    local plate = H.Plate("modern")
+    H.nameplates.nameplate1 = plate
+    local bar = plate.UnitFrame.HealthBarsContainer.healthBar
+    plate.UnitFrame.level = 1
+    bar.level = 3
+    _G.UnitName = function() return "Guard" end
+    _G.UnitHealth, _G.UnitHealthMax = function() return 50 end, function() return 100 end
+    app.Store:Set("modules", "nameplates", true)
+    app:Reconcile()
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
+    local view = plate.lumaPlateView
+    eq(view ~= nil, true)
+    eq(view.frame:IsShown(), true)
+    eq(view.name:GetText(), "Guard")
+    eq(view.value:GetText(), "50%")
+    -- The own plate is a full dark panel over the client's panel, not a small
+    -- strip inside it; that is what makes the replacement visible.
+    eq(view.frame.backdrop:IsShown(), true)
+    eq(view.frame.backdrop:IsShown(), true)
+    eq(view.tint:IsShown(), false)
+    eq(view.frame.edge ~= nil, true)
+    eq(view.frame:GetWidth() >= 96, true)
+    eq(view.frame:GetHeight() >= 10, true)
+    eq(bar:GetAlpha(), 0)
+    -- Opting out gives the client's bar and name back.
+    app.Store:Set("ui", "plateOwned", false)
+    eq(view.frame:IsShown(), false)
+    eq(bar:GetAlpha(), 1)
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("a restricted nameplate still gets the matte native skin", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar = H.PlainBar()
+    bar.height = 12
+    bar.texture = "Interface\\Nameplates\\old"
+    bar.GetHeight = function(self) return self.height end
+    bar.SetHeight = function(self, value) self.height = value end
+    bar.GetStatusBarTexture = function(self) return self.texture end
+    bar.SetStatusBarTexture = function(self, value) self.texture = value end
+    local plate = H.Plate("modern", bar)
+    plate.UnitFrame.level = 1
+    bar.level = 3
+    local nativePanel = H.NewFrame(nil, plate.UnitFrame)
+    plate.UnitFrame.Background = nativePanel
+    H.nameplates.nameplate1 = plate
+    H.unitInfo.nameplate1 = { reaction = 4 }
+    _G.UnitName = function() return "Guard" end
+    _G.UnitHealth, _G.UnitHealthMax = function() return H.Secret(50) end, function() return H.Secret(100) end
+    app.Store:Set("modules", "nameplates", true)
+    app:Reconcile()
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
+    -- Restricted health: no own layer; the client's fill and name stay, the
+    -- fill is restyled in place and the client's plate border is removed.
+    local restricted = plate.lumaPlateView
+    eq(restricted.frame:IsShown(), false)
+    eq(nativePanel:IsShown(), false)
+    eq(nativePanel.alpha, 0)
+    eq(bar:GetAlpha(), 1)
+    eq(bar.height, 8)
+    eq(bar.texture, app.Theme.media.combatFill)
+    -- A neutral plate takes the muted palette instead of the client's bright
+    -- yellow-green fill; removal restores the original colour.
+    eq(bar.barColor[1], 0.62)
+    eq(bar.barColor[2], 0.55)
+    H.Fire("NAME_PLATE_UNIT_REMOVED", "nameplate1")
+    eq(bar.height, 12)
+    eq(bar.texture, "Interface\\Nameplates\\old")
+    eq(nativePanel:IsShown(), true)
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("own nameplate layer draws its track and restores native parts", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local plate = H.Plate("modern")
+    H.nameplates.nameplate1 = plate
+    local bar = plate.UnitFrame.HealthBarsContainer.healthBar
+    _G.UnitName = function() return "Target Dummy" end
+    _G.UnitHealth, _G.UnitHealthMax = function() return 60 end, function() return 100 end
+    app.Store:Set("modules", "nameplates", true)
+    app.Store:Set("ui", "plateOwned", true)
+    app:Reconcile()
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
+    local view = plate.lumaPlateView
+    eq(view ~= nil, true)
+    eq(view.frame:IsShown(), true)
+    eq(view.health.maximum, 100)
+    eq(view.health.value, 60)
+    eq(view.value:GetText(), "60%")
+    eq(view.name:GetText(), "Target Dummy")
+    -- Only the native fill is dimmed; the plate button itself keeps its input.
+    eq(bar:GetAlpha(), 0)
+    eq(plate.UnitFrame.mouseEnabled, nil)
+    -- A restricted health payload hides the own layer and keeps the native fill
+    -- plus its restyled name instead of freezing the last readable value.
+    _G.UnitHealth = function() return H.Secret(60) end
+    H.Fire("UNIT_HEALTH", "nameplate1")
+    eq(view.frame:IsShown(), false)
+    eq(bar:GetAlpha(), 1)
+    _G.UnitHealth = function() return 60 end
+    H.Fire("UNIT_HEALTH", "nameplate1")
+    eq(view.frame:IsShown(), true)
+    eq(view.health:IsShown(), true)
+    app.Store:Set("modules", "nameplates", false)
+    eq(view.frame:IsShown(), false)
+    eq(bar:GetAlpha(), 1)
+    eq(#app.errors, 0)
+end)
+
+test("own nameplate cast row only draws readable casts", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local plate = H.Plate("modern")
+    H.nameplates.nameplate1 = plate
+    _G.UnitName = function() return "Caster" end
+    _G.UnitHealth, _G.UnitHealthMax = function() return 80 end, function() return 100 end
+    app.Store:Set("modules", "nameplates", true)
+    app.Store:Set("ui", "plateOwned", true)
+    app.Store:Set("ui", "plateCast", true)
+    app:Reconcile()
+    H.Fire("NAME_PLATE_UNIT_ADDED", "nameplate1")
+    H.cast.nameplate1 = { name = "Shadow Bolt", startTime = 0, endTime = 2000 }
+    H.now = 1
+    H.Fire("UNIT_SPELLCAST_START", "nameplate1")
+    local view = plate.lumaPlateView
+    eq(view.cast:IsShown(), true)
+    eq(view.castBar.maximum, 2000)
+    eq(view.castText:GetText(), "Shadow Bolt")
+    -- A restricted tuple keeps the client's cast bar: the own row disappears.
+    H.cast.nameplate1 = { name = "Shadow Bolt", startTime = H.Secret(0), endTime = H.Secret(2000) }
+    H.Fire("UNIT_SPELLCAST_START", "nameplate1")
+    eq(view.cast:IsShown(), false)
+    H.cast.nameplate1 = nil
+    H.Fire("UNIT_SPELLCAST_STOP", "nameplate1")
+    eq(view.cast:IsShown(), false)
+    app.Store:Set("modules", "nameplates", false)
+    eq(#app.errors, 0)
+end)
+
+test("the style card shows the real plate and cell renderers", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.StyleSheet:Toggle(true)
+    local sheet = app.StyleSheet
+    eq(sheet.plateView ~= nil, true)
+    eq(sheet.plateView.frame:IsShown(), true)
+    eq(sheet.plateView.health.value, 62)
+    eq(sheet.plateView.value:GetText(), "62%")
+    eq(sheet.plateView.chip:IsShown(), true)
+    eq(sheet.plateView.cast:IsShown(), true)
+    eq(#sheet.pearlCells, 4)
+    eq(sheet.pearlCells[1].icon:IsShown(), true)
+    eq(sheet.pearlCells[2].count:GetText(), "3")
+    eq(sheet.pearlCells[2].time:GetText(), "34")
+    eq(sheet.pearlCells[2].state, "proc")
+    eq(sheet.pearlCells[4].icon:IsShown(), false)
+    eq(sheet.pearlLabels[1]:GetText(), "ready")
+    -- Reopening reuses the same cells; no second layer is allocated.
+    app.StyleSheet:Toggle(false)
+    app.StyleSheet:Toggle(true)
+    eq(#sheet.pearlCells, 4)
+    -- The sample has no native bar to back, so one chrome frame is expected;
+    -- reopening must not allocate a second one.
+    eq(#sheet.plateHolder.children, 1)
+    eq(#app.errors, 0)
+end)
+
+test("own cooldown groups import order and draw live cells", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    eq(cds.running, true)
+    -- Empty groups draw nothing: the default screen keeps the client's viewers.
+    eq(cds.containers.essential.frame:IsShown(), false)
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "Spell" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 30, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    H.now = 10
+    SlashCmdList.LUMAUI("cds add 12345")
+    eq(#app.Store:Profile().ui.cooldownGroups.groups.essential.order, 1)
+    eq(cds.containers.essential.frame:IsShown(), false)
+    SlashCmdList.LUMAUI("cds owned")
+    eq(cds.containers.essential.frame:IsShown(), true)
+    local cell = cds.containers.essential.cells[1]
+    eq(cell.icon:IsShown(), true)
+    eq(cell.icon.texture, "Interface\\Icons\\13345")
+    eq(cell.state, "tracking")
+    eq(cell.lumaSpellID, 12345)
+    eq(cell.time:GetText(), "20")
+    -- A restricted cooldown keeps the icon and drops the timer instead of
+    -- freezing a stale second.
+    _G.C_Spell.GetSpellCooldown = function()
+        return { startTime = H.Secret(0), duration = H.Secret(30), isEnabled = true }
+    end
+    H.Fire("SPELL_UPDATE_COOLDOWN")
+    eq(cell.icon:IsShown(), true)
+    eq(cell.time:GetText(), "")
+    -- Import keeps the player's order and appends only missing IDs.
+    _G.C_CooldownViewer = { GetOrderedCooldownIDsForCategory = function() return { 999, 12345 } end }
+    _G.Enum = { CooldownViewerCategory = { Essential = 1, Utility = 2 } }
+    SlashCmdList.LUMAUI("cds import essential")
+    local order = app.Store:Profile().ui.cooldownGroups.groups.essential.order
+    eq(order[1], 12345)
+    eq(order[2], 999)
+    eq(#order, 2)
+    -- Disabling releases the frame and the ticker.
+    app.Store:Set("modules", "cooldownGroups", false)
+    eq(cds.containers.essential.frame:IsShown(), false)
+    eq(cds.ticker, nil)
+    eq(#app.errors, 0)
+end)
+
+test("own player cast bar tracks a readable cast and leaves the native bar", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local cast = app.components.playerCast
+    eq(cast.running, true)
+    eq(cast.bar:IsShown(), false)
+    app.Store:Set("ui", "playerCastOwned", true)
+    H.cast.player = { name = "Fireball", startTime = 0, endTime = 2000 }
+    H.now = 0.5
+    H.Fire("UNIT_SPELLCAST_START", "player")
+    eq(cast.bar:IsShown(), true)
+    eq(cast.label:GetText(), "Fireball")
+    eq(cast.fill.maximum, 2000)
+    eq(cast.fill.value, 500)
+    -- The client's own bar keeps drawing until the replacement is validated.
+    eq(PlayerCastingBarFrame:IsShown(), true)
+    -- A restricted tuple hides the own bar; nothing is frozen.
+    H.cast.player = { name = "Fireball", startTime = H.Secret(0), endTime = H.Secret(2000) }
+    H.Fire("UNIT_SPELLCAST_CHANNEL_UPDATE", "player")
+    eq(cast.bar:IsShown(), false)
+    H.cast.player = nil
+    H.Fire("UNIT_SPELLCAST_STOP", "player")
+    eq(cast.bar:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("own rune row follows per-rune recovery and reserves its lane", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.unitInfo.player.class = "DEATHKNIGHT"
+    H.runes = {
+        { start = 0, duration = 10, ready = false },
+        { start = 0, duration = 10, ready = true },
+    }
+    _G.GetRuneCooldown = function(index)
+        local rune = H.runes[index]
+        if not rune then return 0, 0, true end
+        return rune.start, rune.duration, rune.ready
+    end
+    H.now = 2.5
+    app.Store:Set("ui", "resourceRunes", "owned")
+    app:Reconcile()
+    local resource = app.components.playerResource
+    eq(resource.running, true)
+    eq(resource.runes:IsShown(), true)
+    eq(resource.runes.bars[1].value, 0.25)
+    eq(resource.runes.bars[2].value, 1)
+    -- The reserved lane follows the taller row instead of drawing into the
+    -- buff row above it.
+    eq(resource.rail:GetHeight(), 15)
+    eq(app.Layout.resourceHeight, 15)
+    -- A restricted rune shows an empty segment rather than a full one.
+    _G.GetRuneCooldown = function() return H.Secret(0), H.Secret(10), H.Secret(false) end
+    H.Fire("RUNE_POWER_UPDATE")
+    eq(resource.runes.bars[1].value, 0)
+    app.Store:Set("modules", "playerResource", false)
+    eq(resource.runes:IsShown(), false)
+    eq(app.Layout.resourceHeight, 11)
+    eq(#app.errors, 0)
+end)
+
+test("aura owners are reported per layer, private anchors stay native", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    app.Store:Set("ui", "takeoverUnitFrames", true)
+    app:Reconcile()
+    local unitAuras = app.Ownership:Get("unitFrames.auras")
+    eq(unitAuras.active, "owned")
+    eq(app.Ownership:Get("auraEdge").reason, "client-buffs-kept")
+    eq(app.Ownership:Get("auraPrivate").reason, "client-anchored")
+    local text = app.PrivateAuras.Describe()
+    eq(text:find("owner=native", 1, true) ~= nil, true)
+    app.Store:Set("modules", "unitFrames", false)
+    eq(app.Ownership:Get("unitFrames.auras").active, "native")
+    eq(#app.errors, 0)
+end)
+
+test("bar model maps documented action slots and mirrors rows", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local model = app.BarModel
+    eq(model.SLOT_RANGES.bar1[1], 1)
+    eq(model.SLOT_RANGES.bar2[1], 61)
+    eq(model.SLOT_RANGES.bar3[1], 49)
+    local plan = model:Plan({ columns = 5, size = 30, gap = 4, direction = "right" })
+    eq(plan.rows, 3)
+    eq(plan.columns, 5)
+    eq(#plan.slots, 12)
+    eq(plan.slots[1].x, 15)
+    eq(plan.slots[5].x, 151)
+    -- The final row is centred: two slots shift inward by half a row.
+    eq(plan.slots[11].x, 66)
+    local mirrored = model:Plan({ columns = 5, size = 30, gap = 4, direction = "left" })
+    eq(mirrored.slots[1].x, 151)
+    eq(mirrored.slots[5].x, 15)
+    local normalized = model:Normalize({ enabled = true, bars = { bar1 = { columns = 99, size = 1 } } })
+    eq(normalized.bars.bar1.columns, 12)
+    eq(normalized.bars.bar1.size, 20)
+end)
+
+test("own secure bars set action attributes and restore native visibility", function()
+    local app = H.Load()
+    _G.MultiBarBottomLeft = H.NewFrame("MultiBarBottomLeft", UIParent)
+    MultiBarBottomLeft.width, MultiBarBottomLeft.height = 524, 40
+    _G.HasAction = function(slot) return slot <= 72 end
+    _G.GetActionTexture = function() return "Interface\\Icons\\INV_Misc_QuestionMark" end
+    _G.GetActionCount = function() return 0 end
+    _G.GetActionCooldown = function() return 0, 0, false end
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("ui", "ownedBars", { enabled = true, bars = {} })
+    app:Reconcile()
+    local bars = app.components.ownedBars
+    eq(bars.barsById.bar2 ~= nil, true)
+    eq(bars.barsById.bar2.frame:IsShown(), true)
+    local button = bars.barsById.bar2.buttons[1]
+    eq(button:GetAttribute("type1"), "action")
+    eq(button:GetAttribute("action1"), 61)
+    eq(button:GetAttribute("action2"), 61)
+    eq(MultiBarBottomLeft:IsShown(), false)
+    eq(MainActionBar:IsShown(), false)
+    -- Disabling gives the native bars back and clears the action attributes.
+    app.Store:Set("modules", "ownedBars", false)
+    eq(MultiBarBottomLeft:IsShown(), true)
+    eq(MainActionBar:IsShown(), true)
+    eq(button:GetAttribute("action1"), nil)
+    eq(#app.errors, 0)
+end)
+
+test("chat size persists per profile and restores the client size", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local chat = app.components.chat
+    eq(chat.running, true)
+    local width, height = ChatFrame1:GetWidth(), ChatFrame1:GetHeight()
+    SlashCmdList.LUMAUI("chat 300 120")
+    eq(app.Store:Profile().ui.chatWidth, 300)
+    eq(app.Store:Profile().ui.chatHeight, 120)
+    eq(ChatFrame1:GetWidth(), 300)
+    eq(ChatFrame1:GetHeight(), 120)
+    SlashCmdList.LUMAUI("chat reset")
+    eq(app.Store:Profile().ui.chatWidth, 0)
+    eq(ChatFrame1:GetWidth(), width)
+    eq(ChatFrame1:GetHeight(), height)
+    eq(#app.errors, 0)
+end)
+
+test("the utility corner is its own panel over the meter reserve", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local corner = app.components.utilityCorner
+    eq(corner.running, true)
+    eq(corner.frame:IsShown(), true)
+    eq(corner.frame.buttons.settings ~= nil, true)
+    eq(corner.frame.buttons.menu ~= nil, true)
+    -- Its own rectangle is a layout entry, not a moved native button.
+    eq(app.Layout.entries.utilityCorner ~= nil, true)
+    local sample = app.Layout:Sample("utility")
+    eq(sample ~= nil, true)
+    eq(sample.owner, "utilityCorner")
+    app.Store:Set("modules", "utilityCorner", false)
+    eq(corner.frame:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("the raid switch is independent from the party switch", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    eq(app.Store:Profile().ui.partyTakeover, true)
+    eq(app.Store:Profile().ui.raidTakeover, false)
+    SlashCmdList.LUMAUI("takeover raid")
+    eq(app.Store:Profile().ui.raidTakeover, true)
+    -- Requesting the raid takeover must not silently change the party switch.
+    eq(app.Store:Profile().ui.partyTakeover, true)
+    SlashCmdList.LUMAUI("takeover party")
+    eq(app.Store:Profile().ui.partyTakeover, false)
+    eq(#app.errors, 0)
+end)
+
+test("absorb and heal prediction draw only from plain values", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    _G.UnitHealthMax = function() return 1000 end
+    _G.UnitGetTotalAbsorbs = function() return 120 end
+    _G.UnitGetIncomingHeals = function() return 60 end
+    app.Store:Set("modules", "unitFrames", true)
+    app:Reconcile()
+    local frame = app.components.unitFrames.frames.player
+    -- The harness has no SetReverseFill; the production client does. Adding it
+    -- here proves the plain-number path without pretending the widget exists.
+    frame.absorb.SetReverseFill = function() end
+    frame.prediction.SetReverseFill = function() end
+    H.Fire("UNIT_HEALTH", "player")
+    eq(frame.absorb:IsShown(), true)
+    eq(frame.absorb.value, 120)
+    eq(frame.prediction:IsShown(), true)
+    eq(frame.prediction.value, 60)
+    _G.UnitGetTotalAbsorbs = function() return H.Secret(120) end
+    H.Fire("UNIT_ABSORB_UPDATE", "player")
+    eq(frame.absorb:IsShown(), false)
+    eq(frame.prediction:IsShown(), true)
+    app.Store:Set("modules", "unitFrames", false)
+    eq(#app.errors, 0)
+end)
+
+test("the minimap drawer opens LumaUI entries and leaves native buttons", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local minimap = app.components.minimap
+    eq(minimap.drawer ~= nil, true)
+    eq(minimap.drawer:IsShown(), false)
+    minimap.drawer:Show()
+    eq(minimap.drawer:IsShown(), true)
+    eq(#minimap.drawerButtons, 6)
+    eq(GameTimeFrame:IsShown(), true)
+    -- Calendar stays the client's own frame; the drawer only calls its toggle.
+    app.Store:Set("modules", "minimap", false)
+    eq(minimap.drawer:IsShown(), false)
+    eq(#app.errors, 0)
 end)
 
 print(string.format("%d/%d tests passed", passed, total))

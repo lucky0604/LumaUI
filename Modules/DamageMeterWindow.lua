@@ -224,6 +224,33 @@ function component:Describe()
     for _, row in ipairs(self.rows or {}) do
         if row:IsShown() then shown = shown + 1 end
     end
-    return string.format("damageMeter: rows=%d shown=%s", shown,
-        self.frame and self.frame:IsShown() and "yes" or "no")
+    return string.format("damageMeter: rows=%d shown=%s source=%s", shown,
+        self.frame and self.frame:IsShown() and "yes" or "no",
+        type(app.DamageMeterProvider) == "function" and "external" or "none")
+end
+
+-- 012 phase 19 probe. The official meter API's exact session/entry shape is not
+-- verified on this build, so the adapter reads nothing and calls nothing with a
+-- guessed argument. This report names what the client exposes; a shape is
+-- adopted only after a real session confirms it. Until then the reserved area
+-- stays with the player's own meter and the window keeps its provider seam.
+local OFFICIAL_FUNCTIONS = {
+    "GetCombatSessionFromType", "GetCombatSessionFromID",
+    "GetAvailableCombatSessions", "GetCurrentCombatSession",
+}
+
+function component:Probe()
+    local api = _G.C_DamageMeter
+    if type(api) ~= "table" then
+        app:Print(app.L.meterNoApi)
+        return
+    end
+    local found = {}
+    for _, name in ipairs(OFFICIAL_FUNCTIONS) do
+        if type(api[name]) == "function" then found[#found + 1] = name end
+    end
+    app:Print(string.format("damageMeter: api=yes functions=%s provider=%s",
+        #found > 0 and table.concat(found, ",") or "-",
+        type(app.DamageMeterProvider) == "function" and "external" or "none"))
+    app:Print("  " .. app.L.meterApiPending)
 end

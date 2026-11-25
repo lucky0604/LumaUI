@@ -56,7 +56,9 @@ local component = app:RegisterComponent({
 | `app.Layout:Join(groupId, id, frame, defaultX, defaultY, spec)` | 把框体加入组：成员随组移动/缩放、不单独列出；旧绝对位置会一次性转换为相对偏移；战斗中拒绝 |
 | `app.Layout:SetEntryDefault(id, x, y)` / `SetGroupSize(id, w, h)` | 更新默认中心或组尺寸；不要直接写 `Layout.entries` |
 | `app.Layout:RegisterPlaceholder(id, label, x, y, width, height)` | 预留第三方区域：只在布局编辑时显示轮廓，不接管任何外部框体 |
-| `app.Layout:PreviewPreset(name)` / `ApplyPreset(name)` / `CancelPresetPreview()` / `UndoPreset()` | 16:9 预设：预览只画轮廓；应用显式写入当前方案并保存快照；撤销恢复快照 |
+| `app.Layout:PreviewPreset(name)` / `ApplyPreset(name)` / `CancelPresetPreview()` / `UndoPreset()` | 布局预设：`default16x9`、`combat`、`pearlCity`、`pearlCombat`。预览只画轮廓；应用显式写入当前方案并保存快照；撤销恢复快照且删除预设新增、原本不存在的键 |
+| `app.Layout:RegionLayout()` | 只读区域结果：每个已知区域的 owner、是否实测、有效可见性、预留性质与 UIParent 矩形；未知位置为 `nil` 而不是 0 |
+| `app.Layout:SetResourceHeight(height)` | 资源轨实际高度；`CentralRows` 用它预留主技能行与辅助行之间的空间，变化时发布 `LAYOUT_CENTRAL_CHANGED` |
 | `app.Layout:Central()` / `CentralRows(entries)` / `CentralOffset(id, side)` | 只读共享中央几何：动作区宽高、冷却行、`content`（可见冷却块宽度及左右单位边界）、`units` 和主行；纵向 `bottom/top` 为距屏幕底部的 UIParent 单位，`bottomY/rowTopY` 为布局中心坐标。`CentralRows` 用最宽可见行更新 `content`，调用方在放置完成后发布 `LAYOUT_CENTRAL_CHANGED` |
 | `app.Layout:ContentWidth()` / `SetContentWidth(width)` | 单位框所贴的可见冷却块宽度（UIParent 单位）；未测到时回退 300。`SetContentWidth` 变化时发布 `LAYOUT_CENTRAL_CHANGED`，`nil` 恢复回退值 |
 | `app.Layout:ActionAreaBottom()` / `SetActionAreaBottom(bottom)` | 底部动作区基线（距屏幕底部）。改变后发布 `LAYOUT_CENTRAL_CHANGED`；订阅方应在非战斗时重排，不要在这里直接写受保护框体 |
@@ -105,6 +107,18 @@ local component = app:RegisterComponent({
 `app.Capabilities.Plain(value, expectedType)` 返回非秘密且类型正确的值，否则返回 nil。`pcall` 不会把秘密值变成普通值。需要显示秘密数值时，必须使用游戏允许的原生绘制 API；不能计算、拼接、比较、作为表键或保存。
 
 `app.Capabilities.Snapshot()` 提供 `retail`、`containers`、`containerActions`、`containerSort`、`units`、`cast`、`auras`、`raidTargets`、`namePlates`、`taskTime`、`questItems`、`itemIcon`、`settings`、`privateAuras` 等能力快照。扩展应把缺失能力视为降级条件，而不是假定界面已在该客户端验收。
+
+### 所有权与自绘部件（012）
+
+| 接口 | 用途 |
+| --- | --- |
+| `app.Ownership:Set(id, { intent, active, evidence, reason })` / `Get` / `Active` | 每个控件记录配置意图、当前显示者、证据等级（`none/simulated/validated`）与回退原因；点号 id 可表示同一组件的子部件（如 `unitFrames.playerCast`）。诊断页与 `/luma ownership` 读取同一份记录 |
+| `app.PlateView:Create(parent, anchors?)` + `SetUnit/SetName/SetHealth/SetTarget/SetCast/ClearCast` | 自有姓名板层：自身 StatusBar、名字、百分比、目标标记与施法行，父级仍是客户端姓名板；`SetHealth` 在受限值上返回 false，调用方应保留原生绘制 |
+| `app.PearlCell:Create(parent, size)` + `Apply(cell, { icon, count, remaining, start, duration, state })` | 图标格的单一实现（动作槽、冷却格、样张共用）；`state` 取 `ready/tracking/selected/proc/unavailable`，`SetCooldown` 拒绝秘密值 |
+| `app.CooldownModel:Normalize/Plan/ApplyOrder` | 自有冷却组的有限配置形状与纯布局；身份是法术 ID，导入追加不覆盖手动顺序 |
+| `app.BarModel:Normalize/Plan` | 自有动作条配置（列数、尺寸、间距、方向）与纯几何；槽位范围是客户端文档化动作 ID，渲染器与配置分离 |
+
+这些部件均为自有非安全框体。安全动作按钮仍须在脱战创建，键位覆盖只有在实机验证后才可启用；`/luma cds`、`/luma cast`、`/luma runes`、`/luma ownedbars` 的诊断会分别报告自绘、原生保留与待验证原因。
 
 ## 战斗组件接入顺序
 

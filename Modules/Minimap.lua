@@ -189,6 +189,48 @@ local function build(self)
     self.clock:SetPoint("BOTTOMLEFT", 6, 6)
     self.coords = app.Type:Text(panel, "micro")
     self.coords:SetPoint("BOTTOMRIGHT", -6, 6)
+
+    -- 012 phase 14: the low-frequency entries live in one LumaUI drawer under
+    -- the map. Every button is LumaUI's own and calls the client's documented
+    -- entry point; no native button is moved, hidden or reparented, so calendar,
+    -- tracking and third-party buttons keep their own position and clicks.
+    local toggle = app.Controls:Button(panel, "···", 22, function(current)
+        if module.drawer then module.drawer:SetShown(not module.drawer:IsShown()) end
+    end, { height = 18, size = 11 })
+    toggle:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -4, -4)
+    self.drawerToggle = toggle
+
+    local drawer = CreateFrame("Frame", "LumaUIMinimapDrawer", UIParent, "BackdropTemplate")
+    drawer:SetFrameStrata("DIALOG")
+    drawer:SetSize(148, 4 + 6 * 24)
+    drawer:SetPoint("TOPLEFT", panel, "BOTTOMLEFT", 0, -4)
+    app.Surface:Plate(drawer, "window")
+    drawer:Hide()
+    self.drawer = drawer
+    local entries = {
+        { text = app.L.drawerSettings, run = function() app.Settings:Toggle() end },
+        { text = app.L.drawerBags, run = function()
+            local inventory = app.components.inventory
+            if inventory and inventory.running then inventory:Toggle() end
+        end },
+        { text = app.L.drawerCharacter, run = function()
+            local window = app.components.characterWindow
+            if window and window.running then window:Toggle() end
+        end },
+        { text = app.L.drawerLayout, run = function() app.Layout:Toggle() end },
+        { text = app.L.drawerCalendar, run = function()
+            if type(ToggleCalendar) == "function" then ToggleCalendar() end
+        end },
+        { text = app.L.drawerMap, run = function()
+            if type(ToggleWorldMap) == "function" then ToggleWorldMap() end
+        end },
+    }
+    self.drawerButtons = {}
+    for index, entry in ipairs(entries) do
+        local button = app.Controls:Button(drawer, entry.text, 136, entry.run, { height = 20, size = 11 })
+        button:SetPoint("TOPLEFT", 6, -4 - (index - 1) * 24)
+        self.drawerButtons[index] = button
+    end
     self.useCoords = type(C_Map) == "table"
         and type(C_Map.GetBestMapForUnit) == "function"
         and type(C_Map.GetPlayerMapPosition) == "function"
@@ -245,6 +287,7 @@ module = app:RegisterComponent({ id = "minimap", label = "minimap",
         updateInfo(self)
     end,
     Disable = function(self)
+        if self.drawer then self.drawer:Hide() end
         setShown(self, false)
         if self.maskApplied and Minimap.SetMaskTexture then
             Minimap:SetMaskTexture(CIRCLE_MASK)
@@ -287,7 +330,8 @@ function module:Describe()
     if not self.running then return nil end
     local known = knownButtons()
     local clock = app.Store:Profile().ui.clock
-    return string.format("minimap: %s=%d (%s), clock=%s, third-party=%s",
+    return string.format("minimap: %s=%d (%s), clock=%s, drawer=%s, third-party=%s",
         app.L.minimapButtons, #known, table.concat(known, ","),
-        tostring(clock), app.L.minimapThirdPartyKept)
+        tostring(clock), self.drawer and self.drawer:IsShown() and "open" or "closed",
+        app.L.minimapThirdPartyKept)
 end

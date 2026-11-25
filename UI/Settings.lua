@@ -281,8 +281,12 @@ function SettingsUI:BuildLayout(page)
     choices.default16x9:SetPoint("TOPLEFT", 0, y)
     choices.combat = Controls:Button(body, L.presetCombat, 150, function() choosePreset("combat") end)
     choices.combat:SetPoint("TOPLEFT", 164, y)
+    choices.pearlCity = Controls:Button(body, L.presetPearlCity, 150, function() choosePreset("pearlCity") end)
+    choices.pearlCity:SetPoint("TOPLEFT", 0, y - 38)
+    choices.pearlCombat = Controls:Button(body, L.presetPearlCombat, 150, function() choosePreset("pearlCombat") end)
+    choices.pearlCombat:SetPoint("TOPLEFT", 164, y - 38)
     self.presetChoices = choices
-    y = y - 38
+    y = y - 76
     local preview = Controls:Button(body, L.presetPreview, 104, function()
         app.Layout:PreviewPreset(selectedPreset)
         self:Update()
@@ -322,7 +326,9 @@ function SettingsUI:BuildLayout(page)
         top = top - noteHeight(presetHint, 28)
         choices.default16x9:ClearAllPoints(); choices.default16x9:SetPoint("TOPLEFT", 0, top)
         choices.combat:ClearAllPoints(); choices.combat:SetPoint("TOPLEFT", 164, top)
-        top = top - 38
+        choices.pearlCity:ClearAllPoints(); choices.pearlCity:SetPoint("TOPLEFT", 0, top - 38)
+        choices.pearlCombat:ClearAllPoints(); choices.pearlCombat:SetPoint("TOPLEFT", 164, top - 38)
+        top = top - 76
         preview:ClearAllPoints(); preview:SetPoint("TOPLEFT", 0, top)
         apply:ClearAllPoints(); apply:SetPoint("TOPLEFT", 112, top)
         cancel:ClearAllPoints(); cancel:SetPoint("TOPLEFT", 224, top)
@@ -346,6 +352,17 @@ function SettingsUI:BuildLayout(page)
         return row
     end
     self.layoutEmpty = note(body, L.noLayoutEntries, 0, 462)
+    local barScales = {}
+    for index in ipairs(app.Layout.actionBarNames) do
+        local slot = index
+        barScales[slot] = Controls:Range(body, string.format(L.actionBarScale, slot), 0,
+            0.5, 1.5, 0.05, function() return app.Store:Profile().ui.actionBarScales[slot] end,
+            function(value)
+                local scales = app.Store.Clone(app.Store:Profile().ui.actionBarScales)
+                scales[slot] = value
+                self:Result(app.Store:Set("ui", "actionBarScales", scales))
+            end, { width = 462 })
+    end
     page.Update = function()
         local ids = app.Layout:IDs()
         local rows = self.layoutRows
@@ -386,7 +403,20 @@ function SettingsUI:BuildLayout(page)
         cancel:SetEnabled(not readonly and app.Layout.previewName ~= nil)
         undo:SetEnabled(not readonly and app.Layout.presetSnapshot ~= nil)
         local rowsHeight = #ids > 0 and #ids * 34 or noteHeight(self.layoutEmpty, 20)
-        body:SetHeight(math.max(420, -rowTop + rowsHeight + 6))
+        local scaleTop = rowTop - rowsHeight - 12
+        for index, control in ipairs(barScales) do
+            local entry = app.Layout.entries["actionBar" .. index]
+            local available = entry and not entry.hidden
+            control:SetShown(available == true)
+            control:SetEnabled(available == true and not readonly)
+            if available then
+                control:ClearAllPoints()
+                control:SetPoint("TOPLEFT", 0, scaleTop)
+                control:Update()
+                scaleTop = scaleTop - 62
+            end
+        end
+        body:SetHeight(math.max(420, -scaleTop + 6))
         scroll:UpdateRange()
     end
 end
@@ -592,6 +622,12 @@ function SettingsUI:BuildDiagnostics(page)
                 local ok, line = pcall(component.Describe, component)
                 if ok and type(line) == "string" and line ~= "" then native[#native + 1] = line end
             end
+        end
+        -- Per-control ownership table: intent, active displayer, evidence and
+        -- the reason a native path was kept are reported separately from the
+        -- component prose above (012 phase 01).
+        if app.Ownership then
+            for _, line in ipairs(app.Ownership:Lines()) do native[#native + 1] = line end
         end
         if #native == 0 then native[1] = L.nativeNone end
         local coexistence = {}

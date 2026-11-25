@@ -24,7 +24,39 @@ local function command(input)
         -- the player's explicit request; anything else prints the report.
         app.components.nameplates:Command(rest)
     elseif action == "dump" then app:WriteDiagnostics()
+    elseif action == "ownership" or action == "owner" then
+        -- Read-only ownership table: what each control asked for, what is on
+        -- screen, and whether the current build has real evidence for it.
+        local lines = app.Ownership:Lines()
+        if #lines == 0 then
+            app:Print(app.L.ownNone)
+        else
+            app:Print(app.L.ownHeader)
+            for _, line in ipairs(lines) do app:Print("  " .. line) end
+        end
     elseif action == "hud" then app.Layout:Diagnose()
+    elseif action == "cds" and app.components.cooldownGroups then
+        app.components.cooldownGroups:Command(rest)
+    elseif action == "cast" then
+        local cast = app.components.playerCast
+        if not cast or cast.running ~= true then
+            app:Print(app.L.notReady)
+        elseif rest == "status" then
+            cast:Diagnose()
+        else
+            cast:Toggle()
+        end
+    elseif action == "ownedbars" and app.components.ownedBars then
+        app.components.ownedBars:Command(rest)
+    elseif action == "runes" then
+        local wanted = app.Store:Profile().ui.resourceRunes ~= "owned"
+        if app.Store:Set("ui", "resourceRunes", wanted and "owned" or "native") then
+            app:Print(wanted and app.L.runesOn or app.L.runesOff)
+            local resource = app.components.playerResource
+            if resource and resource.running then resource:Refresh() end
+        else
+            app:Print(app.L.readonly)
+        end
     elseif action == "bars" and app.components.actionPanel then app.components.actionPanel:Diagnose()
     elseif action == "chat" then
         -- Explicit, reversible chat-size trial (010 phase 08). The client's own
@@ -35,7 +67,14 @@ local function command(input)
             app:Print(app.L.chatTrialNeedsComponent)
             return
         end
-        if chat:SetTrialSize(chat.trialSize ~= true) then
+        -- `/luma chat <width> <height>` saves a size, `reset` clears it, and the
+        -- bare command keeps its historical trial toggle.
+        local width, height = rest:match("^(%d+)%s+(%d+)$")
+        if width then
+            chat:SetSize(tonumber(width), tonumber(height))
+        elseif rest == "reset" then
+            chat:SetSize(nil, nil)
+        elseif chat:SetTrialSize(chat.trialSize ~= true) then
             app:Print(chat.trialSize and app.L.chatSizeOn or app.L.chatSizeOff)
         end
     elseif action == "char" then app.components.characterWindow:Toggle()
@@ -45,6 +84,22 @@ local function command(input)
         if app.Store:Set("ui", "auraFilter", wanted) then
             app:Print(wanted == "dispel" and app.L.auraFilterDispel or app.L.auraFilterAll)
             app:Reconcile()
+        end
+    elseif action == "takeover" and rest == "party" then
+        local wanted = app.Store:Profile().ui.partyTakeover == false
+        if app.Store:Set("ui", "partyTakeover", wanted) then
+            app:Print(wanted and app.L.partyTakeoverOn or app.L.partyTakeoverOff)
+            app:Reconcile()
+        else
+            app:Print(app.L.readonly)
+        end
+    elseif action == "takeover" and rest == "raid" then
+        local wanted = app.Store:Profile().ui.raidTakeover == false
+        if app.Store:Set("ui", "raidTakeover", wanted) then
+            app:Print(wanted and app.L.raidTakeoverOn or app.L.raidTakeoverOff)
+            app:Reconcile()
+        else
+            app:Print(app.L.readonly)
         end
     elseif action == "takeover" then
         -- Explicit native-unit-frame takeover. The value persists in the
@@ -83,6 +138,13 @@ local function command(input)
         local viewer = app.components.cooldownViewer
         if viewer and viewer.running then
             app:Call("command/slots", viewer.Refresh, viewer)
+        end
+    elseif action == "meter" and rest == "api" then
+        local meter = app.components.damageMeter
+        if meter and type(meter.Probe) == "function" then
+            meter:Probe()
+        else
+            app:Print(app.L.meterNoProvider)
         end
     elseif action == "meter" then
         -- The sample window only draws from a registered provider; without one

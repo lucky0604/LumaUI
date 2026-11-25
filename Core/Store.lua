@@ -19,11 +19,36 @@ Store.defaults = {
     -- An explicit profile keeps its saved value.
     modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = false, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
+        actionBarScales = { 1, 1, 1 },
         clickCast = {}, auraFilter = "all", takeoverUnitFrames = true,
         -- One clock by default. The bottom strip owns it; the minimap panel is
         -- the alternative, and the choice persists per profile. The full strip
         -- is the visual target; compact stays a deliberate opt-in.
-        clock = "strip", stripCompact = false },
+        clock = "strip", stripCompact = false,
+        -- 012 phase 04/05: LumaUI's own nameplate layer is a real renderer and
+        -- is opt-in until the live client confirms it draws over every plate.
+        -- The reversible native repaint above stays the default.
+        -- 012 phase 04: the own 116 x 8 plate layer is the shipped look. The
+        -- native plate stays the click/position/aura host; `plateCast` remains
+        -- opt-in because that row is still awaiting in-game validation.
+        plateOwned = true, plateCast = false,
+        -- 012 phase 08: own rune row and player cast bar. The client's runes and
+        -- cast bar keep drawing until the own path is explicitly enabled.
+        resourceRunes = "native", playerCastOwned = false,
+        -- 012 phase 10/11: own secure action bars. Off by default; the native
+        -- bars keep keys, paging and vehicle handling until the own path is
+        -- validated in game.
+        ownedBars = { enabled = false, bars = {} },
+        -- Layout-level native switches for the group frames. Party keeps its
+        -- current default; raid stays off until its own validation exists.
+        partyTakeover = true, raidTakeover = false,
+        -- 012 phase 16: saved size of the main chat window. Zero means "use the
+        -- client's own size"; Normalize only accepts the documented range.
+        chatWidth = 0, chatHeight = 0,
+        -- 012 phase 06: own cooldown groups. Enabled but empty means nothing is
+        -- drawn; a group only appears after an explicit import or `/luma cds
+        -- add`, so the default screen keeps the client's own viewers.
+        cooldownGroups = { owned = false, groups = {} } },
     positions = {},
 }
 
@@ -90,8 +115,27 @@ function Store:Normalize(input)
     -- the default, so a damaged value can never hide the time entirely.
     if ui.clock == "minimap" or ui.clock == "off" then result.ui.clock = ui.clock end
     if type(ui.stripCompact) == "boolean" then result.ui.stripCompact = ui.stripCompact end
+    if type(ui.plateOwned) == "boolean" then result.ui.plateOwned = ui.plateOwned end
+    if type(ui.plateCast) == "boolean" then result.ui.plateCast = ui.plateCast end
+    if ui.resourceRunes == "owned" then result.ui.resourceRunes = "owned" end
+    if type(ui.playerCastOwned) == "boolean" then result.ui.playerCastOwned = ui.playerCastOwned end
+    -- Cooldown-group shape lives in one model so the store and the renderer
+    -- cannot disagree about an icon size, a cap or a spell ID.
+    result.ui.cooldownGroups = app.CooldownModel:Normalize(ui.cooldownGroups)
+    result.ui.ownedBars = app.BarModel:Normalize(ui.ownedBars)
+    if type(ui.partyTakeover) == "boolean" then result.ui.partyTakeover = ui.partyTakeover end
+    if type(ui.raidTakeover) == "boolean" then result.ui.raidTakeover = ui.raidTakeover end
+    result.ui.chatWidth = finite(ui.chatWidth) and ui.chatWidth >= 240 and ui.chatWidth <= 600
+        and math.floor(ui.chatWidth) or 0
+    result.ui.chatHeight = finite(ui.chatHeight) and ui.chatHeight >= 100 and ui.chatHeight <= 400
+        and math.floor(ui.chatHeight) or 0
     -- Scale of LumaUI's own windows (the character window uses it today).
     result.ui.windowScale = bounded(ui.windowScale, 1, 0.8, 1.3)
+    if type(ui.actionBarScales) == "table" then
+        for index = 1, #result.ui.actionBarScales do
+            result.ui.actionBarScales[index] = bounded(ui.actionBarScales[index], 1, 0.5, 1.5)
+        end
+    end
     -- Click-casting bindings: "modifier-button" -> spell name. Only plain
     -- strings with a known shape are kept, so a damaged save cannot inject
     -- arbitrary secure attributes.
@@ -206,6 +250,19 @@ function Store:Open(character)
                 profile.modules.actionBars = true
             end
             migrations.actionBars = true
+        end
+        -- 012 second pass: the own nameplate layer became the shipped default.
+        -- Profiles created while the old default was off were already
+        -- normalized with an explicit `false`, so changing the default alone
+        -- never reaches them. Flip every profile once; an explicit choice made
+        -- after this migration is preserved because the flag never runs again.
+        migrations.plateOwnedDefault = type(saved.migrations) == "table"
+            and saved.migrations.plateOwnedDefault == true
+        if not migrations.plateOwnedDefault then
+            for _, profile in pairs(profiles) do
+                profile.ui.plateOwned = true
+            end
+            migrations.plateOwnedDefault = true
         end
         self.data = { schema = self.schema, profiles = profiles, characters = {}, migrations = migrations }
         if type(saved.characters) == "table" then

@@ -17,7 +17,19 @@ local _, app = ...
 local RAIL_HEIGHT = 6
 local SECONDARY_HEIGHT = 3
 local SECONDARY_GAP = 2
-local RAIL_GAP = 6
+-- 012 phase 08: death knight runes as six own segments. Per-rune recovery is
+-- what a continuous 0..6 rail cannot express, so each rune gets its own small
+-- StatusBar fed by GetRuneCooldown. The native rune row keeps drawing until the
+-- player explicitly chooses the own row (`/luma runes`).
+local RUNE_COUNT = 6
+local RUNE_WIDTH, RUNE_HEIGHT, RUNE_GAP = 11, 7, 2
+local RUNE_GAP_TOP = 2
+
+local function classToken()
+    if type(UnitClass) ~= "function" then return nil end
+    local ok, _, token = pcall(UnitClass, "player")
+    return ok and app.Capabilities.Plain(token, "string") or nil
+end
 
 -- Power types that read as a class resource rather than the primary bar. The
 -- client exposes them through `Enum.PowerType`; the numeric fallbacks are the
@@ -70,6 +82,7 @@ end
 -- Re-reads both decisions together: a native display wins, and only then is a
 -- readable secondary power type worth looking for.
 local function refreshKinds(self)
+    self.classToken = classToken()
     self.secondaryNative = nativeSecondary()
     -- Not `a and nil or b`: that idiom always yields b. The native display has
     -- to win outright.
@@ -78,6 +91,68 @@ local function refreshKinds(self)
     else
         self.secondaryType = secondaryType()
     end
+end
+
+-- Rune rows are only meaningful for a death knight and only when the own row
+-- was chosen. Every value is a plain number; a restricted rune keeps its last
+-- readable segment instead of resetting to zero.
+local function runesWanted(self)
+    return app.Store:Profile().ui.resourceRunes == "owned"
+        and (self.classToken or classToken()) == "DEATHKNIGHT"
+        and type(GetRuneCooldown) == "function"
+end
+
+local function stopRuneTicker(self)
+    if self.runeTicker then self.runeTicker:Cancel(); self.runeTicker = nil end
+end
+
+local function drawRunes(self)
+    local runes = self.runes
+    if not runes then return 0 end
+    if not runesWanted(self) then
+        if runes:IsShown() then runes:Hide() end
+        stopRuneTicker(self)
+        return 0
+    end
+    local now = type(GetTime) == "function" and select(2, pcall(GetTime)) or nil
+    now = plain(now, "number")
+    local recovering = false
+    for index = 1, RUNE_COUNT do
+        local bar = runes.bars[index]
+        local ok, start, duration, ready = pcall(GetRuneCooldown, index)
+        start, duration = ok and plain(start, "number") or nil, ok and plain(duration, "number") or nil
+        ready = ok and plain(ready, "boolean") or nil
+        if bar then
+            if ready == true then
+                bar:SetValue(1)
+                local accent = app.Theme:Accent()
+                bar:SetStatusBarColor(accent[1], accent[2], accent[3], 1)
+            elseif start and duration and duration > 0 and now then
+                local elapsed = math.max(0, math.min(duration, now - start))
+                bar:SetValue(elapsed / duration)
+                local dark = app.Theme.colors.muted
+                bar:SetStatusBarColor(dark[1], dark[2], dark[3], 1)
+                if elapsed < duration then recovering = true end
+            else
+                bar:SetValue(0)
+                local dark = app.Theme.colors.tapped
+                bar:SetStatusBarColor(dark[1], dark[2], dark[3], 1)
+            end
+        end
+    end
+    runes:Show()
+    if recovering and not self.runeTicker and type(C_Timer) == "table"
+        and type(C_Timer.NewTicker) == "function" then
+        self.runeTicker = C_Timer.NewTicker(0.2, function()
+            if not self.running or not runesWanted(self) then stopRuneTicker(self); return end
+            app:Call("playerResource/runes", drawRunes, self)
+            self.rail:SetHeight(self.railHeight or RAIL_HEIGHT)
+            app.Layout:SetResourceHeight(math.max(11, self.railHeight or RAIL_HEIGHT))
+        end)
+    elseif not recovering then
+        stopRuneTicker(self)
+    end
+    return RUNE_HEIGHT + RUNE_GAP_TOP
 end
 
 local function draw(self)
@@ -90,12 +165,20 @@ local function draw(self)
 
     -- A class with a native per-unit display (death knight runes) keeps it:
     -- the summary rail is not drawn rather than replacing per-rune recovery.
+    -- The own rune row, when chosen, replaces that summary instead.
     if self.secondaryNative then
         if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
-        self.rail:SetHeight(RAIL_HEIGHT)
+        local extra = drawRunes(self)
+        local height = extra > 0 and (RAIL_HEIGHT + RUNE_GAP_TOP + RUNE_HEIGHT) or RAIL_HEIGHT
+        self.railHeight = height
+        self.rail:SetHeight(height)
+        app.Layout:SetResourceHeight(math.max(11, height))
         return
     end
 
+    -- No rune row on this path: the summary rail is the whole display.
+    if self.runes and self.runes:IsShown() then self.runes:Hide() end
+    stopRuneTicker(self)
     local kind = self.secondaryType
     if kind then
         local secondMax = plain(UnitPowerMax("player", kind), "number")
@@ -105,17 +188,22 @@ local function draw(self)
             secondary:SetValue(UnitPower("player", kind))
             app.Theme:PaintBar(secondary, app.Theme:PowerColor("player"))
             secondary:Show()
-            self.rail:SetHeight(RAIL_HEIGHT + SECONDARY_GAP + SECONDARY_HEIGHT)
+            local height = RAIL_HEIGHT + SECONDARY_GAP + SECONDARY_HEIGHT
+            self.railHeight = height
+            self.rail:SetHeight(height)
+            app.Layout:SetResourceHeight(math.max(11, height))
             return
         end
     end
     if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
+    self.railHeight = RAIL_HEIGHT
     self.rail:SetHeight(RAIL_HEIGHT)
+    app.Layout:SetResourceHeight(11)
 end
 
--- Anchored above the whole central stack, centred, as wide as the main skill
--- block. Saved positions never apply: this is a HUD layer that follows the
--- measured geometry instead of a movable panel.
+-- The main skills own this edge. Tracked buff viewers sit above the reserved
+-- lane and can grow without pulling the rail or health frames up the screen.
+-- Without a main viewer, use the existing stack or action baseline.
 --
 -- The top comes from the applied row geometry (`Layout:Central()` merges the
 -- last `CentralRows` result), not from a bare bottom edge, so the rail sits
@@ -133,10 +221,14 @@ local function atTarget(rail, x, y)
     return px ~= nil and py ~= nil and math.abs(px - x) < 0.25 and math.abs(py - y) < 0.25
 end
 
+local function resourceBottom(central)
+    return (central.cooldown.mainTop or central.cooldown.top) + app.Layout.resourceGap
+end
+
 local function position(self)
     local central = app.Layout:Central()
     local rail = self.rail
-    local y = central.cooldown.top + RAIL_GAP
+    local y = resourceBottom(central)
     local width = math.max(60, central.content.width)
     if not atTarget(rail, 0, y) then
         rail:ClearAllPoints()
@@ -167,7 +259,29 @@ component = app:RegisterComponent({
             rail.secondary:SetPoint("TOPLEFT", 0, -(RAIL_HEIGHT + SECONDARY_GAP))
             rail.secondary:SetPoint("TOPRIGHT", 0, -(RAIL_HEIGHT + SECONDARY_GAP))
             rail.secondary:Hide()
+            -- Six own rune segments, hidden until the class and the option both
+            -- ask for them.
+            local runes = CreateFrame("Frame", "LumaUIPlayerRunes", rail)
+            runes:SetSize(RUNE_COUNT * RUNE_WIDTH + (RUNE_COUNT - 1) * RUNE_GAP, RUNE_HEIGHT)
+            runes:SetPoint("TOPLEFT", 0, -(RAIL_HEIGHT + RUNE_GAP_TOP))
+            runes.bars = {}
+            for index = 1, RUNE_COUNT do
+                local segment = CreateFrame("StatusBar", nil, runes)
+                segment:SetSize(RUNE_WIDTH, RUNE_HEIGHT)
+                segment:SetPoint("LEFT", runes, "LEFT", (index - 1) * (RUNE_WIDTH + RUNE_GAP), 0)
+                segment:SetStatusBarTexture(app.Theme.media.combatFill)
+                segment:SetMinMaxValues(0, 1)
+                segment:SetValue(0)
+                segment.background = segment:CreateTexture(nil, "BACKGROUND")
+                segment.background:SetAllPoints()
+                local dark = app.Theme.colors.embedded
+                segment.background:SetColorTexture(dark[1], dark[2], dark[3], 1)
+                runes.bars[index] = segment
+            end
+            runes:Hide()
+            rail.runes = runes
             self.rail, self.primary, self.secondary = rail, rail.primary, rail.secondary
+            self.runes = runes
         end
         self.rail:Show()
         refreshKinds(self)
@@ -190,6 +304,10 @@ component = app:RegisterComponent({
             draw(current)
             position(current)
         end)
+        self:Listen("RUNE_POWER_UPDATE", function(current) draw(current) end)
+        self:Listen("PLAYER_DEAD", function(current)
+            stopRuneTicker(current)
+        end)
         -- Only this component's own rail moves; the protected consumers keep
         -- their own queue keys, so a geometry change does not add a job here.
         app:Subscribe(self, "LAYOUT_CENTRAL_CHANGED", function()
@@ -202,9 +320,12 @@ component = app:RegisterComponent({
         position(self)
     end,
     Disable = function(self)
+        stopRuneTicker(self)
+        if self.runes then self.runes:Hide() end
         if self.rail then self.rail:Hide() end
         if self.primary then self.primary:SetValue(0) end
         if self.secondary then self.secondary:Hide() end
+        app.Layout:SetResourceHeight(11)
     end,
 })
 
@@ -231,5 +352,5 @@ function component:Diagnose()
     end
     app:Print(string.format("playerResource: status=%s running=%s secondary=%s native=%s width=%s bottom=%s expected=%.0f",
         tostring(self.status), yes(self.running), self.secondaryType and "yes" or "no",
-        self.secondaryNative or "-", width, bottom, app.Layout:Central().cooldown.top + RAIL_GAP))
+        self.secondaryNative or "-", width, bottom, resourceBottom(app.Layout:Central())))
 end

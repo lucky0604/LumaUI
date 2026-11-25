@@ -473,6 +473,14 @@ end
 -- because a docked chat frame is protected.
 local TRIAL_WIDTH, TRIAL_HEIGHT = 320, 140
 
+local function mainEntry(self)
+    local entry = self.windows and self.windows[1]
+    if entry and entry.frame then return entry end
+    for _, candidate in pairs(self.windows or {}) do
+        if candidate.frame then return candidate end
+    end
+end
+
 local function setTrialSize(self, wanted)
     if self.running ~= true then return false end
     if type(InCombatLockdown) == "function" and InCombatLockdown() then
@@ -505,17 +513,61 @@ local function setTrialSize(self, wanted)
     return true
 end
 
+local function applyPersisted(self)
+    if self.trialSize then return end
+    local entry = mainEntry(self)
+    if not entry or not entry.frame then return end
+    local frame = entry.frame
+    if type(frame.GetSize) ~= "function" or type(frame.SetSize) ~= "function" then return end
+    local profile = app.Store:Profile()
+    local width = app.Capabilities.Plain(profile.ui.chatWidth, "number")
+    local height = app.Capabilities.Plain(profile.ui.chatHeight, "number")
+    if width and height and width >= 240 and height >= 100 then
+        if not self.persistentOriginal then
+            local ok, currentWidth, currentHeight = pcall(frame.GetSize, frame)
+            currentWidth = ok and app.Capabilities.Plain(currentWidth, "number") or nil
+            currentHeight = ok and app.Capabilities.Plain(currentHeight, "number") or nil
+            if not currentWidth or not currentHeight then return end
+            self.persistentOriginal = { currentWidth, currentHeight }
+        end
+        pcall(frame.SetSize, frame, width, height)
+        refreshEntry(entry)
+    elseif self.persistentOriginal then
+        pcall(frame.SetSize, frame, self.persistentOriginal[1], self.persistentOriginal[2])
+        self.persistentOriginal = nil
+        refreshEntry(entry)
+    end
+end
+
 module = app:RegisterComponent({ id = "chat", label = "chat",
     Enable = function(self)
         attach(self)
-        self:Listen("UPDATE_CHAT_WINDOWS", attach)
+        applyPersisted(self)
+        self:Listen("UPDATE_CHAT_WINDOWS", function(current)
+            attach(current)
+            applyPersisted(current)
+        end)
         self:Listen("UPDATE_FLOATING_CHAT_WINDOWS", attach)
-        self:Listen("PLAYER_ENTERING_WORLD", attach)
+        self:Listen("PLAYER_ENTERING_WORLD", function(current)
+            attach(current)
+            applyPersisted(current)
+        end)
     end,
-    Refresh = attach,
+    Refresh = function(self)
+        attach(self)
+        applyPersisted(self)
+    end,
     Disable = function(self)
-        -- The trial size is this component's write, so stopping it takes the
+        -- Both sizes are this component's writes, so stopping it takes the
         -- frame back to the client's own size before the plates come off.
+        if self.persistentOriginal then
+            local entry = mainEntry(self)
+            if entry and entry.frame and type(entry.frame.SetSize) == "function" then
+                pcall(entry.frame.SetSize, entry.frame,
+                    self.persistentOriginal[1], self.persistentOriginal[2])
+            end
+            self.persistentOriginal = nil
+        end
         for frame, size in pairs(self.trialSizes or {}) do
             if frame and type(frame.SetSize) == "function" then
                 pcall(frame.SetSize, frame, size[1], size[2])
@@ -528,6 +580,49 @@ module = app:RegisterComponent({ id = "chat", label = "chat",
 
 function module:SetTrialSize(wanted)
     return setTrialSize(self, wanted)
+end
+
+-- 012 phase 16: a saved size for the main docked window. The trial above stays
+-- the explicit in-memory experiment; this one persists per profile and is only
+-- applied to the first (main) chat window, never to floating windows. The
+-- client's original size is recorded once and restored when the saved size is
+-- cleared or the component stops.
+-- restores the recorded original. Bounds keep a damaged save from hiding the
+-- window or covering the action area.
+function module:SetSize(width, height)
+    if self.running ~= true then return false end
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then
+        app:Print(app.L.layoutCombat)
+        return false
+    end
+    if width == nil or height == nil then
+        -- Zero is the documented "no saved size" value; Normalize keeps the
+        -- key so Store:Set can write it, and applyPersisted ignores it.
+        app.Store:Set("ui", "chatWidth", 0)
+        app.Store:Set("ui", "chatHeight", 0)
+        applyPersisted(self)
+        app:Print(app.L.chatSizeSavedReset)
+        return true
+    end
+    width = app.Capabilities.Plain(width, "number")
+    height = app.Capabilities.Plain(height, "number")
+    if not width or not height then return false end
+    width = math.max(240, math.min(600, math.floor(width + 0.5)))
+    height = math.max(100, math.min(400, math.floor(height + 0.5)))
+    if not app.Store:Set("ui", "chatWidth", width) then
+        app:Print(app.L.readonly)
+        return false
+    end
+    if not app.Store:Set("ui", "chatHeight", height) then return false end
+    applyPersisted(self)
+    app:Print(string.format(app.L.chatSizeSaved, width, height))
+    return true
+end
+
+-- Applied on enable/refresh and after a profile switch; nothing here writes in
+-- combat (the attach path is queued by the runtime).
+function module:ApplyPersistedSize()
+    applyPersisted(self)
 end
 
 -- Which of the four states one chat window is in. Exposed so a diagnostic (and a

@@ -91,11 +91,27 @@ local function writeHealthPercent(control, unit)
     if not written then control:SetText("") end
 end
 
+-- One right-anchored overlay strip. `amount` and `maximum` are plain numbers;
+-- a restricted value returns false and the caller hides the layer.
+local function overlay(frame, bar, amount, maximum)
+    if not bar or type(bar.SetReverseFill) ~= "function" then return false end
+    if not amount or not maximum or maximum <= 0 or amount <= 0 then
+        if bar:IsShown() then bar:Hide() end
+        return false
+    end
+    if amount > maximum then amount = maximum end
+    bar:SetMinMaxValues(0, maximum)
+    bar:SetValue(amount)
+    bar:Show()
+    return true
+end
+
 local bars = {
     id = "bars",
     available = barsAvailable,
     events = { "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_NAME_UPDATE",
-        "UNIT_DISPLAYPOWER", "UNIT_FLAGS", "UNIT_CONNECTION" },
+        "UNIT_DISPLAYPOWER", "UNIT_FLAGS", "UNIT_CONNECTION",
+        "UNIT_ABSORB_UPDATE", "UNIT_HEAL_PREDICTION" },
     create = function(frame)
         local U = frame.metrics or app.Theme.units
         frame.name = app.Type:Text(frame, "body")
@@ -147,6 +163,30 @@ local bars = {
         -- The Pearl frames show health percent only; the power number stays
         -- available for diagnostics but does not add a second line of ink.
         frame.powerValue:Hide()
+        -- 012 phase 12: absorb and heal prediction are separate layers over the
+        -- health track. Both fill from the right, so they never cover the part
+        -- of the bar the player is actually losing. They are only drawn from
+        -- plain numbers; a restricted payload hides them and the native amount
+        -- stays the only source.
+        frame.absorb = CreateFrame("StatusBar", nil, frame.health)
+        frame.absorb:SetAllPoints(frame.health)
+        frame.absorb:SetStatusBarTexture(app.Theme.white)
+        frame.absorb:SetStatusBarColor(0.88, 0.94, 1, 0.38)
+        if type(frame.absorb.SetReverseFill) == "function" then
+            pcall(frame.absorb.SetReverseFill, frame.absorb, true)
+        end
+        frame.absorb:Hide()
+        frame.prediction = CreateFrame("StatusBar", nil, frame.health)
+        frame.prediction:SetHeight(2)
+        frame.prediction:SetPoint("TOPLEFT", frame.health, "TOPLEFT", 0, 0)
+        frame.prediction:SetPoint("TOPRIGHT", frame.health, "TOPRIGHT", 0, 0)
+        frame.prediction:SetStatusBarTexture(app.Theme.white)
+        local friendly = app.Theme.colors.friendly
+        frame.prediction:SetStatusBarColor(friendly[1], friendly[2], friendly[3], 0.85)
+        if type(frame.prediction.SetReverseFill) == "function" then
+            pcall(frame.prediction.SetReverseFill, frame.prediction, true)
+        end
+        frame.prediction:Hide()
     end,
     draw = function(frame)
         local unit = frame.unitToken
@@ -189,6 +229,22 @@ local bars = {
         else
             frame.statusText:SetText("")
         end
+        -- Absorb and incoming heals: each amount is checked on its own, so a
+        -- build that exposes one but restricts the other still draws the
+        -- readable half instead of dropping both.
+        local maximum = app.Capabilities.Plain(UnitHealthMax(unit), "number")
+        local absorb
+        if type(UnitGetTotalAbsorbs) == "function" then
+            local ok, value = pcall(UnitGetTotalAbsorbs, unit)
+            absorb = ok and app.Capabilities.Plain(value, "number") or nil
+        end
+        overlay(frame, frame.absorb, absorb, maximum)
+        local healing
+        if type(UnitGetIncomingHeals) == "function" then
+            local ok, value = pcall(UnitGetIncomingHeals, unit)
+            healing = ok and app.Capabilities.Plain(value, "number") or nil
+        end
+        overlay(frame, frame.prediction, healing, maximum)
     end,
 }
 

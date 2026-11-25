@@ -398,7 +398,12 @@ local function syncNative(self)
         local button = self.frames and self.frames[index]
         if button and memberCovered(button) and unitExists(button.unitToken) then taken = true; break end
     end
-    if taken then taken = NATIVE_PARITY_VALIDATED and privateCovered(self) end
+    -- Raid has its own switch; validating the party layout must never enable
+    -- the raid takeover (012 phase 13).
+    if taken then
+        taken = NATIVE_PARITY_VALIDATED and privateCovered(self)
+            and app.Store:Profile().ui.raidTakeover == true
+    end
     for _, name in ipairs(NATIVE_TAKEOVER) do
         if taken then hideNative(name) else restoreNative(name) end
     end

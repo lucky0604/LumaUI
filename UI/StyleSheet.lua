@@ -6,7 +6,7 @@ app.StyleSheet = StyleSheet
 -- side by side. It is the in-client proof of the Pearl tokens: the palette,
 -- corners and type scale are adjusted here once, then every component reads the
 -- same role instead of comparing itself to an external screenshot.
-local WIDTH, HEIGHT, PAD = 660, 580, 18
+local WIDTH, HEIGHT, PAD = 660, 700, 18
 local COLUMNS = 3
 
 local TILES = {
@@ -65,6 +65,7 @@ function StyleSheet:Create()
     y = self:PaintSurfaces(frame, y)
     y = self:PaintType(frame, y)
     y = self:PaintBars(frame, y)
+    y = self:PaintPearl(frame, y)
     y = self:PaintControls(frame, y)
     self:PaintCorners(frame, y)
     self:Paint()
@@ -141,6 +142,57 @@ function StyleSheet:PaintBars(frame, y)
         end)
     end
     return y - (#BAR_EXAMPLES * 16) - 12
+end
+
+-- The Pearl parts row uses the real renderers the HUD modules use, not a
+-- hand-drawn mock: a nameplate view with its health track, name, percentage,
+-- target chip and cast row, plus four icon cells in the states a cooldown group
+-- can be in. Seeing them here proves the shared widgets, not just the palette.
+function StyleSheet:PaintPearl(frame, y)
+    y = self:Heading(frame, y, app.L.stylePearl)
+    local holder = CreateFrame("Frame", nil, frame)
+    holder:SetSize(150, 48)
+    holder:SetPoint("TOPLEFT", PAD, y - 4)
+    self.plateHolder = holder
+    local view = app.PlateView:Create(holder)
+    if view then
+        self.plateView = view
+        app.PlateView:SetName(view, app.L.styleMixed)
+        app.PlateView:SetHealth(view, 62, 100)
+        app.PlateView:SetTarget(view, true)
+        app.PlateView:SetCast(view, { name = app.L.styleMixed, elapsed = 0.4, duration = 1.5,
+            channel = false, interruptible = true })
+        view.frame:Show()
+    end
+    self.pearlCells = self.pearlCells or {}
+    local icons = { "Interface\\Icons\\INV_Misc_Gem_Pearl_02", "Interface\\Icons\\Spell_Fire_FireBolt",
+        "Interface\\Icons\\Spell_Nature_Lightning", nil }
+    local states = { "ready", "proc", "selected", "empty" }
+    for index = 1, 4 do
+        local cell = self.pearlCells[index]
+        if not cell then
+            cell = app.PearlCell:Create(frame, 26)
+            cell:SetPoint("TOPLEFT", PAD + 166 + (index - 1) * 34, y - 8)
+            self.pearlCells[index] = cell
+        end
+        if states[index] == "empty" then
+            app.PearlCell:Clear(cell)
+        else
+            app.PearlCell:Apply(cell, {
+                icon = icons[index], count = index == 2 and 3 or nil,
+                remaining = index == 2 and 34 or nil, state = states[index],
+            })
+        end
+        local label = self.pearlLabels and self.pearlLabels[index]
+        if not label then
+            label = app.Type:Text(frame, "micro")
+            label:SetPoint("TOP", cell, "BOTTOM", 0, -3)
+            self.pearlLabels = self.pearlLabels or {}
+            self.pearlLabels[index] = label
+        end
+        label:SetText(states[index])
+    end
+    return y - 58
 end
 
 function StyleSheet:PaintControls(frame, y)

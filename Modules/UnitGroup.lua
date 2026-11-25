@@ -316,8 +316,19 @@ local function syncPrivate(self)
     end
 end
 
+-- The layout switch is separate from the code's parity constant: a player can
+-- keep the own party rows while the client's frames stay on screen (012 phase
+-- 13). The default keeps the existing behaviour.
+local function takeoverWanted()
+    return app.Store:Profile().ui.partyTakeover ~= false
+end
+
 local function syncNative(self)
-    if NATIVE_PARITY_VALIDATED and anyPartyMember() and privateCovered(self) then hideNative(self) else restoreNative(self) end
+    if NATIVE_PARITY_VALIDATED and takeoverWanted() and anyPartyMember() and privateCovered(self) then
+        hideNative(self)
+    else
+        restoreNative(self)
+    end
 end
 
 local function drawAll(self)

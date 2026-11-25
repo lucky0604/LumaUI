@@ -10,6 +10,9 @@
 Core\Bootstrap.lua
 Locales\Strings.lua
 Core\Capabilities.lua
+Core\Ownership.lua
+Core\CooldownModel.lua
+Core\BarModel.lua
 Core\Store.lua
 Core\Runtime.lua
 UI\Pixel.lua
@@ -21,6 +24,8 @@ UI\Transitions.lua
 UI\EdgePulse.lua
 UI\CentralGrid.lua
 UI\CooldownSkin.lua
+UI\PlateView.lua
+UI\PearlCell.lua
 UI\Layout.lua
 UI\Controls.lua
 UI\Items.lua
@@ -55,13 +60,17 @@ Modules\RaidFrames.lua
 Modules\CombatText.lua
 # ==== TRACK-P3: MISC — insert new files above this line ====
 Modules\Nameplates.lua
+Modules\UtilityCorner.lua
 Modules\DamageMeterArea.lua
 Modules\DamageMeterWindow.lua
 Modules\ActionPanel.lua
 Modules\ActionButtons.lua
 Modules\ActionBars.lua
+Modules\OwnedActionBars.lua
 Modules\PlayerResource.lua
+Modules\PlayerCast.lua
 # ==== TRACK-P3: PLAYER RESOURCE — insert new files above this line ====
+Modules\CooldownGroups.lua
 Modules\CooldownViewer.lua
 Modules\ClickCast.lua
 Core\Startup.lua
