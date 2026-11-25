@@ -24,6 +24,7 @@ function Frame:SetWidth(w) restricted(self); self.width = w end
 function Frame:SetHeight(h) restricted(self); self.height = h end
 function Frame:GetWidth() return self.width or 100 end
 function Frame:GetHeight() return self.height or 30 end
+function Frame:GetSize() return self.width or 100, self.height or 30 end
 -- Minimal Cooldown API: the sweep records what it was given so a test can assert
 -- the values reached the client's own drawing call.
 function Frame:SetCooldown(start, duration)
@@ -928,6 +929,14 @@ function H.Load(saved)
     function Frame:GetStatusBarTexture()
         if not self.statusFill then self.statusFill = H.NewFrame(nil, self) end
         return self.statusFill
+    end
+    -- The client writes the path onto the fill texture object; recording it on
+    -- the created fill keeps `SetStatusBarTexture` observable (the texture role
+    -- tests read it) without changing the no-op default for other frames.
+    function Frame:SetStatusBarTexture(texture)
+        self.statusTexture = texture
+        local fill = self:GetStatusBarTexture()
+        fill.texture = texture
     end
     function Frame:SetGradient(orientation, lo, hi)
         self.gradient = { orientation = orientation, lo = { lo.r, lo.g, lo.b }, hi = { hi.r, hi.g, hi.b } }

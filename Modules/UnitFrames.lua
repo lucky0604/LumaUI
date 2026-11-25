@@ -345,7 +345,14 @@ local function updateDefaults(self)
     if not self.frames then return end
     local central = app.Layout:Central()
     local screenHeight = central.screen.height
+    -- The main bars align their health top with the applied main skill row
+    -- (essential/utility), so the columns read as one block; the mockup
+    -- fraction is the fallback until a viewer row is measured.
     local healthTop = screenHeight * (0.5 - TOP_FRACTION)
+    local mainTop = central.cooldown.mainTop
+    if central.cooldown.applied and mainTop and mainTop > central.cooldown.bottom then
+        healthTop = mainTop - screenHeight / 2
+    end
     local rows = {}
     for _, spec in ipairs(specs) do
         local frame = self.frames[spec.unit]
@@ -479,14 +486,16 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
 
 -- One diagnostic line for the components page inside `/luma status`: it says
 -- which native frames the preview took over and which ones it kept because a
--- part is missing.
+-- part is missing. The player's own cast bar is never taken over — the preview
+-- only reserves an edit-mode outline — so it is reported separately instead of
+-- riding on the target-cast part's flag (010 plan P0).
 function component:Describe()
     if not self.running then return nil end
     local takeover = self.takeover or { units = false, cast = false, missing = {} }
     local units = takeover.units and app.L.nativeTaken or app.L.nativeKept
     local cast = takeover.cast and app.L.nativeTaken or app.L.nativeKept
-    local text = string.format("unitFrames: %s=%s, %s=%s",
-        app.L.nativeUnits, units, app.L.nativeCast, cast)
+    local text = string.format("unitFrames: %s=%s, %s=%s · %s",
+        app.L.nativeUnits, units, app.L.nativeTargetCast, cast, app.L.playerCastNative)
     local missing = takeover.missing or {}
     if #missing > 0 then
         text = text .. ", " .. app.L.nativeMissing .. ": " .. table.concat(missing, ",")
@@ -502,6 +511,32 @@ local function frameCentre(frame)
     local ok, x, y = pcall(frame.GetCenter, frame)
     if not ok then return nil, nil end
     return app.Capabilities.Plain(x, "number"), app.Capabilities.Plain(y, "number")
+end
+
+-- A rectangle in the report's own units, or "unknown" when the client does not
+-- report one. Reads only.
+local function diagnosticRect(frame)
+    if type(frame.GetRect) ~= "function" then return "unknown" end
+    local ok, left, bottom, width, height = pcall(frame.GetRect, frame)
+    left = ok and app.Capabilities.Plain(left, "number") or nil
+    bottom = ok and app.Capabilities.Plain(bottom, "number") or nil
+    width = ok and app.Capabilities.Plain(width, "number") or nil
+    height = ok and app.Capabilities.Plain(height, "number") or nil
+    if not left or not bottom or not width or not height then return "unknown" end
+    return string.format("%.0fx%.0f@%.0f,%.0f", width, height, left, bottom)
+end
+
+local function frameVisible(frame)
+    if not frame or type(frame.IsVisible) ~= "function" then return "?" end
+    local ok, visible = pcall(frame.IsVisible, frame)
+    visible = ok and app.Capabilities.Plain(visible, "boolean") or nil
+    if visible == nil then return "?" end
+    if visible == false then return "no" end
+    -- Alpha zero draws nothing even when IsVisible reports true.
+    local alpha = type(frame.GetAlpha) == "function"
+        and app.Capabilities.Plain(select(2, pcall(frame.GetAlpha, frame)), "number") or nil
+    if alpha ~= nil and alpha <= 0.01 then return "no" end
+    return "yes"
 end
 
 function component:Diagnose()
@@ -520,14 +555,26 @@ function component:Diagnose()
         end
         app:Print("  rows: " .. table.concat(parts, " "))
     end
+    -- The player cast bar's owner, visibility and rectangle are independent of
+    -- the takeover intent: the bar is the client's, and the flag below only says
+    -- the preview could take the other frames over.
+    local castBar = _G.PlayerCastingBarFrame
+    local castShown = "?"
+    if castBar and type(castBar.IsShown) == "function" then
+        local ok, shown = pcall(castBar.IsShown, castBar)
+        castShown = ok and shown == true and "yes" or "no"
+    end
+    app:Print(string.format("  cast: owner=native shown=%s vis=%s rect=%s takeover=%s",
+        castShown, frameVisible(castBar), diagnosticRect(castBar),
+        (self.takeover and self.takeover.cast) and "possible" or "off"))
     local positions = app.Store:Profile().positions
     for _, spec in ipairs(specs) do
         local frame = self.frames and self.frames[spec.unit]
         if frame then
             local x, y = frameCentre(frame)
             local ok, shown = pcall(frame.IsShown, frame)
-            app:Print(string.format("  %s: shown=%s size=%.0fx%.0f center=%s,%s saved=%s",
-                spec.unit, ok and shown == true and "yes" or "no",
+            app:Print(string.format("  %s: shown=%s vis=%s size=%.0fx%.0f center=%s,%s saved=%s",
+                spec.unit, ok and shown == true and "yes" or "no", frameVisible(frame),
                 frame:GetWidth(), frame:GetHeight(),
                 x and string.format("%.1f", x) or "?",
                 y and string.format("%.1f", y) or "?",

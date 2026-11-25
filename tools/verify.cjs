@@ -18,6 +18,35 @@ for (const entry of files) {
 }
 let parser;
 try { parser = require(process.env.LUMA_LUAPARSE || 'luaparse'); } catch { /* Optional external syntax parser. */ }
+// Release textures, checked at the byte level: every one is an uncompressed
+// 32-bit TGA of the size the Lua theme names, produced by tools/make-media.py
+// from neutral values. A texture that silently becomes 24-bit or 8-bit alpha
+// loses the soft edges the nine-slice surfaces rely on, and a size mismatch
+// stretches every card in the UI.
+const MEDIA = [
+  ['Media/panel.tga', 128, 128], ['Media/bar.tga', 64, 64], ['Media/rule.tga', 128, 8],
+  ['Media/glow.tga', 64, 64], ['Media/inset.tga', 64, 64], ['Media/plate.tga', 32, 32],
+  ['Media/shadow.tga', 96, 96],
+  ['Media/combat-fill.tga', 64, 16], ['Media/hud-scrim.tga', 128, 32],
+];
+for (const [rel, width, height] of MEDIA) {
+  const file = path.join(root, rel);
+  check(fs.existsSync(file), `Missing media: ${rel}`);
+  if (!fs.existsSync(file)) continue;
+  const b = fs.readFileSync(file);
+  check(b.length >= 18, `${rel}: TGA header missing`);
+  if (b.length < 18) continue;
+  const imageWidth = b.readUInt16LE(12), imageHeight = b.readUInt16LE(14);
+  check(b[2] === 2, `${rel}: must be an uncompressed true-colour TGA`);
+  check(imageWidth === width && imageHeight === height,
+    `${rel}: expected ${width}x${height}, got ${imageWidth}x${imageHeight}`);
+  check(b[16] === 32, `${rel}: must be 32-bit`);
+  check((b[17] & 0x0f) === 8, `${rel}: must carry an 8-bit alpha channel`);
+  // Pillow writes the 26-byte TGA 2.0 footer after the pixel data.
+  const payload = 18 + b[0] + imageWidth * imageHeight * 4;
+  check(b.length === payload || b.length === payload + 26,
+    `${rel}: size does not match an uncompressed 32-bit image`);
+}
 const forbiddenIndex = process.argv.indexOf('--forbid-name');
 const forbidden = forbiddenIndex >= 0 ? process.argv[forbiddenIndex + 1]?.toLowerCase() : null;
 let luaCount = 0;

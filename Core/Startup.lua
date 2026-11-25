@@ -26,6 +26,18 @@ local function command(input)
     elseif action == "dump" then app:WriteDiagnostics()
     elseif action == "hud" then app.Layout:Diagnose()
     elseif action == "bars" and app.components.actionPanel then app.components.actionPanel:Diagnose()
+    elseif action == "chat" then
+        -- Explicit, reversible chat-size trial (010 phase 08). The client's own
+        -- chat settings own the real size; this only asks once and can put the
+        -- previous size back.
+        local chat = app.components.chat
+        if not chat or chat.running ~= true then
+            app:Print(app.L.chatTrialNeedsComponent)
+            return
+        end
+        if chat:SetTrialSize(chat.trialSize ~= true) then
+            app:Print(chat.trialSize and app.L.chatSizeOn or app.L.chatSizeOff)
+        end
     elseif action == "char" then app.components.characterWindow:Toggle()
     elseif action == "aura" then
         local current = app.Store:Profile().ui.auraFilter

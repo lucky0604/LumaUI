@@ -100,94 +100,19 @@ local function buttonsOf(def)
     return bar, list
 end
 
-local function styleFont(self, control)
-    if not object(control) or self.styled[control] then return end
-    local okFont, font, size, flags = pcall(control.GetFont, control)
-    local okColor, r, g, b, a = pcall(control.GetTextColor, control)
-    self.styled[control] = {
-        font = okFont and font or nil,
-        size = okFont and size or nil,
-        flags = okFont and flags or nil,
-        color = okColor and { r, g, b, a } or nil,
-    }
-    pcall(control.SetFont, control, app.Type:Face(), 13, "OUTLINE")
-    local text = app.Theme.colors.text
-    pcall(control.SetTextColor, control, text[1], text[2], text[3], 1)
-end
-
--- Native countdown strings are anchored by the action-button template; on the
--- Pearl buttons the remaining time belongs in the middle of the icon, so move
--- this one font string and remember its original points for disable.
-local function centerCountdown(self, control, parent)
-    if not object(control) or type(control.GetPoint) ~= "function" then return end
-    styleFont(self, control)
-    local entry = self.styled[control]
-    if not entry then return end
-    if not entry.pointsRecorded then
-        entry.pointsRecorded = true
-        entry.points = {}
-        for index = 1, 4 do
-            local ok, point, relative, relativePoint, x, y = pcall(control.GetPoint, control, index)
-            if not ok or not point then break end
-            entry.points[#entry.points + 1] = { point, relative, relativePoint, x, y }
-        end
-    end
-    pcall(control.ClearAllPoints, control)
-    pcall(control.SetPoint, control, "CENTER", parent, "CENTER", 0, 0)
-    pcall(control.SetJustifyH, control, "CENTER")
-    pcall(control.SetJustifyV, control, "MIDDLE")
-    if type(control.SetDrawLayer) == "function" then
-        pcall(control.SetDrawLayer, control, "OVERLAY")
-    end
-end
-
-local function styleCooldown(self, button)
-    for _, key in ipairs({ "cooldown", "chargeCooldown" }) do
-        local cooldown = button[key]
-        if object(cooldown) then
-            if type(cooldown.SetHideCountdownNumbers) == "function" then
-                pcall(cooldown.SetHideCountdownNumbers, cooldown, false)
-            end
-            if type(cooldown.SetSwipeColor) == "function" then
-                if self.swipes[cooldown] == nil then
-                    local ok, r, g, b, a = pcall(cooldown.GetSwipeColor, cooldown)
-                    self.swipes[cooldown] = ok and { r, g, b, a } or false
-                end
-                pcall(cooldown.SetSwipeColor, cooldown, 0.03, 0.04, 0.06, 0.82)
-            end
-            local control
-            if type(cooldown.GetCountdownFontString) == "function" then
-                local ok, value = pcall(cooldown.GetCountdownFontString, cooldown)
-                if ok then control = value end
-            end
-            if not object(control) and type(cooldown.GetRegions) == "function" then
-                local ok, regions = pcall(function() return { cooldown:GetRegions() } end)
-                if ok and type(regions) == "table" then
-                    for _, region in ipairs(regions) do
-                        if object(region) and type(region.GetObjectType) == "function" then
-                            local isFont, kind = pcall(region.GetObjectType, region)
-                            if isFont and kind == "FontString" then
-                                control = region
-                                break
-                            end
-                        end
-                    end
-                end
-            end
-            if object(control) then
-                -- Both the cooldown and the charge-recharge timer use the same
-                -- centred placement, so a stack never leaves one number at the
-                -- corner while the other sits in the middle of the icon.
-                centerCountdown(self, control, button)
-            end
-        end
-    end
-end
-
 local function sampleRunning()
     local sample = app.components and app.components.actionButtons
     return sample ~= nil and sample.running == true
 end
+
+-- Native action-button cooldown objects are never written. In 12.x the button's
+-- cooldown update passes secret start/duration values to `Cooldown:SetCooldown`
+-- and those are only accepted during untainted execution; writing anything on
+-- the cooldown frame (swipe colour, hidden numbers, the countdown FontString)
+-- taints the object and turns every later cooldown tick into
+-- `... Secret values are only allowed during untainted execution ...`
+-- (010 field report: MultiBarBottomRightButton3Cooldown, 2743 repeats).
+-- The Pearl countdown look therefore stays at the client's own draw path.
 
 -- Releases only the entries this component still owns. A button whose skin was
 -- replaced or already released elsewhere is forgotten instead of rewritten,
@@ -261,7 +186,7 @@ local function layout(self)
 
     local previous
     for _, def in ipairs(BARS) do
-        local bar, buttons = buttonsOf(def)
+        local bar = buttonsOf(def)
         if bar then
             pcall(bar.ClearAllPoints, bar)
             if not previous then
@@ -271,20 +196,12 @@ local function layout(self)
             end
             pcall(bar.SetAlpha, bar, self.alpha or 0)
             previous = bar
-            for _, button in ipairs(buttons) do styleCooldown(self, button) end
         end
     end
     skinButtons(self)
     self.pending = nil
     publishAlpha(self)
     return true
-end
-
-local function styleBars(self)
-    for _, def in ipairs(BARS) do
-        local _, buttons = buttonsOf(def)
-        for _, button in ipairs(buttons) do styleCooldown(self, button) end
-    end
 end
 
 local function apply(self)
@@ -406,29 +323,7 @@ local function restoreAll(self)
         local bar = named(name)
         if bar then restoreBar(bar) end
     end
-    for control, original in pairs(self.styled or {}) do
-        if original.font and object(control) then
-            pcall(control.SetFont, control, original.font, original.size, original.flags)
-        end
-        if original.color and object(control) then
-            pcall(control.SetTextColor, control, original.color[1], original.color[2],
-                original.color[3], original.color[4])
-        end
-        if original.pointsRecorded and object(control) then
-            pcall(control.ClearAllPoints, control)
-            for _, point in ipairs(original.points) do
-                pcall(control.SetPoint, control, point[1], point[2], point[3], point[4], point[5])
-            end
-        end
-    end
-    for cooldown, original in pairs(self.swipes or {}) do
-        if original and object(cooldown) then
-            pcall(cooldown.SetSwipeColor, cooldown, original[1], original[2], original[3], original[4])
-        end
-    end
     self.bars = {}
-    self.styled = {}
-    self.swipes = {}
 end
 
 app:RegisterComponent({
@@ -436,8 +331,6 @@ app:RegisterComponent({
     Supported = function() return named("MainActionBar") ~= nil end,
     Enable = function(self)
         self.bars = self.bars or {}
-        self.styled = self.styled or {}
-        self.swipes = self.swipes or {}
         self.skins = self.skins or {}
         self.sampleOwned = false
         self.alpha = 0
@@ -454,12 +347,14 @@ app:RegisterComponent({
         self:Listen("EDIT_MODE_LAYOUTS_UPDATED", function() apply(self) end)
         self:Listen("PLAYER_ENTERING_WORLD", function() apply(self) end)
         self:Listen("PLAYER_REGEN_ENABLED", function()
-            if self.pending then apply(self) else styleBars(self) end
+            if self.pending then apply(self) end
         end)
-        -- Cooldown widgets can be created lazily by the client; restyle the
-        -- first time they appear, but only outside combat.
+        -- Cooldown widgets can be created lazily by the client; re-skin the
+        -- static button art the first time they appear, but only outside
+        -- combat. The native cooldown object itself is never written (see the
+        -- secret-value note above), so this only touches icon/font art.
         self:Listen("ACTIONBAR_UPDATE_COOLDOWN", function()
-            if not inCombat() then styleBars(self) end
+            if not inCombat() then skinButtons(self) end
         end)
         -- The sample may be toggled while this component keeps running; hand
         -- the buttons over or take them back exactly once per change.

@@ -20,6 +20,7 @@ UI\ActionButtonSkin.lua
 UI\Transitions.lua
 UI\EdgePulse.lua
 UI\CentralGrid.lua
+UI\CooldownSkin.lua
 UI\Layout.lua
 UI\Controls.lua
 UI\Items.lua

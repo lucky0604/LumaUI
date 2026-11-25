@@ -14,7 +14,10 @@ Store.defaults = {
         -- anchor can leave the two layouts fighting. The stable path moves the
         -- viewer frame; the slot grid is an explicit opt-in.
         perIconSlots = false },
-    modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = true, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
+    -- `topPerformance` is off by default: the bottom strip already owns the FPS
+    -- and latency reading, and one readout is the Pearl default (010 phase 08).
+    -- An explicit profile keeps its saved value.
+    modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = false, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
         clickCast = {}, auraFilter = "all", takeoverUnitFrames = true,
         -- One clock by default. The bottom strip owns it; the minimap panel is

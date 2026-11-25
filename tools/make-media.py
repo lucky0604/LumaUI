@@ -165,6 +165,44 @@ def inset(size=64):
     return image
 
 
+def combat_fill(width=64, height=16):
+    """Matte bar fill: one fixed colour with an 8% vertical drop.
+
+    The horizontal ramp of the legacy bar texture is what makes a short combat
+    bar look washed out at one end; this fill keeps the colour flat along the
+    length and carries the light direction in the vertical 8% only. The theme
+    tints it with the bar's own colour, so the file itself stays neutral.
+    """
+    image = Image.new("RGBA", (width, height))
+    pixels = image.load()
+    for y in range(height):
+        value = round(255 * (1.0 - 0.08 * y / (height - 1)))
+        for x in range(width):
+            pixels[x, y] = (value, value, value, 255)
+    return image
+
+
+def text_scrim(width=128, height=32):
+    """A small local scrim for short text drawn over the world.
+
+    Dark and mostly transparent, with the alpha ramped to zero at every edge so
+    it never reads as a panel; consumers point it at the short title/value they
+    need, never at a whole bar or the full screen.
+    """
+    def smoothstep(value):
+        value = max(0.0, min(1.0, value))
+        return value * value * (3.0 - 2.0 * value)
+
+    image = Image.new("RGBA", (width, height))
+    pixels = image.load()
+    for y in range(height):
+        fade_y = smoothstep(min(y, height - 1 - y) / 9)
+        for x in range(width):
+            fade_x = smoothstep(min(x, width - 1 - x) / 20)
+            pixels[x, y] = (12, 17, 23, round(120 * fade_x * fade_y))
+    return image
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate LumaUI's own textures.")
     parser.add_argument("--output", default=os.path.join(ROOT, "Media"),
@@ -179,6 +217,8 @@ def main():
         save(inset(), "inset.tga", out_dir),
         save(plate(), "plate.tga", out_dir),
         save(shadow(), "shadow.tga", out_dir),
+        save(combat_fill(), "combat-fill.tga", out_dir),
+        save(text_scrim(), "hud-scrim.tga", out_dir),
     ]
     for path in written:
         print(path, os.path.getsize(path))

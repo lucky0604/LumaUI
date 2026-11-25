@@ -53,6 +53,33 @@ local function secondaryType()
     end
 end
 
+-- Classes whose second resource already has a native per-unit display keep it.
+-- Death knight runes recover one rune at a time; a continuous 0..6 rail cannot
+-- show that, so drawing one would replace readable information with a worse
+-- summary. The class token is read as a plain string; an unreadable token
+-- keeps the generic rail path.
+local NATIVE_SECONDARY = { DEATHKNIGHT = "runes" }
+
+local function nativeSecondary()
+    if type(UnitClass) ~= "function" then return nil end
+    local ok, _, token = pcall(UnitClass, "player")
+    token = ok and plain(token, "string") or nil
+    return token and NATIVE_SECONDARY[token] or nil
+end
+
+-- Re-reads both decisions together: a native display wins, and only then is a
+-- readable secondary power type worth looking for.
+local function refreshKinds(self)
+    self.secondaryNative = nativeSecondary()
+    -- Not `a and nil or b`: that idiom always yields b. The native display has
+    -- to win outright.
+    if self.secondaryNative then
+        self.secondaryType = nil
+    else
+        self.secondaryType = secondaryType()
+    end
+end
+
 local function draw(self)
     local bar = self.primary
     if not bar then return end
@@ -60,6 +87,14 @@ local function draw(self)
     bar:SetMinMaxValues(0, maximum)
     bar:SetValue(UnitPower("player"))
     app.Theme:PaintBar(bar, app.Theme:PowerColor("player"))
+
+    -- A class with a native per-unit display (death knight runes) keeps it:
+    -- the summary rail is not drawn rather than replacing per-rune recovery.
+    if self.secondaryNative then
+        if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
+        self.rail:SetHeight(RAIL_HEIGHT)
+        return
+    end
 
     local kind = self.secondaryType
     if kind then
@@ -82,15 +117,34 @@ end
 -- block. Saved positions never apply: this is a HUD layer that follows the
 -- measured geometry instead of a movable panel.
 --
+-- The top comes from the applied row geometry (`Layout:Central()` merges the
+-- last `CentralRows` result), not from a bare bottom edge, so the rail sits
+-- above the real skill block even before this component enables: on the field
+-- export below it read `cooldown.bottom + 6` and crossed the lowest skills.
+--
 -- The rail is a plain addon frame, so its own anchor write is not a protected
 -- operation and can follow a geometry change in combat. Nothing reads or writes
--- a native frame here.
+-- a native frame here. A settled rail writes nothing, so the one-second layout
+-- beat costs reads only.
+local function atTarget(rail, x, y)
+    local ok, point, relative, _, px, py = pcall(rail.GetPoint, rail, 1)
+    if not ok or point ~= "BOTTOM" or (relative ~= nil and relative ~= UIParent) then return false end
+    px, py = plain(px, "number"), plain(py, "number")
+    return px ~= nil and py ~= nil and math.abs(px - x) < 0.25 and math.abs(py - y) < 0.25
+end
+
 local function position(self)
     local central = app.Layout:Central()
     local rail = self.rail
-    rail:ClearAllPoints()
-    rail:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, central.cooldown.top + RAIL_GAP)
-    rail:SetWidth(math.max(60, central.content.width))
+    local y = central.cooldown.top + RAIL_GAP
+    local width = math.max(60, central.content.width)
+    if not atTarget(rail, 0, y) then
+        rail:ClearAllPoints()
+        rail:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, y)
+    end
+    local okWidth, current = pcall(rail.GetWidth, rail)
+    current = okWidth and plain(current, "number") or nil
+    if not current or math.abs(current - width) >= 0.5 then rail:SetWidth(width) end
 end
 
 component = app:RegisterComponent({
@@ -116,7 +170,7 @@ component = app:RegisterComponent({
             self.rail, self.primary, self.secondary = rail, rail.primary, rail.secondary
         end
         self.rail:Show()
-        self.secondaryType = secondaryType()
+        refreshKinds(self)
         position(self)
         draw(self)
         for _, event in ipairs({ "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_DISPLAYPOWER" }) do
@@ -127,12 +181,12 @@ component = app:RegisterComponent({
         -- A spec change can add or remove a class resource; re-read the type
         -- instead of carrying a stale rail.
         self:Listen("PLAYER_SPECIALIZATION_CHANGED", function(current)
-            current.secondaryType = secondaryType()
+            refreshKinds(current)
             draw(current)
             position(current)
         end)
         self:Listen("PLAYER_ENTERING_WORLD", function(current)
-            current.secondaryType = secondaryType()
+            refreshKinds(current)
             draw(current)
             position(current)
         end)
@@ -143,7 +197,7 @@ component = app:RegisterComponent({
         end)
     end,
     Refresh = function(self)
-        self.secondaryType = secondaryType()
+        refreshKinds(self)
         draw(self)
         position(self)
     end,
@@ -156,12 +210,15 @@ component = app:RegisterComponent({
 
 function component:Describe()
     if not self.running then return nil end
-    return string.format("playerResource: rail=%s", self.secondaryType
-        and app.L.resourceSecondary or app.L.resourcePrimary)
+    local label = self.secondaryType and app.L.resourceSecondary
+        or (self.secondaryNative and app.L.resourceNative) or app.L.resourcePrimary
+    return string.format("playerResource: rail=%s", label)
 end
 
 -- `/luma hud` addition: the rail's rectangle and whether a second resource was
--- detected, so a missing rail can be told apart from a class without one.
+-- detected, so a missing rail can be told apart from a class without one. The
+-- expected bottom comes from the same applied geometry the rail follows; a
+-- mismatch there is what "the rail crosses the skills" looks like in a report.
 function component:Diagnose()
     local function yes(value) return value and "yes" or "no" end
     local rail = self.rail
@@ -172,7 +229,7 @@ function component:Diagnose()
         local okPoint, _, _, _, _, y = pcall(rail.GetPoint, rail, 1)
         bottom = okPoint and tostring(y) or "?"
     end
-    app:Print(string.format("playerResource: status=%s running=%s secondary=%s width=%s bottom=%s",
+    app:Print(string.format("playerResource: status=%s running=%s secondary=%s native=%s width=%s bottom=%s expected=%.0f",
         tostring(self.status), yes(self.running), self.secondaryType and "yes" or "no",
-        width, bottom))
+        self.secondaryNative or "-", width, bottom, app.Layout:Central().cooldown.top + RAIL_GAP))
 end
