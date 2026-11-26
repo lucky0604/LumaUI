@@ -17,7 +17,7 @@ Store.defaults = {
     -- `topPerformance` is off by default: the bottom strip already owns the FPS
     -- and latency reading, and one readout is the Pearl default (010 phase 08).
     -- An explicit profile keeps its saved value.
-    modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = false, chat = true, chatTabs = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
+    modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = false, chat = true, chatTabs = true, chatView = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
         actionBarScales = { 1, 1, 1 },
         clickCast = {}, auraFilter = "all", takeoverUnitFrames = true,
@@ -62,7 +62,10 @@ Store.defaults = {
         -- the LumaUI windows. Off by default: the native containers keep their
         -- bag bar, equipment slots and profession tabs, and this replacement is
         -- not equivalent yet.
-        containerTakeover = false },
+        containerTakeover = false,
+        -- 015 phase 06: draw chat in LumaUI's own message area. Off until the
+        -- client acceptance for the window passes (default push is phase 14).
+        chatTakeover = false, meterOfficial = false, questBelowMap = false, stripAvoidRight = false, unitNarrowAvoid = false },
     positions = {},
 }
 
@@ -139,6 +142,11 @@ function Store:Normalize(input)
     if type(ui.containerTakeover) == "boolean" then
         result.ui.containerTakeover = ui.containerTakeover
     end
+    if type(ui.chatTakeover) == "boolean" then result.ui.chatTakeover = ui.chatTakeover end
+    if type(ui.meterOfficial) == "boolean" then result.ui.meterOfficial = ui.meterOfficial end
+    if type(ui.questBelowMap) == "boolean" then result.ui.questBelowMap = ui.questBelowMap end
+    if type(ui.stripAvoidRight) == "boolean" then result.ui.stripAvoidRight = ui.stripAvoidRight end
+    if type(ui.unitNarrowAvoid) == "boolean" then result.ui.unitNarrowAvoid = ui.unitNarrowAvoid end
     if type(ui.playerCastOwned) == "boolean" then result.ui.playerCastOwned = ui.playerCastOwned end
     -- Cooldown-group shape lives in one model so the store and the renderer
     -- cannot disagree about an icon size, a cap or a spell ID.
@@ -202,11 +210,63 @@ function Store:Normalize(input)
     if type(input.positions) == "table" then
         for id, position in pairs(input.positions) do
             if type(id) == "string" and type(position) == "table" and finite(position.x) and finite(position.y) then
-                result.positions[id] = { x = bounded(position.x, 0, -20000, 20000), y = bounded(position.y, 0, -20000, 20000) }
+                result.positions[id] = { x = bounded(position.x, 0, -20000, 20000), y = bounded(position.y, 0, -20000, 20000),
+                    anchor = app.Geometry and app.Geometry.CleanAnchor(position.anchor) or nil }
             end
         end
     end
+    if type(input.takeoverBackup) == "table" then
+        local backup = {}
+        for name, record in pairs(input.takeoverBackup) do
+            if type(name) == "string" and name:match("^[%a_][%w_]*%.[%a_][%w_]*$") and type(record) == "table"
+                and type(record.had) == "boolean" then
+                local function scalar(v) return type(v) == "boolean" or type(v) == "string" or finite(v) end
+                if (record.old == nil or scalar(record.old)) and scalar(record.applied) then
+                    backup[name] = { had = record.had, old = record.old, applied = record.applied }
+                end
+            end
+        end
+        if next(backup) then result.takeoverBackup = backup end
+    end
     return result
+end
+
+-- { section, key, value } entries; see the 015 migration in Open.
+Store.TAKEOVER_015 = {}
+
+function Store:ApplyTakeover(profile)
+    if type(profile) ~= "table" then return end
+    local backup = type(profile.takeoverBackup) == "table" and profile.takeoverBackup or {}
+    for _, entry in ipairs(self.TAKEOVER_015) do
+        local section, key, value = entry[1], entry[2], entry[3]
+        if type(profile[section]) ~= "table" then profile[section] = {} end
+        local name = section .. "." .. key
+        if backup[name] == nil then
+            local old = profile[section][key]
+            backup[name] = { had = old ~= nil, old = old, applied = value }
+        end
+        profile[section][key] = value
+    end
+    if next(backup) then profile.takeoverBackup = backup end
+end
+
+-- Puts back the pre-takeover value of every flip the player has not changed
+-- since; a later manual edit is kept. Returns how many entries were restored.
+function Store:RestoreTakeover(profile)
+    profile = profile or self:Profile()
+    local backup = type(profile.takeoverBackup) == "table" and profile.takeoverBackup or nil
+    if not backup then return 0 end
+    local restored = 0
+    for name, record in pairs(backup) do
+        local section, key = name:match("^(.-)%.(.+)$")
+        local bucket = section and profile[section]
+        if type(bucket) == "table" and bucket[key] == record.applied then
+            bucket[key] = record.had and record.old or nil
+            restored = restored + 1
+        end
+    end
+    profile.takeoverBackup = nil
+    return restored
 end
 
 function Store:Open(character)
@@ -310,6 +370,16 @@ function Store:Open(character)
             end
             migrations.cooldownGroupsDefault = true
         end
+        -- 015: one-time takeover switches. Only parts that reached equivalence in
+        -- the client belong in TAKEOVER_015 (empty until in-game evidence exists).
+        -- Each flip keeps the old value, telling "field absent" from an explicit
+        -- value, so RestoreTakeover can undo it without touching later edits.
+        migrations.takeover015 = type(saved.migrations) == "table"
+            and saved.migrations.takeover015 == true
+        if not migrations.takeover015 then
+            for _, profile in pairs(profiles) do self:ApplyTakeover(profile) end
+            migrations.takeover015 = true
+        end
         self.data = { schema = self.schema, profiles = profiles, characters = {}, migrations = migrations }
         if type(saved.characters) == "table" then
             for name, selected in pairs(saved.characters) do
@@ -363,9 +433,21 @@ function Store:Set(section, key, value)
     return true
 end
 
-function Store:SetPosition(id, x, y)
+-- A plain position replaces any anchor: moving a component by hand detaches it.
+-- `anchor` (optional) saves the follow rule with the last resolved centre, so a
+-- missing target falls back to where the component last was.
+function Store:SetPosition(id, x, y, anchor)
     if self.readonly or not finite(x) or not finite(y) then return false end
-    self:Profile().positions[id] = { x = bounded(x, 0, -20000, 20000), y = bounded(y, 0, -20000, 20000) }
+    self:Profile().positions[id] = { x = bounded(x, 0, -20000, 20000), y = bounded(y, 0, -20000, 20000),
+        anchor = app.Geometry.CleanAnchor(anchor) }
+    return true
+end
+
+-- Removes only the follow rule; the current landing point stays.
+function Store:ClearAnchor(id)
+    if self.readonly then return false end
+    local position = self:Profile().positions[id]
+    if position then position.anchor = nil end
     return true
 end
 
@@ -381,7 +463,7 @@ function Store:SetPositions(positions)
         if type(id) == "string" and type(position) == "table"
             and finite(position.x) and finite(position.y) then
             profile.positions[id] = { x = bounded(position.x, 0, -20000, 20000),
-                y = bounded(position.y, 0, -20000, 20000) }
+                y = bounded(position.y, 0, -20000, 20000), anchor = app.Geometry.CleanAnchor(position.anchor) }
         end
     end
     return true

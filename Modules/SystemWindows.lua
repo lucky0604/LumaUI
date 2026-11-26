@@ -1436,6 +1436,11 @@ local NPC_CONTROLS = {
         buttons = { "QuestFrameCloseButton", "QuestFrameAcceptButton", "QuestFrameDeclineButton",
             "QuestFrameCompleteButton", "QuestFrameCompleteQuestButton", "QuestFrameGoodbyeButton",
             "QuestFrameRewardCompleteButton" },
+        -- The action that moves the quest forward gets the edge; the refusal and
+        -- the way out stay quiet.
+        primary = { "QuestFrameAcceptButton", "QuestFrameCompleteButton", "QuestFrameCompleteQuestButton",
+            "QuestFrameRewardCompleteButton" },
+        secondary = { "QuestFrameDeclineButton", "QuestFrameGoodbyeButton" },
         tabs = { "QuestFrameTab" },
     },
 }
@@ -1509,6 +1514,126 @@ local function dressNpcPanel(entry, pane)
     sweepFrame(entry, pane)
 end
 
+-- Row and button feedback for the NPC windows (015 phase 03). One state per
+-- frame: hover, press and, for a primary action, an accent edge that brightens on
+-- hover and pulses once when the button becomes usable. The client's own click,
+-- focus and confirmation paths are never replaced; the frame is only observed
+-- through HookScript. Hooks cannot be removed, so each reads `state.entry`, which
+-- restore clears. Pooled rows reset on hide and on every repaint, so a hover can
+-- never carry over to the next row or quest.
+local FEEL_ROW, FEEL_PRESS, FEEL_EDGE, FEEL_EDGE_QUIET = 0.10, 0.18, 0.55, 0.30
+local feelStates = setmetatable({}, { __mode = "k" })
+
+local function feelEnabled(frame)
+    if type(frame.IsEnabled) ~= "function" then return true end
+    local ok, value = pcall(frame.IsEnabled, frame)
+    return not ok or value ~= false
+end
+
+local function feelPaint(state)
+    local decor, frame = state.decor, state.frame
+    if not decor then return end
+    local live = state.entry ~= nil
+    local accent = app.Theme:Accent()
+    if state.kind == "row" then
+        local alpha = live and ((state.press and FEEL_PRESS) or (state.level * FEEL_ROW)) or 0
+        decor.hover:SetColorTexture(accent[1], accent[2], accent[3], alpha)
+        decor.hover:SetShown(alpha > 0)
+        return
+    end
+    local enabled = live and feelEnabled(frame)
+    local base = state.kind == "primary" and FEEL_EDGE or 0
+    local alpha = 0
+    if enabled then
+        local top = state.kind == "primary" and 1 or FEEL_EDGE_QUIET
+        alpha = base + (top - base) * state.level
+        if state.pulse > alpha then alpha = state.pulse end
+        if state.press then alpha = 1 end
+    end
+    for _, edge in ipairs(decor.edges) do
+        edge:SetColorTexture(accent[1], accent[2], accent[3], alpha)
+        edge:SetShown(alpha > 0)
+    end
+end
+
+local function feelTo(state, target)
+    if not state.entry then return end
+    app.Transitions:Animate(state, "mix", { from = state.level, to = target, duration = 0.12,
+        apply = function(value) state.level = value; feelPaint(state) end })
+end
+
+local function feelReset(state)
+    state.hover, state.press, state.level, state.pulse = false, false, 0, 0
+    app.Transitions:Cancel(state, "mix")
+    app.Transitions:Cancel(state, "pulse")
+    feelPaint(state)
+end
+
+local function feelHook(frame, state)
+    if state.hooked or type(frame.HookScript) ~= "function" then return end
+    state.hooked = true
+    local function hook(script, fn)
+        pcall(frame.HookScript, frame, script, function()
+            if state.entry then app:Call("systemWindows/feel", fn) end
+        end)
+    end
+    hook("OnEnter", function() state.hover = true; feelTo(state, 1) end)
+    hook("OnLeave", function() state.hover, state.press = false, false; feelTo(state, 0) end)
+    hook("OnMouseDown", function() state.press = true; feelPaint(state) end)
+    hook("OnMouseUp", function() state.press = false; feelPaint(state) end)
+    hook("OnHide", function() feelReset(state) end)
+    if state.kind ~= "row" then
+        hook("OnDisable", function() feelPaint(state) end)
+        hook("OnEnable", function()
+            feelPaint(state)
+            if state.kind == "primary" then
+                state.pulse = 1
+                feelPaint(state)
+                app.Transitions:Animate(state, "pulse", { from = 1, to = 0, duration = 0.35,
+                    apply = function(value) state.pulse = value; feelPaint(state) end })
+            end
+        end)
+    end
+end
+
+local function feelAttach(entry, frame, kind)
+    if not isRegion(frame) or type(frame.CreateTexture) ~= "function" then return end
+    if type(frame.IsForbidden) == "function" and frame:IsForbidden() then return end
+    local state = feelStates[frame]
+    if not state then
+        state = { frame = frame, kind = kind, level = 0, pulse = 0 }
+        feelStates[frame] = state
+    end
+    state.entry, state.kind = entry, kind
+    if not state.decor then
+        if kind == "row" then
+            local hover = ownTexture(entry, frame, "BACKGROUND", -6)
+            hover:SetAllPoints(frame)
+            state.decor = { hover = hover }
+        else
+            local top, bottom, left, right = ownTexture(entry, frame, "OVERLAY"), ownTexture(entry, frame, "OVERLAY"),
+                ownTexture(entry, frame, "OVERLAY"), ownTexture(entry, frame, "OVERLAY")
+            top:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0); top:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0); top:SetHeight(1)
+            bottom:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0); bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0); bottom:SetHeight(1)
+            left:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0); left:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0); left:SetWidth(1)
+            right:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0); right:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0); right:SetWidth(1)
+            state.decor = { edges = { top, bottom, left, right } }
+        end
+    end
+    entry.feel = entry.feel or {}
+    entry.feel[state] = true
+    feelHook(frame, state)
+    feelReset(state)
+end
+
+local function feelRelease(entry)
+    for state in pairs(entry.feel or {}) do
+        state.entry = nil
+        feelReset(state)
+    end
+    entry.feel = nil
+end
+
 -- One row of a gossip ScrollBoxList. The pool serves five shapes: greeting text
 -- (a FontString, no plate), a spacer, a quest title and an option — both the
 -- latter carry a 16px bullet/quest icon the client tints (trivial quests are
@@ -1538,6 +1663,7 @@ local function dressNpcRow(entry, row, index)
         end
     end
     dressListRow(entry, entry.npcRows, row, index)
+    feelAttach(entry, row, "row")
 end
 
 -- A window button keeps its label; a button that carries an icon (the vendor's
@@ -1549,6 +1675,8 @@ local function dressNpcButton(entry, button)
     else
         dressTextButton(entry, button)
     end
+    local kind = entry.feelKind and entry.feelKind[button]
+    if kind then feelAttach(entry, button, kind) end
 end
 
 -- The greeting panel's quest titles come from the client's titleButtonPool:
@@ -1613,6 +1741,9 @@ local function dressNpc(entry)
     local frame = entry.frame
     local controls = entry.adapter.controls or {}
     entry.npcRows = entry.npcRows or {}
+    entry.feelKind = {}
+    for _, key in ipairs(controls.secondary or {}) do entry.feelKind[npcControl(entry, key) or false] = "secondary" end
+    for _, key in ipairs(controls.primary or {}) do entry.feelKind[npcControl(entry, key) or false] = "primary" end
     -- Panels are dressed first so their parchment and plain text are recorded
     -- before any sweep reaches them.
     for _, key in ipairs(controls.panes or {}) do
@@ -1714,6 +1845,7 @@ local function applyNpc(entry)
 end
 
 local function restoreNpc(entry)
+    feelRelease(entry)
     restoreArt(entry)
     hideDecor(entry)
 end
@@ -2273,6 +2405,14 @@ local function paintEntry(entry, reason)
     end
     entry.status = status
     windowState[id] = status
+    -- 015 phase 13: one record per window, so the module page can say whether
+    -- the skin or the client's own window is on screen and why.
+    if app.Ownership then
+        local owned = entry.applied == true
+        app.Ownership:Set("systemWindows." .. id, { intent = "owned",
+            active = owned and "owned" or "native", evidence = "simulated",
+            reason = (not owned) and tostring(status or "idle") or nil })
+    end
     return status
 end
 
@@ -2448,6 +2588,9 @@ module = app:RegisterComponent({
         cancelAllRetries()
         watching = false
         windowState = {}
+        if app.Ownership then
+            for _, adapter in ipairs(ADAPTERS) do app.Ownership:Clear("systemWindows." .. adapter.id) end
+        end
         for id, entry in pairs(self.entries or {}) do
             app.Queue:Run("systemWindows/" .. id .. "/restore", function()
                 app:Call("systemWindows/" .. id .. "/restore", entry.adapter.restore, entry)

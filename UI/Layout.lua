@@ -156,7 +156,7 @@ local function clonePositions(positions)
     local copy = {}
     for id, position in pairs(positions or {}) do
         if type(id) == "string" and type(position) == "table" then
-            copy[id] = { x = position.x, y = position.y }
+            copy[id] = { x = position.x, y = position.y, anchor = position.anchor and app.Geometry.CleanAnchor(position.anchor) or nil }
         end
     end
     return copy
@@ -412,8 +412,90 @@ function Layout:Apply(id)
     if saved then x, y = saved.x, saved.y end
     x, y = self:Constrain(id, x, y)
     frame:ClearAllPoints()
-    frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
+    local target = saved and self:AnchorTarget(id, saved.anchor)
+    if target then
+        -- Anchored: the client keeps the follow relation live. The saved x/y
+        -- stays as the fallback used whenever the target is missing.
+        local anchor = saved.anchor
+        frame:SetPoint(anchor.point, target, anchor.targetPoint, anchor.x, anchor.y)
+    else
+        frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
+    end
     app:Publish("LAYOUT_APPLIED", id)
+end
+
+-- The id -> target id map of every saved anchor, for loop detection.
+function Layout:Links()
+    local links = {}
+    for id, position in pairs(app.Store:Profile().positions) do
+        if position.anchor and position.anchor.target ~= "screen" then links[id] = position.anchor.target end
+    end
+    return links
+end
+
+-- The frame an anchor currently resolves to, or nil when the follow rule cannot
+-- apply right now (target unknown, hidden, a loop). The component then sits at
+-- its saved x/y and snaps back to the rule once the target returns.
+function Layout:AnchorTarget(id, anchor)
+    if not anchor then return nil end
+    if anchor.target == "screen" then return UIParent end
+    local target = self.entries[anchor.target]
+    if not target or not validFrame(target.frame) or target.hidden then return nil end
+    if not (target.frame:IsShown() or target.allowHiddenMove) then return nil end
+    local links = self:Links()
+    links[id] = nil
+    if app.Geometry.WouldCycle(links, id, anchor.target) then return nil end
+    return target.frame
+end
+
+-- The entry's centre as a saved offset (the unit Constrain and the Store use),
+-- or nil while the frame has no readable rectangle.
+function Layout:CenterOffset(id)
+    local entry = self.entries[id]
+    if not entry or not validFrame(entry.frame) then return nil end
+    local x, y = entry.frame:GetCenter()
+    local cx, cy = UIParent:GetCenter()
+    x, y, cx, cy = app.Capabilities.Plain(x, "number"), app.Capabilities.Plain(y, "number"),
+        app.Capabilities.Plain(cx, "number"), app.Capabilities.Plain(cy, "number")
+    if not (x and y and cx and cy) then return nil end
+    local ratio = entry.frame:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    local scale = entry.parentCoordinates and 1 or entry.frame:GetScale()
+    return (x * ratio - cx) / scale, (y * ratio - cy) / scale
+end
+
+-- Saves a follow rule. Refused for group members (they follow their group),
+-- unknown targets, a component following itself and any loop.
+function Layout:SetAnchor(id, spec)
+    local entry = self.entries[id]
+    if not entry or entry.member then return false, "member" end
+    local anchor = app.Geometry.CleanAnchor(spec)
+    if not anchor then return false, "invalid" end
+    if anchor.target ~= "screen" and not self.entries[anchor.target] then return false, "unknown" end
+    local links = self:Links()
+    links[id] = nil
+    if anchor.target ~= "screen" and app.Geometry.WouldCycle(links, id, anchor.target) then return false, "cycle" end
+    local position = app.Store:Profile().positions[id]
+    local x, y = position and position.x or entry.x or 0, position and position.y or entry.y or 0
+    if not app.Store:SetPosition(id, x, y, anchor) then return false, "readonly" end
+    self:Apply(id)
+    return true
+end
+
+-- Detaches a component and keeps it where it is now.
+function Layout:ClearAnchor(id)
+    local entry = self.entries[id]
+    if not entry then return false end
+    local position = app.Store:Profile().positions[id]
+    if not position or not position.anchor then return true end
+    local x, y = self:CenterOffset(id)
+    if x then
+        x, y = self:Constrain(id, x, y)
+        app.Store:SetPosition(id, x, y)
+    else
+        app.Store:ClearAnchor(id)
+    end
+    self:Apply(id)
+    return true
 end
 
 function Layout:ApplyAll()
@@ -727,6 +809,11 @@ function Layout:CentralOffset(id, side)
     return (side or 1) * (boundary / scale + width / 2)
 end
 
+function Layout:StopDragTicker()
+    if self.dragTicker and type(self.dragTicker.Cancel) == "function" then self.dragTicker:Cancel() end
+    self.dragTicker = nil
+end
+
 function Layout:Overlay(id, entry)
     if entry.overlay then return entry.overlay end
     local overlay = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
@@ -741,12 +828,29 @@ function Layout:Overlay(id, entry)
     local title = app.Theme:Text(overlay, 12)
     title:SetPoint("CENTER")
     title:SetText(entry.label .. " · " .. app.L.drag)
+    overlay:SetScript("OnMouseDown", function()
+        if Layout.onSelect then app:Call("layout/select", Layout.onSelect, id) end
+    end)
     overlay:SetScript("OnDragStart", function(self)
-        if not InCombatLockdown() then self:StartMoving() end
+        if InCombatLockdown() then return end
+        self:StartMoving()
+        -- Guides are refreshed by a short-lived ticker that only exists for the
+        -- length of one drag; no frame carries a permanent update loop.
+        if Layout.draft and type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
+            Layout:StopDragTicker()
+            Layout.dragTicker = C_Timer.NewTicker(0.03, function()
+                if Layout.onDrag then app:Call("layout/drag", Layout.onDrag, id, self) end
+            end)
+        end
     end)
     overlay:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
+        Layout:StopDragTicker()
         if InCombatLockdown() then return end
+        if Layout.draft then
+            Layout:DraftDrop(id, self)
+            return
+        end
         local x, y = self:GetCenter()
         local cx, cy = UIParent:GetCenter()
         local ratio = self:GetEffectiveScale() / UIParent:GetEffectiveScale()
@@ -763,6 +867,128 @@ function Layout:Overlay(id, entry)
     end)
     entry.overlay = overlay
     return overlay
+end
+
+----------------------------------------------------------------------
+-- Unlock session draft (015 phase 05)
+----------------------------------------------------------------------
+-- While `Layout.draft` exists every drop is held in it and only the overlay
+-- moves; the frames and the saved profile stay untouched until Commit, so a
+-- cancel, an Esc or a combat start has nothing to undo.
+
+-- An overlay as a UIParent-unit rectangle, or nil while it has no readable
+-- centre.
+function Layout:OverlayRect(overlay)
+    if not overlay then return nil end
+    local x, y = overlay:GetCenter()
+    local ratio = overlay:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    x, y = app.Capabilities.Plain(x, "number"), app.Capabilities.Plain(y, "number")
+    if not (x and y) then return nil end
+    return app.Geometry.Rect(x * ratio, y * ratio, overlay:GetWidth() * ratio, overlay:GetHeight() * ratio)
+end
+
+local function uiScreen()
+    return { width = UIParent:GetWidth(), height = UIParent:GetHeight() }
+end
+
+-- Rectangles of the other visible handles: the snap targets.
+function Layout:SnapTargets(excludeId)
+    local list = {}
+    for id, entry in pairs(self.entries) do
+        if id ~= excludeId and entry.overlay and entry.overlay:IsShown() then
+            local rect = self:OverlayRect(entry.overlay)
+            if rect then list[#list + 1] = { id = id, rect = rect } end
+        end
+    end
+    table.sort(list, function(a, b) return a.id < b.id end)
+    return list
+end
+
+-- The one placement function: the guide preview and the final drop both call it.
+function Layout:SnapRect(id, rect, free)
+    local G, screen = app.Geometry, uiScreen()
+    local result = { rect = rect }
+    if not free then
+        local snap = G.Snap(rect, { screen = screen, grid = self.gridOn and G.grid or nil, range = G.range,
+            others = self:SnapTargets(id) })
+        result.rect = G.Move(rect, snap.dx, snap.dy)
+        result.guideX, result.guideY = snap.guideX, snap.guideY
+    end
+    return result
+end
+
+-- Converts a landing rectangle to the saved offset of the entry, within the
+-- entry's own limits (screen margin and locked axis).
+function Layout:RectToOffset(id, rect)
+    local entry = self.entries[id]
+    local G, screen = app.Geometry, uiScreen()
+    local x, y = G.ToOffset(rect, screen)
+    local scale = entry.parentCoordinates and 1 or entry.frame:GetScale()
+    return self:Constrain(id, G.Pixel(x / scale, UIParent:GetEffectiveScale() * scale),
+        G.Pixel(y / scale, UIParent:GetEffectiveScale() * scale))
+end
+
+function Layout:ShowDraft(id, x, y)
+    local entry = self.entries[id]
+    local overlay = entry and entry.overlay
+    if not overlay then return end
+    local scale = entry.parentCoordinates and 1 or entry.frame:GetScale()
+    overlay:ClearAllPoints()
+    overlay:SetPoint("CENTER", UIParent, "CENTER", x * scale, y * scale)
+end
+
+function Layout:DraftDrop(id, overlay)
+    local rect = self:OverlayRect(overlay)
+    if not rect then return end
+    local free = type(IsShiftKeyDown) == "function" and IsShiftKeyDown()
+    local placed = self:SnapRect(id, rect, free)
+    local x, y = self:RectToOffset(id, placed.rect)
+    self.draft[id] = { x = x, y = y }
+    self:ShowDraft(id, x, y)
+    if self.onDraft then app:Call("layout/draft", self.onDraft, id) end
+end
+
+-- Sets a draft position directly (inspector fields, arrow keys).
+function Layout:SetDraft(id, x, y, anchor)
+    if not self.draft or not self.entries[id] then return false end
+    x, y = self:Constrain(id, x, y)
+    self.draft[id] = { x = x, y = y, anchor = anchor }
+    self:ShowDraft(id, x, y)
+    if self.onDraft then app:Call("layout/draft", self.onDraft, id) end
+    return true
+end
+
+-- The draft or saved position of an entry in its own units.
+function Layout:DraftPosition(id)
+    local draft = self.draft and self.draft[id]
+    if draft then return draft.x or 0, draft.y or 0, draft.anchor, draft.reset == true end
+    local saved = app.Store:Profile().positions[id]
+    local entry = self.entries[id]
+    if saved then return saved.x, saved.y, saved.anchor end
+    return entry and entry.x or 0, entry and entry.y or 0, nil
+end
+
+-- Writes every held placement at once and ends the session.
+function Layout:Commit()
+    local draft = self.draft
+    if not draft then return false end
+    if app.Store.readonly then return false end
+    local refused = {}
+    for id, held in pairs(draft) do
+        if held.reset then
+            app.Store:Profile().positions[id] = nil
+        else
+            app.Store:SetPosition(id, held.x, held.y)
+            if held.anchor then
+                local ok, reason = self:SetAnchor(id, held.anchor)
+                if not ok then refused[#refused + 1] = id .. ":" .. tostring(reason) end
+            end
+        end
+        self:Apply(id)
+    end
+    self.committed = true
+    self:SetEditing(false)
+    return true, refused
 end
 
 function Layout:CreateEscape()
@@ -815,6 +1041,12 @@ function Layout:SetEditing(wanted)
         end
     end
     if self.escape then self.escape:SetShown(wanted) end
+    if not wanted then
+        self:StopDragTicker()
+        local committed = self.committed == true
+        self.draft, self.committed = nil, nil
+        if self.onEditEnd then app:Call("layout/editEnd", self.onEditEnd, committed) end
+    end
     return true
 end
 
@@ -1098,7 +1330,8 @@ local function applyPresetNow(name)
         if entry and not entry.member then
             snapshot.touched[id] = true
             if positions[id] then
-                snapshot.positions[id] = { x = positions[id].x, y = positions[id].y }
+                snapshot.positions[id] = { x = positions[id].x, y = positions[id].y,
+                    anchor = positions[id].anchor and app.Geometry.CleanAnchor(positions[id].anchor) or nil }
             end
             local x, y = Layout:PresetOffset(id, spec)
             app.Store:SetPosition(id, x, y)

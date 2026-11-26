@@ -16,6 +16,7 @@ Core\BarModel.lua
 Core\Store.lua
 Core\Runtime.lua
 UI\Pixel.lua
+UI\Geometry.lua
 UI\Theme.lua
 UI\Type.lua
 UI\Surface.lua
@@ -32,8 +33,11 @@ UI\Items.lua
 UI\MemberInfo.lua
 UI\PrivateAuras.lua
 UI\Settings.lua
+UI\SettingsModules.lua
+UI\Unlock.lua
 UI\StyleSheet.lua
 Modules\Launcher.lua
+Modules\GameMenu.lua
 Modules\Minimap.lua
 Modules\QuestTracker.lua
 Modules\QuestIndicators.lua
@@ -44,6 +48,7 @@ Modules\Experience.lua
 Modules\TopPerformance.lua
 Modules\Chat.lua
 Modules\ChatTabs.lua
+Modules\ChatView.lua
 Modules\Tooltip.lua
 Modules\Inventory.lua
 Modules\UnitParts.lua
@@ -69,6 +74,7 @@ Modules\ActionBars.lua
 Modules\OwnedActionBars.lua
 Modules\PlayerResource.lua
 Modules\PlayerCast.lua
+Modules\EdgeAuras.lua
 # ==== TRACK-P3: PLAYER RESOURCE — insert new files above this line ====
 Modules\CooldownGroups.lua
 Modules\CooldownViewer.lua

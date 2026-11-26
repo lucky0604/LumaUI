@@ -1295,6 +1295,18 @@ local function build(self)
     app.Layout:Register("questList", frame, -640, 100, L.questList)
 end
 
+-- 015 phase 12 (simulated, default off): with `ui.questBelowMap` the list hangs
+-- under the minimap. A saved position (manual or from unlock mode) always wins,
+-- and a missing minimap keeps the normal placement.
+local function placeBelowMap(self)
+    local profile = app.Store:Profile()
+    if profile.ui.questBelowMap ~= true or profile.positions.questList then return end
+    local map = rawget(_G, "Minimap")
+    if not self.frame or not map then return end
+    self.frame:ClearAllPoints()
+    self.frame:SetPoint("TOPRIGHT", map, "BOTTOMRIGHT", 0, -16)
+end
+
 local function nativeFrame()
     local frame = _G.ObjectiveTrackerFrame
     -- Frame globals are userdata on the real client, so a type() == "table"
@@ -1596,9 +1608,9 @@ component = app:RegisterComponent({ id = "questList", label = "questList", defau
         self:Listen("EDIT_MODE_LAYOUTS_UPDATED", function(current) scheduleOverlap(current) end)
         self:Listen("PLAYER_ENTERING_WORLD", function(current) scheduleOverlap(current) end)
         app:Subscribe(self, "LAYOUT_APPLIED", function(id)
-            if id == "questList" then scheduleOverlap(self) end
+            if id == "questList" then placeBelowMap(self); scheduleOverlap(self) end
         end)
-        app:Subscribe(self, "RUNTIME_UPDATED", function() scheduleOverlap(self) end)
+        app:Subscribe(self, "RUNTIME_UPDATED", function() placeBelowMap(self); scheduleOverlap(self) end)
         -- Restore saved folds, then keep following the selected profile; the
         -- runtime cleanup unsubscribes this automatically on disable.
         seedFolds(self)

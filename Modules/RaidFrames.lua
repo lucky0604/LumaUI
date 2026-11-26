@@ -400,9 +400,18 @@ local function syncNative(self)
     end
     -- Raid has its own switch; validating the party layout must never enable
     -- the raid takeover (012 phase 13).
+    local reason
     if taken then
-        taken = NATIVE_PARITY_VALIDATED and privateCovered(self)
-            and app.Store:Profile().ui.raidTakeover == true
+        if not NATIVE_PARITY_VALIDATED then reason = "unvalidated"
+        elseif not privateCovered(self) then reason = "private"
+        elseif app.Store:Profile().ui.raidTakeover ~= true then reason = "off" end
+        taken = reason == nil
+    else
+        reason = "nomember"
+    end
+    if app.Ownership then
+        app.Ownership:Set("raidFrames.native", { intent = app.Store:Profile().ui.raidTakeover == true and "owned" or "native",
+            active = taken and "owned" or "native", evidence = "simulated", reason = reason })
     end
     for _, name in ipairs(NATIVE_TAKEOVER) do
         if taken then hideNative(name) else restoreNative(name) end
@@ -492,6 +501,7 @@ component = app:RegisterComponent({ id = "raidFrames", label = "raidFrames", def
             for _, name in ipairs(NATIVE_TAKEOVER) do restoreNative(name) end
             if self.container and self.container:IsShown() then self.container:Hide() end
         end)
+        if app.Ownership then app.Ownership:Clear("raidFrames.native") end
     end,
 })
 

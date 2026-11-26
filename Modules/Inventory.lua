@@ -8,6 +8,25 @@ local PAGE_SIZE, COLUMNS = 60, 12
 local methods = {}
 local module = methods
 
+-- Another bag addon that is loaded owns the client's container entry points;
+-- LumaUI then keeps out of the way instead of wrapping them a second time.
+local BAG_ADDONS = { "Bagnon", "AdiBags", "ArkInventory", "Baganator", "Combuctor", "BetterBags", "ElvUI" }
+local function otherBagAddon()
+    local api = rawget(_G, "C_AddOns")
+    local loaded = type(api) == "table" and api.IsAddOnLoaded
+    if type(loaded) ~= "function" then return nil end
+    for _, name in ipairs(BAG_ADDONS) do
+        local ok, value = pcall(loaded, name)
+        if ok and value then return name end
+    end
+end
+
+local function bagIDs()
+    local list = {}
+    for bag = 0, Plain(NUM_TOTAL_EQUIPPED_BAG_SLOTS, "number") or 5 do list[#list + 1] = bag end
+    return list
+end
+
 local function sortAvailable()
     return type(C_Container) == "table" and type(C_Container.SortBags) == "function"
 end
@@ -114,6 +133,7 @@ local function refresh(self)
     -- Sorting is a bag action, so it follows the client capability on every
     -- redraw rather than whatever was true when the window first opened.
     self.canSort = sortAvailable()
+    if self.bagRow then self.bagRow:Refresh() end
     self.sort:SetShown(self.canSort)
     for i, button in ipairs(self.buttons) do
         Items.Paint(button, items[(self.page - 1) * PAGE_SIZE + i])
@@ -161,6 +181,10 @@ local function build(self)
         button:SetScript("OnDragStart", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
         button:SetScript("OnReceiveDrag", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
     end
+    -- Dropping on the window, not on a cell, uses the first empty slot.
+    frame:SetScript("OnReceiveDrag", function() if not self.closing then Items.DropFirstFree(bagIDs()) end end)
+    frame:SetScript("OnMouseUp", function() if not self.closing then Items.DropFirstFree(bagIDs()) end end)
+    self.bagRow = Items.BagSlotRow(frame, 22, 84)
     Items.Pager(frame, self, { "BOTTOMLEFT", 22, 58 }, 62, function() redraw(self) end)
     self.summary = app.Theme:Text(frame, 12, true)
     self.summary:SetPoint("BOTTOMRIGHT", -22, 88)
@@ -308,13 +332,17 @@ end
 -- One entry point for the profile switch and the module lifecycle.
 function module:ApplyTakeover()
     local wanted = self:TakeoverWanted()
+    local other = wanted and otherBagAddon() or nil
+    if self.buildFailed or not self.frame then wanted = false end
+    if other then wanted = false end
     if wanted and not self.entryWrappers then self:InstallTakeover() end
     if not wanted and self.entryWrappers then self:RemoveTakeover() end
     self.takeover = wanted
     if app.Ownership then
         app.Ownership:Set("inventory.entry", wanted
             and { intent = "owned", active = "owned", evidence = "simulated" }
-            or { intent = "owned", active = "native", evidence = "simulated", reason = "option-off" })
+            or { intent = "owned", active = "native", evidence = "simulated",
+                reason = self.buildFailed and "build" or (other and "thirdparty" or "option-off") })
     end
     return wanted
 end
@@ -322,12 +350,25 @@ end
 module = app:RegisterComponent({ id = "inventory", label = "inventory",
     Supported = function(_, caps) return caps.containers end,
     Enable = function(self)
-        if not self.frame then build(self) end
+        self.buildFailed = nil
+        if not self.frame then
+            -- A window that cannot be built leaves the client's containers alone.
+            local ok = pcall(build, self)
+            if not ok then
+                self.frame = nil
+                self.buildFailed = true
+                app.Ownership:Set("inventory.entry", { intent = "owned", active = "native",
+                    evidence = "simulated", reason = "build" })
+                return
+            end
+        end
         self:Listen("BAG_UPDATE_DELAYED", refresh)
+        self:Listen("PLAYER_EQUIPMENT_CHANGED", refresh)
         self:Listen("ITEM_DATA_LOAD_RESULT", refresh)
         self:ApplyTakeover()
     end,
     Refresh = function(self)
+        if not self.frame then self:ApplyTakeover(); return end
         app.Surface:Plate(self.frame, "card")
         paintFilters(self)
         refresh(self)
@@ -412,6 +453,7 @@ end
 function module:Toggle()
     if not self.running then app:Print(L.inventoryDisabled); return end
     local frame = self.frame
+    if not frame then app:Print(L.inventoryDisabled); return end
     self:SetOpen(not frame:IsShown() or self.closing == true)
 end
 

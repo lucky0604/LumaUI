@@ -318,6 +318,21 @@ local function applyTakeover(self)
             active = units and "owned" or "native",
             evidence = "simulated", reason = reason,
         })
+        -- 015 phase 10: every drawn part reports on its own (bars, cast, auras,
+        -- marks, interaction), so a part the client still owns is visible.
+        local absent = {}
+        for _, id in ipairs(missing) do absent[id] = true end
+        for _, part in ipairs(self.parts and self.parts.active or {}) do
+            if type(part.id) == "string" and part.id:match("^[%a][%w_]*$") then
+                local gone = absent[part.id] == true
+                app.Ownership:Set("unitFrames.part." .. part.id, {
+                    intent = wanted and "owned" or "native",
+                    active = (units and not gone) and "owned" or "native",
+                    evidence = "simulated",
+                    reason = gone and "missing-parts" or (not units) and reason or nil,
+                })
+            end
+        end
         app.Ownership:Set("auraEdge", { intent = "native", active = "native",
             evidence = "none", reason = "client-buffs-kept" })
         app.Ownership:Set("auraPrivate", { intent = "native", active = "native",
@@ -404,6 +419,12 @@ local function updateDefaults(self)
             local x, top
             if spec.style == "main" then
                 x = app.Layout:CentralOffset(id, spec.side)
+                -- 015 phase 10 (simulated, default off): on a narrow screen the
+                -- left main bar keeps its outer edge clear of the chat column.
+                if app.Store:Profile().ui.unitNarrowAvoid == true and spec.side < 0 then
+                    local limit = -(central.screen.width / 2 - 360) / scale + width / 2
+                    if x < limit then x = limit end
+                end
                 top = healthTop / scale + frame.metrics.nameRow
             elseif spec.above then
                 x = parent and parent.x or app.Layout:CentralOffset(id, spec.side)

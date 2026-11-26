@@ -87,6 +87,18 @@ function Ownership:Describe(id)
     return text
 end
 
+-- Records that belong to one component: its own id and its dotted sub-parts.
+-- Module pages use this to say who draws the module right now.
+function Ownership:Matching(prefix)
+    local lines = {}
+    for _, id in ipairs(self:IDs()) do
+        if id == prefix or id:sub(1, #prefix + 1) == prefix .. "." then
+            lines[#lines + 1] = self:Describe(id)
+        end
+    end
+    return lines
+end
+
 -- One line per recorded control, sorted, for the diagnostics page and
 -- `/luma ownership`. A component that never registered is simply absent; the
 -- page says so instead of implying every control was audited.

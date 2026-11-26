@@ -12,8 +12,7 @@ local function command(input)
     if not app.ready then app:Print(app.L.notReady); return end
     local action, rest = input:match("^%s*(%S*)%s*(.-)%s*$")
     action = action:lower()
-    if action == "edit" then app.Layout:Toggle()
-    elseif action == "layout" then app.Settings:Toggle("layout")
+    if action == "edit" or action == "layout" then app.Unlock:Toggle()
     elseif action == "bags" then
         -- `takeover` is the switch itself; anything else toggles the browser.
         if rest == "takeover" then
@@ -155,7 +154,7 @@ local function command(input)
     elseif action == "meter" then
         -- The sample window only draws from a registered provider; without one
         -- it says so instead of covering the reserved area with an empty frame.
-        if type(app.DamageMeterProvider) ~= "function" then
+        if type(app.DamageMeterProvider) ~= "function" and app.Store:Profile().ui.meterOfficial ~= true then
             app:Print(app.L.meterNoProvider)
             return
         end
@@ -253,6 +252,7 @@ events:SetScript("OnEvent", function(_, event)
         -- physical pixel is, so the hairline roles repaint through Reconcile.
         app.Queue:Run("layout/display", function()
             app.Layout:ApplyAll()
+            if app.Unlock:Active() then app.Unlock:Refresh() end
             app:Reconcile()
         end)
     end

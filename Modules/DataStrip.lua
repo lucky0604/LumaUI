@@ -367,7 +367,10 @@ local function fit(self)
     local scale = app.Layout:Scale("bottomBar")
     if type(scale) ~= "number" or scale <= 0 then scale = 1 end
     local screenWidth, screenHeight = UIParent:GetWidth() / scale, UIParent:GetHeight() / scale
-    relayout(self, screenWidth)
+    -- 015 phase 12 (simulated, default off): leave the bottom-right corner free
+    -- for the container/meter entries by narrowing the band from the right.
+    local inset = app.Store:Profile().ui.stripAvoidRight == true and 260 or 0
+    relayout(self, math.max(320, screenWidth - inset))
     local group = app.Layout.entries.bottomBar
     if not group then return end
     -- The band owns the reserved action baseline: the bars must stay above its
@@ -377,7 +380,7 @@ local function fit(self)
     group.margin = 0
     app.Layout:SetGroupSize("bottomBar", math.max(1, self.frame:GetWidth()), HEIGHT)
     local flushY = -screenHeight / 2 + HEIGHT / 2
-    app.Layout:SetEntryDefault("bottomBar", 0, flushY)
+    app.Layout:SetEntryDefault("bottomBar", -inset / 2 * scale, flushY)
     local offset = app.Store:Profile().positions["bottomBar|dataStrip"]
     local member = app.Layout.entries.dataStrip
     if member and member.member == "bottomBar" then

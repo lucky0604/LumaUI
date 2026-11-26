@@ -47,18 +47,24 @@ local function readState()
         end
     end
     if type(UnitChannelInfo) == "function" then
-        local ok, name, text, _, startTime, endTime, _, notInterruptible = pcall(UnitChannelInfo, "player")
+        local ok, name, text, _, startTime, endTime, _, notInterruptible, _, empowered, stages =
+            pcall(UnitChannelInfo, "player")
         if ok and name then
             startTime, endTime = plainNumber(startTime), plainNumber(endTime)
             if not startTime or not endTime or endTime <= startTime then return nil end
             return { name = app.Capabilities.Plain(text, "string") or app.Capabilities.Plain(name, "string"),
                 elapsed = math.max(0, now * 1000 - startTime), duration = endTime - startTime,
-                channel = true, interruptible = not (notInterruptible == true) }
+                channel = true, interruptible = not (notInterruptible == true),
+                empower = app.Capabilities.Plain(empowered, "boolean") == true,
+                stages = app.Capabilities.Plain(stages, "number") }
         end
     end
 end
 
 local function colorFor(state)
+    if state.hold == "interrupted" then return { 0.86, 0.3, 0.3 } end
+    if state.hold == "failed" then return { 0.58, 0.58, 0.62 } end
+    if state.empower then return { 0.72, 0.52, 0.95 } end
     if state.channel then return { 0.42, 0.72, 0.95 } end
     if state.interruptible == false then return { 0.58, 0.58, 0.62 } end
     return { 0.92, 0.78, 0.45 }
@@ -83,12 +89,34 @@ local function draw(self, state)
     self.state = state
 end
 
+-- Interrupted and failed casts stay on the bar for a moment, in their own
+-- colour and word, instead of vanishing like a finished cast. A newer cast or
+-- a stop of the component ends the hold at once.
+local HOLD = 0.6
+local function hold(self, kind)
+    if not self.running or not owned() or not self.bar then return end
+    if readState() then return end
+    stopTicker()
+    self.holdToken = (self.holdToken or 0) + 1
+    local token = self.holdToken
+    draw(self, { hold = kind, duration = 1, elapsed = 1, interruptible = true,
+        name = kind == "interrupted" and app.L.castInterrupted or app.L.castFailed })
+    C_Timer.After(HOLD, function()
+        if self.holdToken == token and self.running then
+            self.holdToken = nil
+            if self.state and self.state.hold then draw(self, nil) end
+        end
+    end)
+end
+
 local function update(self)
     if not self.running or not owned() then
         if self.bar then self.bar:Hide() end
+        self.holdToken = nil
         stopTicker()
         return
     end
+    self.holdToken = nil
     local state = readState()
     draw(self, state)
     if state and not ticker then
@@ -148,8 +176,19 @@ component = app:RegisterComponent({ id = "playerCast", label = "playerCast", def
         self:Listen("UNIT_SPELLCAST_CHANNEL_START", function(current, _, unit)
             if unit == "player" then update(current) end
         end)
-        for _, event in ipairs({ "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_FAILED",
-            "UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_CHANNEL_STOP",
+        for kind, event in pairs({ interrupted = "UNIT_SPELLCAST_INTERRUPTED", failed = "UNIT_SPELLCAST_FAILED" }) do
+            self:Listen(event, function(current, _, unit)
+                if unit ~= "player" then return end
+                if readState() then update(current) else hold(current, kind) end
+            end)
+        end
+        for _, event in ipairs({ "UNIT_SPELLCAST_EMPOWER_START", "UNIT_SPELLCAST_EMPOWER_UPDATE",
+            "UNIT_SPELLCAST_EMPOWER_STOP" }) do
+            self:Listen(event, function(current, _, unit)
+                if unit == "player" then update(current) end
+            end)
+        end
+        for _, event in ipairs({ "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_CHANNEL_STOP",
             "UNIT_SPELLCAST_CHANNEL_UPDATE", "UNIT_SPELLCAST_INTERRUPTIBLE",
             "UNIT_SPELLCAST_NOT_INTERRUPTIBLE" }) do
             self:Listen(event, function(current, _, unit)
@@ -182,6 +221,7 @@ component = app:RegisterComponent({ id = "playerCast", label = "playerCast", def
         end
     end,
     Disable = function(self)
+        self.holdToken = nil
         stopTicker()
         if self.bar then
             self.bar:Hide()

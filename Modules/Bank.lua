@@ -68,9 +68,10 @@ local function stateOf(spec)
     return state
 end
 
-local function collect(state, query, category)
+local function collect(state, query, category, tab)
     local items = {}
-    for _, bag in ipairs(state.bags or {}) do
+    for index, bag in ipairs(state.bags or {}) do
+        if tab == nil or tab == index then
         for slot = 1, slotsOf(bag) do
             local item = Items.Read(bag, slot)
             if item and Items.Matches(item, query, category) then
@@ -78,8 +79,29 @@ local function collect(state, query, category)
                 items[#items + 1] = item
             end
         end
+        end
     end
     return items
+end
+
+-- One chip per purchased tab (plus "All"), only when the active bank has more
+-- than one tab; the selection resets when the source or tab count changes.
+local function tabChips(self, active)
+    local count = active and active.bags and #active.bags or 0
+    if self.tabCount ~= count or self.tabSource ~= (active and active.key) then
+        self.tab, self.tabCount, self.tabSource = nil, count, active and active.key
+    end
+    for index, chip in ipairs(self.tabButtons or {}) do
+        local shown = count > 1 and (index == 1 or index - 1 <= count)
+        chip:SetShown(shown)
+        if shown then chip:SetSelected((index == 1 and self.tab == nil) or self.tab == index - 1) end
+    end
+end
+
+local function activeState(self)
+    for _, state in ipairs(self.states or {}) do
+        if state.key == self.source then return state end
+    end
 end
 
 local function sourceChips(self)
@@ -101,6 +123,7 @@ local function refresh(self)
         if state.viewable == true then self.states[#self.states + 1] = state end
     end
     self.sourceCount = #self.states
+    self.canSort = false
     local active
     for _, state in ipairs(self.states) do
         if state.key == self.source then active = state end
@@ -110,6 +133,12 @@ local function refresh(self)
         self.source = active and active.key or nil
     end
     sourceChips(self)
+    if not active then tabChips(self, nil) end
+    -- Sorting is the client's own bank sort for this bank type, and only when
+    -- the type may be acted on and the call exists.
+    self.canSort = active ~= nil and active.usable ~= false and type(C_Container) == "table"
+        and type(C_Container.SortBank) == "function"
+    if self.sortButton then self.sortButton:SetShown(self.canSort) end
     local items, note
     if not active then
         items = {}
@@ -118,7 +147,8 @@ local function refresh(self)
         items = {}
         note = L.bankNoTabs
     else
-        items = collect(active, self.search:GetText():lower(), self.filter)
+        tabChips(self, active)
+        items = collect(active, self.search:GetText():lower(), self.filter, self.tab)
         if #items == 0 then note = L.empty end
     end
     local pages = math.max(1, math.ceil(#items / PAGE_SIZE))
@@ -168,6 +198,27 @@ local function build(self)
         self.sources[#self.sources + 1] = chip
         sourceX = sourceX + 98
     end
+    -- Tab chips: "All" and up to 8 purchased tabs of the active bank type.
+    self.tabButtons = {}
+    for index = 1, 9 do
+        local chip = app.Controls:Button(frame, index == 1 and L.bankTabAll or string.format(L.bankTabN, index - 1), 44,
+            function()
+                self.tab = index > 1 and index - 1 or nil
+                self.page = 1
+                refresh(self)
+            end, { mutedWhenIdle = true, height = 22 })
+        chip:SetPoint("TOPLEFT", 22 + (index - 1) * 48, -144)
+        chip:Hide()
+        self.tabButtons[index] = chip
+    end
+    self.sortButton = app.Controls:Button(frame, L.sortBags, 92, function()
+        local state = activeState(self)
+        if not self.canSort or not state then app:Print(L.itemActionsUnavailable); return end
+        pcall(C_Container.SortBank, state.kind)
+        refresh(self)
+    end)
+    self.sortButton:SetPoint("BOTTOMRIGHT", -22, 70)
+    self.sortButton:Hide()
     Items.FilterRow(frame, self, 22, -118, function() refresh(self) end)
     self.empty = app.Theme:Text(frame, 14, true)
     self.empty:SetPoint("CENTER")
@@ -175,7 +226,10 @@ local function build(self)
     for i = 1, PAGE_SIZE do
         local button = Items.Cell(frame)
         self.buttons[i] = button
-        button:SetPoint("TOPLEFT", 22 + ((i - 1) % COLUMNS) * 44, -156 - math.floor((i - 1) / COLUMNS) * 44)
+        button:SetPoint("TOPLEFT", 22 + ((i - 1) % COLUMNS) * 44, -172 - math.floor((i - 1) / COLUMNS) * 44)
+        button:RegisterForDrag("LeftButton")
+        button:SetScript("OnDragStart", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
+        button:SetScript("OnReceiveDrag", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
         button:SetScript("OnClick", function(self2, mouseButton)
             local item = self2.item
             if not item or self.closing then return end
@@ -183,6 +237,17 @@ local function build(self)
             if mouseButton == "RightButton" then Items.Use(item) else Items.Pickup(item) end
         end)
     end
+    -- Dropping on the window puts the item in the first empty slot of the
+    -- active bank type (the client enforces what that bank accepts).
+    local function dropHere()
+        if self.closing then return end
+        local state = activeState(self)
+        if state and state.bags and state.usable ~= false then
+            Items.DropFirstFree(state.bags)
+        end
+    end
+    frame:SetScript("OnReceiveDrag", dropHere)
+    frame:SetScript("OnMouseUp", dropHere)
     Items.Pager(frame, self, { "BOTTOMLEFT", 22, 40 }, 56, function() redraw(self) end)
     self.note = app.Theme:Text(frame, 11, true)
     self.note:SetPoint("BOTTOMRIGHT", -22, 52)
@@ -229,7 +294,7 @@ local function nativeBankFrame()
 end
 
 function module:TakeoverOn()
-    return self.running == true and app.Store:Profile().ui.containerTakeover == true
+    return self.running == true and self.frame ~= nil and app.Store:Profile().ui.containerTakeover == true
 end
 
 function module:SuppressNative(active)
@@ -274,7 +339,14 @@ end
 module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnabled = false,
     Supported = function(_, caps) return caps.containers end,
     Enable = function(self)
-        if not self.frame then build(self) end
+        self.buildFailed = nil
+        if not self.frame then
+            -- A window that cannot be built leaves the client's bank alone.
+            if not pcall(build, self) then
+                self.frame, self.buildFailed = nil, true
+                return
+            end
+        end
         -- The component switch doubles as the open entry: enabling creates the
         -- browser and shows it. With the takeover on the client's own window is
         -- what opens it, so no empty browser sits on screen at login.
@@ -302,6 +374,7 @@ module = app:RegisterComponent({ id = "bank", label = "bankTitle", defaultEnable
         -- Turning the shared switch off must hand the client's window back even
         -- when the bank is open and this module was never re-enabled.
         if not self:TakeoverOn() then self:SuppressNative(false) end
+        if not self.frame then return end
         app.Surface:Plate(self.frame, "card")
         Items.PaintFilters(self)
         sourceChips(self)
@@ -352,6 +425,7 @@ end
 
 function module:Toggle()
     if not self.running then app:Print(L.bankHintDisabled); return end
+    if not self.frame then app:Print(L.bankHintDisabled); return end
     self:SetOpen(not self.frame:IsShown() or self.closing == true)
 end
 

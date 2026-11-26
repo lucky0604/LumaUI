@@ -115,6 +115,20 @@ function Frame:GetFrameLevel() return self.level or 1 end
 function Frame:SetFrameLevel(level) self.level = level end
 function Frame:GetFrameStrata() return self.strata or "MEDIUM" end
 function Frame:SetFrameStrata(strata) self.strata = strata end
+function Frame:EnableKeyboard(enabled) self.keyboardEnabled = enabled == true end
+function Frame:SetPropagateKeyboardInput(value) self.propagateKeys = value end
+function Frame:IsEnabled() return self.enabled ~= false end
+function Frame:Enable()
+    local was = self.enabled ~= false
+    self.enabled = true
+    if not was and self.scripts.OnEnable then self.scripts.OnEnable(self) end
+end
+function Frame:Disable()
+    local was = self.enabled ~= false
+    self.enabled = false
+    if was and self.scripts.OnDisable then self.scripts.OnDisable(self) end
+end
+function Frame:IsMouseOver() return self.mouseOver == true end
 function Frame:EnableMouse(enabled) self.mouseEnabled = enabled == true end
 function Frame:IsMouseEnabled() return self.mouseEnabled == true end
 function Frame:EnableMouseWheel(enabled) self.mouseWheelEnabled = enabled == true end
@@ -399,7 +413,40 @@ function H.Load(saved)
     _G.unpack = table.unpack or unpack
     _G.WOW_PROJECT_ID, _G.WOW_PROJECT_MAINLINE = 1, 1
     _G.UISpecialFrames, _G.SlashCmdList = {}, {}
-    _G.CreateFrame = function(_, name, parent, template) return H.NewFrame(name, parent, template) end
+    -- A message frame as the client's ScrollingMessageFrame behaves for the parts
+    -- chat code touches: lines, a scroll offset that stays put while reading, and
+    -- the native buffer read-back.
+    function H.MessageFrame(frame)
+        frame.lines, frame.offset = {}, 0
+        function frame:AddMessage(text, r, g, b, id)
+            self.lines[#self.lines + 1] = { text, r, g, b, id }
+            if self.offset > 0 then self.offset = self.offset + 1 end
+        end
+        function frame:GetNumMessages() return #self.lines end
+        function frame:GetMessageInfo(index)
+            local line = self.lines[index]
+            if not line then return nil end
+            return line[1], line[2], line[3], line[4], line[5]
+        end
+        function frame:Clear() self.lines, self.offset = {}, 0 end
+        function frame:AtBottom() return self.offset == 0 end
+        function frame:ScrollUp() self.offset = math.min(self.offset + 1, math.max(0, #self.lines - 1)) end
+        function frame:ScrollDown() self.offset = math.max(0, self.offset - 1) end
+        function frame:PageUp() self.offset = math.min(self.offset + 5, math.max(0, #self.lines - 1)) end
+        function frame:PageDown() self.offset = math.max(0, self.offset - 5) end
+        function frame:ScrollToTop() self.offset = math.max(0, #self.lines - 1) end
+        function frame:ScrollToBottom() self.offset = 0 end
+        function frame:SetMaxLines(n) self.maxLines = n end
+        function frame:SetFading() end
+        function frame:SetJustifyH() end
+        function frame:SetHyperlinksEnabled(v) self.hyperlinks = v end
+        return frame
+    end
+    _G.CreateFrame = function(kind, name, parent, template)
+        local frame = H.NewFrame(name, parent, template)
+        if kind == "ScrollingMessageFrame" then H.MessageFrame(frame) end
+        return frame
+    end
     _G.hooksecurefunc = function(target, name, fn)
         -- The live client accepts ("GlobalName", hook) for a global function and
         -- (table, "method", hook) for a table method. The two-argument string
@@ -424,6 +471,51 @@ function H.Load(saved)
     end
     _G.UIParent = H.NewFrame("UIParent")
     UIParent.width, UIParent.height = 1920, 1080
+
+    -- The client's Esc menu: a pooled button list rebuilt by InitButtons on every
+    -- show, with the native add-ons entry among the native ones.
+    local function newGameMenu()
+        local menu = H.NewFrame("GameMenuFrame", UIParent)
+        menu.shown = false
+        menu.active, menu.free, menu.counter = {}, {}, 0
+        menu.buttonPool = {}
+        function menu.buttonPool:EnumerateActive()
+            local index = 0
+            return function() index = index + 1; return menu.active[index] end
+        end
+        function menu:Reset()
+            for _, button in ipairs(self.active) do
+                button:Hide(); button.layoutIndex = nil
+                self.free[#self.free + 1] = button
+            end
+            self.active, self.counter = {}, 0
+        end
+        function menu:AddButton(text, callback)
+            local button = table.remove(self.free) or H.NewFrame(nil, self, "MainMenuFrameButtonTemplate")
+            self.counter = self.counter + 1
+            button.layoutIndex = self.counter
+            button:SetText(text)
+            button.scripts.OnClick = function() _G.PlaySound(); _G.HideUIPanel(self); callback() end
+            button.scripts.OnEnter, button.scripts.OnLeave = nil, nil
+            button:Show()
+            self.active[#self.active + 1] = button
+            return button
+        end
+        function menu:MarkDirty() self.dirty = (self.dirty or 0) + 1 end
+        function menu:InitButtons()
+            self:Reset()
+            self:AddButton("Options", function() end)
+            self:AddButton(_G.ADDONS, function() end)
+            self:AddButton("Quit", function() end)
+        end
+        menu.scripts.OnShow = function(self) self:InitButtons() end
+        menu.scripts.OnEvent = function(self) self:InitButtons() end
+        _G.HideUIPanel = function(frame) frame:Hide() end
+        _G.PlaySound = _G.PlaySound or function() end
+        return menu
+    end
+    _G.ADDONS = "AddOns"
+    newGameMenu()
     -- The client's own experience/reputation bar. It starts shown like a fresh
     -- login so the replacement's takeover and release can be observed.
     _G.MainStatusTrackingBarContainer = H.NewFrame("MainStatusTrackingBarContainer", UIParent)
@@ -540,6 +632,7 @@ function H.Load(saved)
     for index = 1, 4 do
         local chat = H.NewFrame("ChatFrame" .. index, UIParent)
         chat.isDocked = true
+        H.MessageFrame(chat)
         chat.spacing = 0
         chat.GetSpacing = function(self) return self.spacing end
         chat.SetSpacing = function(self, value) self.spacing = value end
@@ -1035,6 +1128,7 @@ function H.Load(saved)
         local item = list and list[index]
         if not item then return nil end
         return { icon = item.icon, name = item.name, applications = item.applications,
+            spellId = item.spellId, auraInstanceID = item.instance or (1000 + index),
             duration = item.duration, expirationTime = item.expirationTime, dispelName = item.dispelName }
     end
     _G.GetRaidTargetIndex = function(unit) return H.raidTargets[unit] end

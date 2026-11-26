@@ -402,6 +402,21 @@ end
 -- The tracked-buff block packs only the buffs that are actually on the player.
 -- Planning from the full list would leave a hole for every idle entry, while
 -- the client's viewer closes the row up.
+-- One word per group for what is on screen and why, so "nothing drawn" is never
+-- ambiguous: off, unreadable (the client's list cannot be read and no stored
+-- copy exists), empty (a readable empty list), idle (buffs listed, none active),
+-- unresolved (entries the client cannot name or draw), drawing.
+local function groupStatus(owned, group, container, order)
+    if not owned or not group.enabled then return "off" end
+    if #order == 0 then
+        if group.auto and clientList(group.id) == nil then return "unreadable" end
+        return "empty"
+    end
+    if (container and container.drawn or 0) > 0 then return "drawing" end
+    if group.kind == "buff" then return "idle" end
+    return "unresolved"
+end
+
 local function buffRender(self, container)
     local group = container.group
     local maxWidth = math.max(80, (self.maxWidth or 400))
@@ -817,6 +832,17 @@ function component:SuppressNativeViewer(id, active)
     return true
 end
 
+-- The spell ids the centre tracked-buff group is drawing right now, so the edge
+-- aura rows can leave those out and no aura shows twice.
+function component:TrackedSpells()
+    local set = {}
+    local container = self.running and self.containers and self.containers.buffs
+    if container and (container.drawn or 0) > 0 and container.group then
+        for _, spellID in ipairs(effectiveOrder(container.group)) do set[spellID] = true end
+    end
+    return set
+end
+
 function component:Render()
     if not self.running then return end
     -- Read-only databases hand back the raw defaults table, which never went
@@ -877,7 +903,19 @@ function component:Render()
         if group.kind == "buff" then
             suppress = owned and group.enabled and drew
         else
-            suppress = owned and group.enabled and (drew or #order == 0)
+            -- An unreadable source with no stored copy hands the block back.
+            suppress = owned and group.enabled
+                and (drew or (#order == 0 and groupStatus(owned, group, container, order) ~= "unreadable"))
+        end
+        local status = groupStatus(owned, group, container, order)
+        container.status = status
+        if app.Ownership then
+            app.Ownership:Set("cooldownGroups." .. id, {
+                intent = owned and "owned" or "native",
+                active = (suppress and "owned") or "native",
+                evidence = "simulated",
+                reason = status ~= "drawing" and status or nil,
+            })
         end
         for _, viewer in ipairs(VIEWER_GROUPS[id] or {}) do
             local keepBuff = (viewer == "buffIcon" or viewer == "buffBar")
@@ -1170,6 +1208,7 @@ function component:Diagnose()
         if group.kind == "buff" then
             idle = string.format(" idle=%d", container and container.inactive or 0)
         end
+        app:Print(string.format("  %s: status=%s", id, container and container.status or "off"))
         app:Print(string.format("  %s: entries=%d%s enabled=%s size=%d gap=%d max=%d rows=%d perRow=%d drawn=%s%s",
             id, #order, group.auto and " (auto)" or "", yes(group.enabled), group.size, group.gap, group.max,
             #plan.rows, plan.perRow or 0, container and tostring(container.drawn or 0) or "-", idle))

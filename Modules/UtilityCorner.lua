@@ -31,7 +31,7 @@ local function ensureFrame(self)
             local window = app.components.characterWindow
             if window and window.running then window:Toggle() end
         end },
-        { key = "layout", label = app.L.drawerLayout, run = function() app.Layout:Toggle() end },
+        { key = "layout", label = app.L.drawerLayout, run = function() app.Unlock:Toggle() end },
         { key = "menu", label = app.L.utilityMenu, run = function()
             if type(ToggleGameMenu) == "function" then ToggleGameMenu() end
         end },

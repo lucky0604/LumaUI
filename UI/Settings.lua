@@ -1,7 +1,12 @@
 local _, app = ...
 local L, Controls = app.L, app.Controls
-local SettingsUI = { pages = {}, active = "general", profileOffset = 0 }
+local SettingsUI = { pages = {}, active = "overview", profileOffset = 0 }
 app.Settings = SettingsUI
+
+-- Pages that existed before 015 keep answering to their old key, so a stored
+-- command, a bound macro or an older test still lands on the right page.
+local PAGE_ALIAS = { general = "overview", modules = "overview", layout = "profiles" }
+SettingsUI.aliases = PAGE_ALIAS
 
 local function note(parent, text, y, width)
     local label = app.Type:Text(parent, "micro")
@@ -62,11 +67,17 @@ local function refreshStateful(root, depth)
     end
 end
 
+-- The module pages live in UI/SettingsModules.lua and share these builders.
+SettingsUI.kit = {
+    note = note, noteHeight = noteHeight, section = section,
+    settingsControl = settingsControl, refreshStateful = refreshStateful,
+}
+
 function SettingsUI:Result(ok, message)
     if not ok and message then app:Print(message) end
 end
 
-function SettingsUI:BuildGeneral(page)
+function SettingsUI:BuildOverview(page)
     local scroll = Controls:Scroll(page, 464, 420)
     scroll:SetPoint("TOPLEFT")
     local body = CreateFrame("Frame", nil, scroll)
@@ -104,15 +115,7 @@ function SettingsUI:BuildGeneral(page)
         Controls:Range(body, L.hudOpacity, y, 0.15, 1, 0.05, function() return get("hudOpacity") end,
             function(v) set("hudOpacity", v) end, { width = 462 }))
     y = y - 70
-    updates[#updates + 1] = settingsControl(page,
-        Controls:Range(body, L.chatOpacity, y, 0, 1, 0.05, function() return get("chatOpacity") end,
-            function(v) set("chatOpacity", v) end, { width = 462 }))
-    y = y - 70
-    updates[#updates + 1] = settingsControl(page,
-        Controls:Range(body, L.chatActiveOpacity, y, 0.2, 1, 0.05,
-            function() return get("chatActiveOpacity") end, function(v) set("chatActiveOpacity", v) end,
-            { width = 462 }))
-    y = y - 74
+    y = y - 4
     section(body, L.sectionAccent, y)
     y = y - 22
     local pearl = settingsControl(page, Controls:Button(body, L.pearl, 140, function() set("accent", "pearl") end))
@@ -122,70 +125,15 @@ function SettingsUI:BuildGeneral(page)
     local ember = settingsControl(page, Controls:Button(body, L.ember, 140, function() set("accent", "ember") end))
     ember:SetPoint("TOPLEFT", 296, y)
     y = y - 40
-    updates[#updates + 1] = settingsControl(page,
-        Controls:Toggle(body, L.tooltipQuality, y, function() return get("tooltipQuality") end,
-            function(v) set("tooltipQuality", v) end, { width = 462 }))
-    y = y - 44
-    section(body, L.sectionInfo, y)
+    section(body, L.sectionStatus, y)
     y = y - 22
-    updates[#updates + 1] = settingsControl(page,
-        Controls:Toggle(body, L.stripCompact, y, function() return app.Store:Profile().ui.stripCompact == true end,
-            function(v) self:Result(app.Store:Set("ui", "stripCompact", v)) end, { width = 462 }))
-    y = y - 40
-    local clockLabel = note(body, L.clockOwner, y, 462)
-    page.clockLabel = clockLabel
-    local clockOffset = noteHeight(clockLabel, 20)
-    -- Exactly one clock: three mutually exclusive choices, none of them a
-    -- forced write on login. The current value is read from the profile on
-    -- every update, so a profile switch repaints the selected button.
-    local clockButtons = {}
-    local function clockChoice(key, label, x)
-        local button = settingsControl(page, Controls:Button(body, label, 104, function()
-            self:Result(app.Store:Set("ui", "clock", key))
-            self:Update()
-        end))
-        button:SetPoint("TOPLEFT", x, y - clockOffset)
-        clockButtons[key] = button
-        return button
-    end
-    clockChoice("strip", L.clockStrip, 0)
-    clockChoice("minimap", L.clockMinimap, 112)
-    clockChoice("off", L.clockOff, 224)
-    updates[#updates + 1] = { Update = function()
-        local current = app.Store:Profile().ui.clock
-        for key, button in pairs(clockButtons) do button:SetSelected(key == current) end
-    end }
-    y = y - clockOffset - 42
-    section(body, L.sectionLayout, y)
-    y = y - 22
-    local edit = settingsControl(page, Controls:Button(body, L.edit, 150, function() app.Layout:Toggle() end))
-    edit:SetPoint("TOPLEFT", 0, y)
-    local reset = settingsControl(page, Controls:Button(body, L.resetLayout, 150, function()
-        self:Result(app.Store:Reset(true))
-        app.Layout:ApplyAll()
-    end))
-    reset:SetPoint("TOPLEFT", 164, y)
+    page.statusLabel = note(body, "", y, 462)
+    page.statusHeight = 40
     y = y - 44
-    section(body, L.sectionContainers, y)
-    y = y - 22
-    updates[#updates + 1] = settingsControl(page,
-        Controls:Toggle(body, L.containerTakeover, y, function()
-            return app.Store:Profile().ui.containerTakeover == true
-        end, function(v)
-            -- One writer for the switch: it also enables the bank component and
-            -- prints a confirmation, so the checkbox and `/luma bags takeover`
-            -- can never disagree.
-            local inventory = app.components and app.components.inventory
-            if inventory and inventory.running then
-                self:Result(inventory:SetTakeover(v))
-            else
-                self:Result(app.Store:Set("ui", "containerTakeover", v))
-            end
-            self:Update()
-        end, { width = 462 }))
+    local diagnostics = Controls:Button(body, L.openDiagnostics, 180, function() self:Select("diagnostics") end)
+    diagnostics:SetPoint("TOPLEFT", 0, y)
+    page.diagButton = diagnostics
     y = y - 44
-    page.takeoverHint = note(body, L.containerTakeoverHint, y, 462)
-    y = y - noteHeight(page.takeoverHint, 46)
     page.instructions = note(body, L.instructions, y, 462)
     y = y - noteHeight(page.instructions, 44)
     section(body, L.sectionCompatibility, y)
@@ -195,9 +143,41 @@ function SettingsUI:BuildGeneral(page)
             function(v) set("opacity", v) end, { width = 462 }))
     y = y - 70
     page.compatibilityHint = note(body, L.compatibilityHint, y, 462)
-    body:SetHeight(math.max(420, -y + noteHeight(page.compatibilityHint, 34)))
+    y = y - noteHeight(page.compatibilityHint, 34)
+    -- Components that no module page claims (an optional extension registered
+    -- after the window was built) are still switchable from here.
+    page.rows = {}
+    local extensionTop = y
+    body:SetHeight(math.max(420, -y + 34))
     page.Update = function()
+        local unclaimed = 0
+        for _, id in ipairs(app.order) do
+            if not self:ModuleOf(id) then
+                unclaimed = unclaimed + 1
+                local row = page.rows[id]
+                if not row then
+                    local component = app.components[id]
+                    local label = type(component.label) == "string" and component.label or id
+                    row = Controls:Toggle(body, L[label], 0,
+                        function() return app.Store:Profile().modules[id] == true end,
+                        function(v) self:Result(app.Store:Set("modules", id, v)) end,
+                        { width = 462, component = component })
+                    page.rows[id] = row
+                    settingsControl(page, row)
+                end
+                row:ClearAllPoints()
+                row:SetPoint("TOPLEFT", 0, extensionTop - 22 - (unclaimed - 1) * 38)
+                row:Update(app.components[id])
+            end
+        end
+        -- The heading and its rule exist only once something needs them.
+        if unclaimed > 0 and not page.extensionHeading then
+            page.extensionHeading = section(body, L.sectionExtensions, extensionTop)
+        end
+        body:SetHeight(math.max(420, -extensionTop + 34 + unclaimed * 38))
         for _, control in ipairs(updates) do control:Update() end
+        local summary = self:ModuleSummary()
+        page.statusLabel:SetText(summary)
         local readonly = app.Store.readonly
         for _, control in ipairs(page.settings or {}) do
             if control.SetEnabled then control:SetEnabled(not readonly) end
@@ -206,518 +186,22 @@ function SettingsUI:BuildGeneral(page)
     end
 end
 
-function SettingsUI:BuildModules(page)
-    note(page, L.modulesHint, -2, 462)
-    local scroll = Controls:Scroll(page, 464, 300)
-    scroll:SetPoint("TOPLEFT", 0, -34)
-    local body = CreateFrame("Frame", nil, scroll)
-    body:SetSize(462, math.max(300, #app.order * 40))
-    scroll:SetScrollChild(body)
-    page.rows = {}
-    page.scroll = scroll
-    -- The coexistence note renders under the module rows; the diagnostics page
-    -- carries the full probe of what else is loaded in the session.
-    note(page, L.diagCoexistenceHint, -316, 462)
-    local issues = app.Theme:TextRole(page, "muted")
-    issues:SetPoint("TOPLEFT", 0, -342)
-    issues:SetWidth(330)
-    page.issues = issues
-    local diag = Controls:Button(page, L.openDiagnostics, 160, function() self:Select("diagnostics") end)
-    diag:SetPoint("TOPLEFT", 0, -364)
-    diag:Hide()
-    page.diagButton = diag
-    page.Update = function()
-        local count = 0
-        for i, id in ipairs(app.order) do
-            local row = page.rows[id]
-            if not row then
-                local component = app.components[id]
-                local label = type(component.label) == "string" and component.label or id
-                row = Controls:Toggle(body, L[label], -(i - 1) * 40,
-                    function() return app.Store:Profile().modules[id] == true end,
-                    function(v) self:Result(app.Store:Set("modules", id, v)) end)
-                row:SetWidth(462)
-                page.rows[id] = row
-                settingsControl(page, row)
-            end
-            row:Update(app.components[id])
-            local status = app.components[id].status
-            if status == "failed" or status == "unsupported" or status == "dependency" then
-                count = count + 1
-            end
-        end
-        body:SetHeight(math.max(300, #app.order * 40))
-        scroll:UpdateRange()
-        issues:SetText(count > 0 and string.format(L.modulesIssues, count) or L.modulesHealthy)
-        diag:SetShown(count > 0)
-        local readonly = app.Store.readonly
-        for _, row in pairs(page.rows) do row:SetEnabled(not readonly) end
-    end
-end
-
-function SettingsUI:BuildLayout(page)
-    -- A single scroll area carries the notes, preset controls and all registered
-    -- panels. Long translations and warnings can grow without covering rows or
-    -- the fixed window footer, and the page retains its own scroll position.
+function SettingsUI:BuildProfiles(page)
+    -- One scroll area: the profile list, then the layout presets that act on the
+    -- whole profile. Long translations grow the page instead of covering rows.
     local scroll = Controls:Scroll(page, 464, 420)
     scroll:SetPoint("TOPLEFT")
     local body = CreateFrame("Frame", nil, scroll)
     body:SetSize(462, 420)
     scroll:SetScrollChild(body)
-    page.scroll, self.layoutScroll = scroll, scroll
-
-    local hint = note(body, L.layoutHint, -2, 462)
-    local y = -2 - noteHeight(hint, 38)
-    local move = Controls:Button(body, L.edit, 150, function() app.Layout:Toggle() end)
-    move:SetPoint("TOPLEFT", 0, y)
-    local reset = Controls:Button(body, L.resetLayout, 150, function()
-        self:Result(app.Store:Reset(true))
-        app.Layout:ApplyAll()
-    end)
-    reset:SetPoint("TOPLEFT", 164, y)
-    y = y - 40
-    local editMode = Controls:Button(body, L.openEditMode, 250, function()
-        if EditModeManagerFrame and ShowUIPanel then
-            ShowUIPanel(EditModeManagerFrame)
-        else
-            app:Print(L.editModeUnavailable)
-        end
-    end)
-    editMode:SetPoint("TOPLEFT", 0, y)
-    self.layoutEditMode = editMode
-    y = y - 36
-    local nativeHint = note(body, L.nativeLayoutHint, y, 462)
-    y = y - noteHeight(nativeHint, 28)
-    local presetHint = note(body, L.presetHint, y, 462)
-    y = y - noteHeight(presetHint, 28)
-    local selectedPreset = "default16x9"
-    local choices = {}
-    local function choosePreset(name)
-        selectedPreset = name
-        app.Layout:CancelPresetPreview()
-        self:Update()
-    end
-    choices.default16x9 = Controls:Button(body, L.preset16x9, 150, function() choosePreset("default16x9") end)
-    choices.default16x9:SetPoint("TOPLEFT", 0, y)
-    choices.combat = Controls:Button(body, L.presetCombat, 150, function() choosePreset("combat") end)
-    choices.combat:SetPoint("TOPLEFT", 164, y)
-    choices.pearlCity = Controls:Button(body, L.presetPearlCity, 150, function() choosePreset("pearlCity") end)
-    choices.pearlCity:SetPoint("TOPLEFT", 0, y - 38)
-    choices.pearlCombat = Controls:Button(body, L.presetPearlCombat, 150, function() choosePreset("pearlCombat") end)
-    choices.pearlCombat:SetPoint("TOPLEFT", 164, y - 38)
-    self.presetChoices = choices
-    y = y - 76
-    local preview = Controls:Button(body, L.presetPreview, 104, function()
-        app.Layout:PreviewPreset(selectedPreset)
-        self:Update()
-    end)
-    preview:SetPoint("TOPLEFT", 0, y)
-    local apply = Controls:Button(body, L.presetApply, 104, function()
-        app.Layout:ApplyPreset(selectedPreset)
-        self:Update()
-    end)
-    apply:SetPoint("TOPLEFT", 112, y)
-    local cancel = Controls:Button(body, L.presetCancel, 104, function()
-        app.Layout:CancelPresetPreview()
-        self:Update()
-    end)
-    cancel:SetPoint("TOPLEFT", 224, y)
-    local undo = Controls:Button(body, L.presetUndo, 104, function()
-        app.Layout:UndoPreset()
-        self:Update()
-    end)
-    undo:SetPoint("TOPLEFT", 336, y)
-    self.presetButtons = { preview = preview, apply = apply, cancel = cancel, undo = undo }
-    y = y - 40
-    local count = note(body, "", y, 462)
-    self.layoutCount = count
-    page.layoutHint, page.nativeLayoutHint, page.presetHint = hint, nativeHint, presetHint
-    page.layoutMove = move
-    local function positionStatic()
-        local top = -2 - noteHeight(hint, 38)
-        move:ClearAllPoints(); move:SetPoint("TOPLEFT", 0, top)
-        reset:ClearAllPoints(); reset:SetPoint("TOPLEFT", 164, top)
-        top = top - 40
-        editMode:ClearAllPoints(); editMode:SetPoint("TOPLEFT", 0, top)
-        top = top - 36
-        nativeHint:ClearAllPoints(); nativeHint:SetPoint("TOPLEFT", 0, top)
-        top = top - noteHeight(nativeHint, 28)
-        presetHint:ClearAllPoints(); presetHint:SetPoint("TOPLEFT", 0, top)
-        top = top - noteHeight(presetHint, 28)
-        choices.default16x9:ClearAllPoints(); choices.default16x9:SetPoint("TOPLEFT", 0, top)
-        choices.combat:ClearAllPoints(); choices.combat:SetPoint("TOPLEFT", 164, top)
-        choices.pearlCity:ClearAllPoints(); choices.pearlCity:SetPoint("TOPLEFT", 0, top - 38)
-        choices.pearlCombat:ClearAllPoints(); choices.pearlCombat:SetPoint("TOPLEFT", 164, top - 38)
-        top = top - 76
-        preview:ClearAllPoints(); preview:SetPoint("TOPLEFT", 0, top)
-        apply:ClearAllPoints(); apply:SetPoint("TOPLEFT", 112, top)
-        cancel:ClearAllPoints(); cancel:SetPoint("TOPLEFT", 224, top)
-        undo:ClearAllPoints(); undo:SetPoint("TOPLEFT", 336, top)
-        top = top - 40
-        count:ClearAllPoints(); count:SetPoint("TOPLEFT", 0, top)
-        return top
-    end
-    self.layoutRows = {}
-    local function createRow()
-        local row = CreateFrame("Frame", nil, body)
-        row:SetSize(462, 32)
-        row.label = app.Theme:TextRole(row, "label")
-        row.label:SetPoint("LEFT")
-        row.label:SetWidth(320)
-        row.label:SetWordWrap(false)
-        row.button = Controls:Button(row, L.move, 90, function()
-            if row.id then app.Layout:SetEditing(true) end
-        end)
-        row.button:SetPoint("RIGHT")
-        return row
-    end
-    self.layoutEmpty = note(body, L.noLayoutEntries, 0, 462)
-    local barScales = {}
-    for index in ipairs(app.Layout.actionBarNames) do
-        local slot = index
-        barScales[slot] = Controls:Range(body, string.format(L.actionBarScale, slot), 0,
-            0.5, 1.5, 0.05, function() return app.Store:Profile().ui.actionBarScales[slot] end,
-            function(value)
-                local scales = app.Store.Clone(app.Store:Profile().ui.actionBarScales)
-                scales[slot] = value
-                self:Result(app.Store:Set("ui", "actionBarScales", scales))
-            end, { width = 462 })
-    end
-    -- Central HUD: the two own cooldown groups. Changes are a session draft,
-    -- previewed at once, written only by Apply and dropped by Cancel.
-    local hudControls = {}
-    local hudHeading = note(body, L.hudEditorHint, 0, 462)
-    local function groupComponent() return app.components and app.components.cooldownGroups end
-    -- The mode switch. Without it the two groups never draw, so the editor would
-    -- offer geometry for a block the player cannot see.
-    local hudOwned = Controls:Toggle(body, L.hudOwned, 0,
-        function()
-            local profile = app.Store:Profile()
-            return profile.ui.cooldownGroups.owned == true
-        end,
-        function(wanted)
-            local component = groupComponent()
-            if component and component.running then self:Result(component:SetOwned(wanted)) end
-            self:Update()
-        end, { width = 462 })
-    -- Tracked buffs are the one Cooldown Manager block LumaUI does not replace,
-    -- so hiding them is a separate switch with its own warning.
-    local hudBuffs = Controls:Toggle(body, L.hudHideBuffs, 0,
-        function()
-            local profile = app.Store:Profile()
-            return profile.ui.cooldownGroups.hideBuffViewers ~= false
-        end,
-        function(wanted)
-            local component = groupComponent()
-            if component and component.running then self:Result(component:SetHideBuffViewers(wanted)) end
-            self:Update()
-        end, { width = 462 })
-    -- Counts and pixels are not percentages: without a formatter the shared
-    -- slider would print an icon size of 26 as "2600%".
-    local function countLabel(number) return string.format("%d", math.floor(number + 0.5)) end
-    -- One editor block per group, including the tracked-buff block: every group
-    -- has its own size, gap, cap and column mode, and its own list rows.
-    local groupTitles = {
-        essential = L.hudGroupEssential, utility = L.hudGroupUtility, buffs = L.hudGroupBuffs,
-    }
-    for _, groupID in ipairs(app.CooldownModel.GROUP_IDS) do
-        local id = groupID
-        local function value(key)
-            local component = groupComponent()
-            return component and component:DraftValue(id, key)
-        end
-        local function stage(key, wanted)
-            local component = groupComponent()
-            if component and component.running then component:SetDraft(id, key, wanted) end
-            self:Update()
-        end
-        local title = groupTitles[id] or id
-        -- Follow mode is a mode switch, not geometry: written at once.
-        local follow = Controls:Toggle(body, title .. " · " .. L.hudFollow, 0,
-            function()
-                local groups = app.CooldownModel:Normalize(app.Store:Profile().ui.cooldownGroups)
-                return ((groups.groups[id] or {}).auto ~= false)
-            end,
-            function(wanted)
-                local component = groupComponent()
-                if component and component.running then self:Result(component:SetFollow(id, wanted)) end
-                self:Update()
-            end, { width = 462 })
-        local vertical = Controls:Toggle(body, title .. " · " .. L.hudVertical, 0,
-            function() return value("vertical") == true end,
-            function(wanted) stage("vertical", wanted) end, { width = 462 })
-        local function range(key, label, low, high)
-            return Controls:Range(body, title .. " · " .. label, 0, low, high, 1,
-                function() return value(key) or low end,
-                function(wanted) stage(key, wanted) end,
-                { width = 462, format = countLabel })
-        end
-        local model = app.CooldownModel
-        hudControls[#hudControls + 1] = { follow = follow, vertical = vertical, id = id,
-            max = range("max", L.hudMax, model.maxRange[1], model.maxRange[2]),
-            size = range("size", L.hudSize, model.sizeRange[1], model.sizeRange[2]),
-            gap = range("gap", L.hudGap, model.gapRange[1], model.gapRange[2]),
-            import = Controls:Button(body, title .. " · " .. L.hudImport, 250, function()
-                local component = groupComponent()
-                if component then self:Result(component:Import(id)) end
-                self:Update()
-            end),
-            empty = note(body, L.hudEmptyGroup, 0, 462),
-            reset = Controls:Button(body, title .. " · " .. L.hudResetPosition, 250, function()
-                local component = groupComponent()
-                if component then component:ResetPosition(id) end
-                self:Update()
-            end) }
-    end
-    -- Spell order: one pooled row per slot with up / down / other-group
-    -- buttons. These write at once through the same Model:Move as `/luma cds
-    -- move`, so a failed move changes nothing.
-    -- One row per storable slot: the model accepts up to `maxEntries`, and an
-    -- editor that stopped at 12 could not reorder or remove the rest.
-    local ORDER_ROWS = app.CooldownModel.maxEntries
-    local orderRows = {}
-    local function orderOf(id)
-        local ui = app.Store:Profile().ui
-        local group = ui and ui.cooldownGroups and ui.cooldownGroups.groups and ui.cooldownGroups.groups[id]
-        return group and group.order or {}
-    end
-    for _, groupID in ipairs(app.CooldownModel.GROUP_IDS) do
-        local id = groupID
-        -- Rows can move a spell to either of the other two groups.
-        local others = {}
-        for _, known in ipairs(app.CooldownModel.GROUP_IDS) do
-            if known ~= id then others[#others + 1] = known end
-        end
-        local other = others[1]
-        for slot = 1, ORDER_ROWS do
-            local rowFrame = CreateFrame("Frame", nil, body)
-            rowFrame:SetSize(462, 26)
-            local label = app.Theme:Text(rowFrame, 12)
-            label:SetPoint("LEFT", 4, 0)
-            label:SetWidth(280)
-            label:SetJustifyH("LEFT")
-            local record = { frame = rowFrame, label = label, group = id, slot = slot }
-            local function act(fn)
-                local component = groupComponent()
-                if component and component.running and not app.Store.readonly and record.spellID then
-                    fn(component, record.spellID)
-                end
-                self:Update()
-            end
-            record.up = Controls:Button(rowFrame, "▲", 30, function()
-                act(function(c, spell) c:MoveSpell(spell, id, record.slot - 1) end)
-            end)
-            record.down = Controls:Button(rowFrame, "▼", 30, function()
-                act(function(c, spell) c:MoveSpell(spell, id, record.slot + 1) end)
-            end)
-            record.swap = Controls:Button(rowFrame, "⇄", 30, function()
-                act(function(c, spell) c:MoveSpell(spell, other) end)
-            end)
-            record.up:SetPoint("RIGHT", rowFrame, "RIGHT", -72, 0)
-            record.down:SetPoint("RIGHT", rowFrame, "RIGHT", -38, 0)
-            record.swap:SetPoint("RIGHT", rowFrame, "RIGHT", -4, 0)
-            -- Mouse drag: drop on any listed row to take its group and slot.
-            rowFrame:EnableMouse(true)
-            rowFrame:RegisterForDrag("LeftButton")
-            rowFrame:SetScript("OnDragStart", function() record.dragging = true; rowFrame:SetAlpha(0.6) end)
-            rowFrame:SetScript("OnDragStop", function()
-                rowFrame:SetAlpha(1)
-                if not record.dragging then return end
-                record.dragging = false
-                local cursor = select(2, GetCursorPosition())
-                local scale = UIParent:GetEffectiveScale()
-                local y = app.Capabilities.Plain(cursor, "number")
-                if y and scale and scale > 0 then self:DropOrderRow(record, y / scale) end
-            end)
-            rowFrame:Hide()
-            orderRows[#orderRows + 1] = record
-        end
-    end
-    -- Finds the listed row under the cursor height and moves the dragged spell
-    -- there. Dropping on itself, outside every row, in combat or read-only
-    -- changes nothing.
-    function self:DropOrderRow(record, y)
-        local component = groupComponent()
-        if not component or not component.running or app.Store.readonly or not record.spellID then return false end
-        for _, target in ipairs(orderRows) do
-            if target ~= record and target.spellID and target.frame:IsShown() then
-                local top, bottom = target.frame:GetTop(), target.frame:GetBottom()
-                top, bottom = app.Capabilities.Plain(top, "number"), app.Capabilities.Plain(bottom, "number")
-                if top and bottom and y <= top and y >= bottom then
-                    local moved = component:MoveSpell(record.spellID, target.group, target.slot)
-                    self:Update()
-                    return moved
-                end
-            end
-        end
-        return false
-    end
-    local hudApply = Controls:Button(body, L.hudApply, 150, function()
-        local component = groupComponent()
-        if component then self:Result(component:ApplyDraft()) end
-        self:Update()
-    end)
-    local hudCancel = Controls:Button(body, L.hudCancel, 150, function()
-        local component = groupComponent()
-        if component then component:CancelDraft() end
-        self:Update()
-    end)
-    self.hudEditor = { heading = hudHeading, owned = hudOwned, buffs = hudBuffs,
-        groups = hudControls, apply = hudApply, cancel = hudCancel, orderRows = orderRows }
-    page.Update = function()
-        local ids = app.Layout:IDs()
-        local rows = self.layoutRows
-        local readonly = app.Store.readonly
-        local layoutText = string.format(L.layoutCount, #ids)
-        if app.Layout.previewWarnings and next(app.Layout.previewWarnings) then
-            layoutText = layoutText .. " · " .. L.presetOverlapHint
-        end
-        count:SetText(layoutText)
-        local rowTop = positionStatic() - noteHeight(count, 20)
-        for index, id in ipairs(ids) do
-            local row = rows[index]
-            if not row then row = createRow(); rows[index] = row end
-            row.id = id
-            row:ClearAllPoints()
-            row:SetPoint("TOPLEFT", 0, rowTop - (index - 1) * 34)
-            local entry = app.Layout.entries[id]
-            row.label:SetText(entry and entry.label or id)
-            row:SetShown(true)
-            row.button:SetEnabled(not readonly)
-        end
-        for index = #ids + 1, #rows do
-            rows[index].id = nil
-            rows[index]:SetShown(false)
-        end
-        self.layoutEmpty:ClearAllPoints()
-        self.layoutEmpty:SetPoint("TOPLEFT", 0, rowTop)
-        self.layoutEmpty:SetShown(#ids == 0)
-        move:SetEnabled(not readonly)
-        reset:SetEnabled(not readonly)
-        editMode:SetEnabled(not readonly)
-        for name, button in pairs(choices) do
-            button:SetEnabled(not readonly)
-            button:SetSelected(name == selectedPreset)
-        end
-        preview:SetEnabled(not readonly)
-        apply:SetEnabled(not readonly)
-        cancel:SetEnabled(not readonly and app.Layout.previewName ~= nil)
-        undo:SetEnabled(not readonly and app.Layout.presetSnapshot ~= nil)
-        local rowsHeight = #ids > 0 and #ids * 34 or noteHeight(self.layoutEmpty, 20)
-        local scaleTop = rowTop - rowsHeight - 12
-        for index, control in ipairs(barScales) do
-            local entry = app.Layout.entries["actionBar" .. index]
-            local available = entry and not entry.hidden
-            control:SetShown(available == true)
-            control:SetEnabled(available == true and not readonly)
-            if available then
-                control:ClearAllPoints()
-                control:SetPoint("TOPLEFT", 0, scaleTop)
-                control:Update()
-                scaleTop = scaleTop - 62
-            end
-        end
-        -- Central HUD block below the bar scales.
-        local component = groupComponent()
-        local live = component and component.running == true
-        hudHeading:ClearAllPoints(); hudHeading:SetPoint("TOPLEFT", 0, scaleTop - 4)
-        scaleTop = scaleTop - 4 - noteHeight(hudHeading, 28)
-        hudOwned:SetShown(live)
-        hudOwned:SetEnabled(live and not readonly)
-        if live then
-            hudOwned:ClearAllPoints(); hudOwned:SetPoint("TOPLEFT", 0, scaleTop)
-            hudOwned:Update(component)
-            scaleTop = scaleTop - 38
-        end
-        hudBuffs:SetShown(live)
-        hudBuffs:SetEnabled(live and not readonly)
-        if live then
-            hudBuffs:ClearAllPoints(); hudBuffs:SetPoint("TOPLEFT", 0, scaleTop)
-            hudBuffs:Update(component)
-            scaleTop = scaleTop - 38
-        end
-        for _, group in ipairs(hudControls) do
-            group.follow:SetShown(live)
-            group.follow:SetEnabled(live and not readonly)
-            if live then
-                group.follow:ClearAllPoints(); group.follow:SetPoint("TOPLEFT", 0, scaleTop)
-                group.follow:Update(component)
-                scaleTop = scaleTop - 38
-            end
-            for _, key in ipairs({ "vertical", "max", "size", "gap" }) do
-                local control = group[key]
-                control:SetShown(live)
-                control:SetEnabled(live and not readonly)
-                if live then
-                    control:ClearAllPoints()
-                    control:SetPoint("TOPLEFT", 0, scaleTop)
-                    control:Update()
-                    scaleTop = scaleTop - (key == "vertical" and 38 or 62)
-                end
-            end
-            -- In follow mode the stored list is empty on purpose; the note then
-            -- explains where the spells come from instead of calling the group
-            -- empty.
-            local auto = (app.CooldownModel:Normalize(
-                app.Store:Profile().ui.cooldownGroups).groups[group.id] or {}).auto ~= false
-            local empty = live and (auto or #orderOf(group.id) == 0)
-            group.empty:SetText(auto and L.hudAutoGroup or L.hudEmptyGroup)
-            group.empty:SetShown(empty == true)
-            group.import:SetShown(live)
-            group.import:SetEnabled(live and not readonly)
-            if empty then
-                group.empty:ClearAllPoints(); group.empty:SetPoint("TOPLEFT", 0, scaleTop)
-                scaleTop = scaleTop - noteHeight(group.empty, 20)
-            end
-            if live then
-                group.import:ClearAllPoints(); group.import:SetPoint("TOPLEFT", 0, scaleTop)
-                scaleTop = scaleTop - 38
-            end
-            group.reset:SetShown(live)
-            group.reset:SetEnabled(live and not readonly)
-            if live then
-                group.reset:ClearAllPoints(); group.reset:SetPoint("TOPLEFT", 0, scaleTop)
-                scaleTop = scaleTop - 40
-            end
-        end
-        for _, record in ipairs(orderRows) do
-            local spellID = live and orderOf(record.group)[record.slot] or nil
-            record.spellID = spellID
-            record.frame:SetShown(spellID ~= nil)
-            if spellID then
-                local info = _G.C_Spell and _G.C_Spell.GetSpellInfo and _G.C_Spell.GetSpellInfo(spellID)
-                local name = info and app.Capabilities.Plain(info.name, "string") or nil
-                record.label:SetText(string.format("%s · %s", groupTitles[record.group] or record.group, name or tostring(spellID)))
-                record.up:SetEnabled(not readonly and record.slot > 1)
-                record.down:SetEnabled(not readonly and record.slot < #orderOf(record.group))
-                record.swap:SetEnabled(not readonly)
-                record.frame:ClearAllPoints()
-                record.frame:SetPoint("TOPLEFT", 0, scaleTop)
-                scaleTop = scaleTop - 28
-            end
-        end
-        local pending = live and component:HasDraft()
-        hudApply:SetShown(live); hudCancel:SetShown(live)
-        hudApply:SetEnabled(pending and not readonly)
-        hudCancel:SetEnabled(pending == true)
-        if live then
-            hudApply:ClearAllPoints(); hudApply:SetPoint("TOPLEFT", 0, scaleTop)
-            hudCancel:ClearAllPoints(); hudCancel:SetPoint("TOPLEFT", 164, scaleTop)
-            scaleTop = scaleTop - 40
-        end
-        body:SetHeight(math.max(420, -scaleTop + 6))
-        scroll:UpdateRange()
-    end
-end
-
-function SettingsUI:BuildProfiles(page)
-    note(page, L.profileHint, -2, 462)
-    local readonlyNote = note(page, L.readonlyNote, -30, 462)
+    page.scroll = scroll
+    note(body, L.profileHint, -2, 462)
+    local readonlyNote = note(body, L.readonlyNote, -30, 462)
     readonlyNote:Hide()
     self.readonlyNote = readonlyNote
-    self.currentLabel = note(page, "", -64)
-    note(page, L.profileName, -92)
-    local input = Controls:Input(page, 482)
+    self.currentLabel = note(body, "", -64)
+    note(body, L.profileName, -92)
+    local input = Controls:Input(body, 482)
     input:SetPoint("TOPLEFT", 6, -114)
     local function create(copy)
         self:Result(app.Store:Create(input:GetText(), copy))
@@ -725,9 +209,9 @@ function SettingsUI:BuildProfiles(page)
         self.confirmDelete, self.confirmReset = nil, nil
         self:Update()
     end
-    local blank = Controls:Button(page, L.create, 150, function() create(false) end)
+    local blank = Controls:Button(body, L.create, 150, function() create(false) end)
     blank:SetPoint("TOPLEFT", 0, -152)
-    local duplicate = Controls:Button(page, L.copy, 150, function() create(true) end)
+    local duplicate = Controls:Button(body, L.copy, 150, function() create(true) end)
     duplicate:SetPoint("TOPLEFT", 164, -152)
     self.createButton, self.duplicateButton = blank, duplicate
     -- The value itself is only committed by Store:Create; the controls show the
@@ -743,7 +227,7 @@ function SettingsUI:BuildProfiles(page)
     self.profileInput = input
     self.profileRows = {}
     for i = 1, 5 do
-        local row = CreateFrame("Frame", nil, page)
+        local row = CreateFrame("Frame", nil, body)
         row:SetSize(490, 28)
         row:SetPoint("TOPLEFT", 0, -196 - (i - 1) * 33)
         row.name = app.Theme:TextRole(row, "label")
@@ -766,17 +250,17 @@ function SettingsUI:BuildProfiles(page)
         row.delete:SetPoint("RIGHT")
         self.profileRows[i] = row
     end
-    local previous = Controls:Button(page, "<", 42, function()
+    local previous = Controls:Button(body, "<", 42, function()
         self.profileOffset = math.max(0, self.profileOffset - 5)
         self:Update()
     end)
     previous:SetPoint("TOPLEFT", 0, -360)
-    local following = Controls:Button(page, ">", 42, function()
+    local following = Controls:Button(body, ">", 42, function()
         if self.profileOffset + 5 < #app.Store:Names() then self.profileOffset = self.profileOffset + 5 end
         self:Update()
     end)
     following:SetPoint("TOPLEFT", 52, -360)
-    local reset = Controls:Button(page, L.resetProfile, 230, function()
+    local reset = Controls:Button(body, L.resetProfile, 230, function()
         if self.confirmReset then
             self.confirmReset = nil
             self:Result(app.Store:Reset(false))
@@ -786,6 +270,8 @@ function SettingsUI:BuildProfiles(page)
         end
     end)
     reset:SetPoint("TOPRIGHT", 0, -360)
+    section(body, L.sectionPresets, -402)
+    local presets = self:BuildPresets(page, body)
     page.Update = function()
         self.currentLabel:SetText(L.active .. ": " .. app.Store.current)
         local names = app.Store:Names()
@@ -809,6 +295,9 @@ function SettingsUI:BuildProfiles(page)
         reset:SetEnabled(not readonly)
         syncCreate()
         reset.text:SetText(self.confirmReset and L.resetConfirm or L.resetProfile)
+        local bottom = presets(-424)
+        body:SetHeight(math.max(420, -bottom + 6))
+        scroll:UpdateRange()
     end
 end
 
@@ -1032,42 +521,75 @@ function SettingsUI:Build()
     escape:SetPoint("TOPRIGHT", close, "TOPLEFT", -6, 0)
     escape.pulse = true
     self.gameMenuButton = escape
+    -- The title bar action: unlock the HUD for on-screen editing from any page.
+    -- It calls the same mode as a module page's "Position" button.
+    local unlock = Controls:Button(frame, L.unlock, 74, function() self:Unlock() end)
+    unlock:SetPoint("TOPRIGHT", escape, "TOPLEFT", -6, 0)
+    unlock.pulse = true
+    self.unlockButton = unlock
     self.rule = app.Theme:Rule(frame)
     self.rule:SetPoint("TOPLEFT", theme:Space("lg") + 6, -62)
     self.rule:SetSize(708, 2)
-    -- The navigation sits on an embedded surface instead of five separate
-    -- outlined rows: one quiet region, one accent line for the active page.
+    -- The navigation sits on an embedded surface: overview, one entry per
+    -- module, then profiles. It scrolls, because the module list is longer than
+    -- the window is tall at small UI scales.
     local nav = CreateFrame("Frame", nil, frame, "BackdropTemplate")
     nav:SetPoint("TOPLEFT", theme:Space("md") + 4, -74)
-    nav:SetSize(200, 216)
+    nav:SetSize(200, 440)
     nav:EnableMouse(false)
     self.navPanel = nav
+    local navScroll = Controls:Scroll(frame, 176, 424)
+    navScroll:SetPoint("TOPLEFT", nav, "TOPLEFT", 6, -8)
+    local navBody = CreateFrame("Frame", nil, navScroll)
+    navScroll:SetScrollChild(navBody)
+    self.navScroll, self.navBody = navScroll, navBody
     self.navigation = {}
-    for i, key in ipairs({ "general", "layout", "modules", "profiles", "diagnostics" }) do
-        local button = Controls:Navigation(frame, L[key], 176, function() self:Select(key) end)
-        button:SetPoint("TOPLEFT", 24, -84 - (i - 1) * 42)
+    self.navOrder = { "overview" }
+    for _, entry in ipairs(self.registry) do self.navOrder[#self.navOrder + 1] = entry.id end
+    self.navOrder[#self.navOrder + 1] = "profiles"
+    local labels = { overview = L.overview, profiles = L.profiles }
+    for _, entry in ipairs(self.registry) do labels[entry.id] = L[entry.label] end
+    for i, key in ipairs(self.navOrder) do
+        local button = Controls:Navigation(navBody, labels[key], 170, function() self:Select(key) end)
+        button:SetPoint("TOPLEFT", 0, -(i - 1) * 32)
         self.navigation[key] = button
-        local page = CreateFrame("Frame", nil, frame)
-        page:SetPoint("TOPLEFT", 228, -72)
-        page:SetSize(490, 424)
-        page:Hide()
-        self.pages[key] = page
     end
-    self:BuildGeneral(self.pages.general)
-    self:BuildLayout(self.pages.layout)
-    self:BuildModules(self.pages.modules)
-    self:BuildProfiles(self.pages.profiles)
-    self:BuildDiagnostics(self.pages.diagnostics)
+    navBody:SetSize(170, #self.navOrder * 32 + 4)
+    navScroll:UpdateRange()
     self.footer = note(frame, "", -541, 708)
     self.footer:ClearAllPoints()
     self.footer:SetPoint("BOTTOMLEFT", 26, 16)
     self:Select(self.active)
 end
 
+-- Pages build on first visit: the window opens with one page's worth of
+-- controls instead of every module's, and a page that fails to build is
+-- reported without taking the window with it.
+function SettingsUI:EnsurePage(key)
+    if self.pages[key] then return self.pages[key] end
+    local page = CreateFrame("Frame", nil, self.frame)
+    page:SetPoint("TOPLEFT", 228, -72)
+    page:SetSize(490, 424)
+    page:Hide()
+    self.pages[key] = page
+    local ok
+    if key == "overview" then ok = app:Call("settings/overview", self.BuildOverview, self, page)
+    elseif key == "profiles" then ok = app:Call("settings/profiles", self.BuildProfiles, self, page)
+    elseif key == "diagnostics" then ok = app:Call("settings/diagnostics", self.BuildDiagnostics, self, page)
+    elseif self.moduleByID[key] then ok = app:Call("settings/module", self.BuildModule, self, page, self.moduleByID[key])
+    end
+    if not ok then page.failed = true end
+    return page
+end
+
 function SettingsUI:Select(key)
+    key = PAGE_ALIAS[key] or key
+    if key ~= "diagnostics" and key ~= "overview" and key ~= "profiles" and not self.moduleByID[key] then
+        key = "overview"
+    end
     local previous = self.pages[self.active]
-    self.active = self.pages[key] and key or "general"
-    local page = self.pages[self.active]
+    self.active = key
+    local page = self:EnsurePage(key)
     -- Each page keeps its own scroll position for the session; switching pages
     -- never repositions another page.
     if previous and previous ~= page then
@@ -1110,13 +632,14 @@ function SettingsUI:Update()
     if self.navPanel then app.Surface:Plate(self.navPanel, "inset") end
     local c = app.Theme:Accent()
     self.rule:SetColorTexture(c[1], c[2], c[3])
+    local highlighted = self.active == "diagnostics" and "overview" or self.active
     for key, button in pairs(self.navigation) do
         -- Selected state is part of the control's own resolution, so a mouse
         -- leave can never reset the current page's accent (R03).
-        button:SetSelected(key == self.active)
+        button:SetSelected(key == highlighted)
     end
     local page = self.pages[self.active]
-    if page and page.Update then page.Update() end
+    if page and page.Update and not page.failed then app:Call("settings/update", page.Update) end
     if page then refreshStateful(page) end
     local text = app.Store.readonly and L.readonlyNote
         or (app.Queue:Count() > 0 and L.queued or L.about)
@@ -1151,6 +674,12 @@ function SettingsUI:Close()
         if self.wantsOpen then return end
         if self.frame and self.frame:IsShown() then self.frame:Hide() end
     end)
+end
+
+-- The title-bar action. Phase 05 turns this into the on-screen unlock mode;
+-- the settings window stays reachable through the same Toggle.
+function SettingsUI:Unlock()
+    return app.Unlock:Toggle({ page = self.active })
 end
 
 function SettingsUI:Toggle(page)

@@ -85,10 +85,13 @@ function app:StopComponent(component)
     component:Cleanup()
 end
 
+app.BASELINE_OWNERSHIP = { "minimap", "questList", "questTracker", "dataStrip", "experience",
+    "characterWindow", "systemWindows", "tooltip", "damageMeter", "combatText" }
+
 function app:Reconcile()
     if not self.ready then return end
     self.Queue:Run("runtime/reconcile", function()
-        if self.Layout.editing then self.Layout:SetEditing(false) end
+        if self.Layout.editing and not self.Layout.draft then self.Layout:SetEditing(false) end
         local profile, visiting, resolved = self.Store:Profile(), {}, {}
         local function activate(id)
             if resolved[id] ~= nil then return resolved[id] end
@@ -129,6 +132,24 @@ function app:Reconcile()
             return resolved[id]
         end
         for _, id in ipairs(self.order) do activate(id) end
+        -- 015 phases 12/13: windows and world HUD parts without their own audit
+        -- still report who is on screen, from the component state alone. A part
+        -- that publishes its own record is never overwritten.
+        if self.Ownership then
+            for _, id in ipairs(self.BASELINE_OWNERSHIP) do
+                local component = self.components[id]
+                if component then
+                    local record = self.Ownership:Get(id)
+                    if record == nil or record.baseline then
+                        local running = component.running == true
+                        self.Ownership:Set(id, { intent = profile.modules[id] == true and "owned" or "native",
+                            active = running and "owned" or "native", evidence = "none",
+                            reason = (not running) and (component.status or "disabled") or nil })
+                        self.Ownership:Get(id).baseline = true
+                    end
+                end
+            end
+        end
         self.Layout:ApplyAll()
         self:Publish("RUNTIME_UPDATED")
     end)

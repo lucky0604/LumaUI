@@ -217,7 +217,7 @@ local function build(self)
             local window = app.components.characterWindow
             if window and window.running then window:Toggle() end
         end },
-        { text = app.L.drawerLayout, run = function() app.Layout:Toggle() end },
+        { text = app.L.drawerLayout, run = function() app.Unlock:Toggle() end },
         { text = app.L.drawerCalendar, run = function()
             if type(ToggleCalendar) == "function" then ToggleCalendar() end
         end },

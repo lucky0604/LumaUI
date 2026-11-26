@@ -99,6 +99,76 @@ function Items.Use(item)
     C_Container.UseContainerItem(item.bag, item.slot)
 end
 
+-- The cursor carries an item: the client's own answer, never a guess.
+function Items.CursorHasItem()
+    if type(GetCursorInfo) ~= "function" then return false end
+    local ok, kind = pcall(GetCursorInfo)
+    return ok and Plain(kind, "string") == "item"
+end
+
+-- Dropping on the window itself (not on a cell) puts the cursor item into the
+-- first empty slot of the given containers. The client refuses what a container
+-- cannot hold, so a reagent-only bag simply is skipped by its own answer.
+function Items.DropFirstFree(bags)
+    if not Items.CursorHasItem() then return false end
+    if not Items.Actions() then app:Print(L.itemActionsUnavailable); return false end
+    for _, bag in ipairs(bags or {}) do
+        local ok, slots = pcall(C_Container.GetContainerNumSlots, bag)
+        slots = ok and Plain(slots, "number") or 0
+        for slot = 1, slots do
+            if not Items.Read(bag, slot) then
+                C_Container.PickupContainerItem(bag, slot)
+                return true
+            end
+        end
+    end
+    app:Print(L.bagFull)
+    return false
+end
+
+-- Equipped-bag slots (bag bar): click with an item on the cursor puts it in
+-- that slot, otherwise picks the bag up. Hidden when the client lacks the calls.
+function Items.BagSlotsAvailable()
+    return type(C_Container) == "table" and type(C_Container.ContainerIDToInventoryID) == "function"
+        and type(PutItemInBag) == "function" and type(PickupBagFromSlot) == "function"
+        and type(GetInventoryItemTexture) == "function"
+end
+
+function Items.BagSlotRow(frame, x, y)
+    local row = { buttons = {} }
+    local count = (Plain(NUM_BAG_SLOTS, "number") or 4) + 1
+    for index = 1, count do
+        local button = Items.Cell(frame)
+        button:SetSize(30, 30)
+        button:SetPoint("BOTTOMLEFT", x + (index - 1) * 34, y)
+        button.bagID = index
+        local function swap(self)
+            if InCombatLockdown() then app:Print(L.bagSwapCombat); return end
+            local ok, inventoryID = pcall(C_Container.ContainerIDToInventoryID, self.bagID)
+            inventoryID = ok and Plain(inventoryID, "number") or nil
+            if not inventoryID then return end
+            if Items.CursorHasItem() then PutItemInBag(inventoryID) else PickupBagFromSlot(inventoryID) end
+        end
+        button:SetScript("OnClick", swap)
+        button:SetScript("OnReceiveDrag", swap)
+        row.buttons[index] = button
+    end
+    function row:Refresh()
+        local available = Items.BagSlotsAvailable()
+        for _, button in ipairs(self.buttons) do
+            button:SetShown(available)
+            if available then
+                local ok, inventoryID = pcall(C_Container.ContainerIDToInventoryID, button.bagID)
+                inventoryID = ok and Plain(inventoryID, "number") or nil
+                local texture = inventoryID and select(2, pcall(GetInventoryItemTexture, "player", inventoryID)) or nil
+                button.icon:SetTexture(Plain(texture, "number") or Plain(texture, "string"))
+                button.icon:SetShown(texture ~= nil)
+            end
+        end
+    end
+    return row
+end
+
 -- A 40x40 cell with its icon, stack count, lock dimming and junk mark. The
 -- modules attach their own click and drag scripts; the cell only owns hover.
 function Items.Cell(parent)

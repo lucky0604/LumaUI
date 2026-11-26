@@ -324,10 +324,19 @@ local function takeoverWanted()
 end
 
 local function syncNative(self)
-    if NATIVE_PARITY_VALIDATED and takeoverWanted() and anyPartyMember() and privateCovered(self) then
+    local reason
+    if not NATIVE_PARITY_VALIDATED then reason = "unvalidated"
+    elseif not takeoverWanted() then reason = "off"
+    elseif not anyPartyMember() then reason = "nomember"
+    elseif not privateCovered(self) then reason = "private" end
+    if not reason then
         hideNative(self)
     else
         restoreNative(self)
+    end
+    if app.Ownership then
+        app.Ownership:Set("partyFrames.native", { intent = takeoverWanted() and "owned" or "native",
+            active = reason and "native" or "owned", evidence = "simulated", reason = reason })
     end
 end
 
@@ -401,6 +410,7 @@ component = app:RegisterComponent({ id = "partyFrames", label = "partyFrames", d
             frame:Hide()
         end
         app.Queue:Run(NATIVE_JOB, function() restoreNative(self) end)
+        if app.Ownership then app.Ownership:Clear("partyFrames.native") end
     end,
 })
 

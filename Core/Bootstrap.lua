@@ -36,7 +36,7 @@ function app:WriteDiagnostics()
     local lines = self:Collect(function()
         local settings = self.Settings
         if settings and not settings.frame then settings:Build() end
-        local page = settings and settings.pages and settings.pages.diagnostics
+        local page = settings and settings:EnsurePage("diagnostics")
         if page then
             page.Update()
             local function append(text)

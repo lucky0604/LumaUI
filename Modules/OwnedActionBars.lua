@@ -202,6 +202,41 @@ local function createBar(self, id)
     return bar
 end
 
+-- The own main bar only draws the base page. While the client pages the main
+-- bar (another page, a stance/stealth bonus bar, vehicle, override, possess or
+-- temporary shapeshift bar) the client's bar is the authority: ours steps aside
+-- and the native bar comes back. Each answer is a plain boolean/number or is
+-- treated as "unknown", which also falls back to native.
+local PAGE_CHECKS = {
+    { "vehicle", "HasVehicleActionBar" }, { "override", "HasOverrideActionBar" },
+    { "possess", "IsPossessBarVisible" }, { "shapeshift", "HasTempShapeshiftActionBar" },
+    { "bonus", "GetBonusBarOffset", true }, { "page", "GetActionBarPage", "page" },
+}
+
+local function pagedReason()
+    for _, check in ipairs(PAGE_CHECKS) do
+        local fn = rawget(_G, check[2])
+        if type(fn) == "function" then
+            local ok, value = pcall(fn)
+            if not ok then return "unknown" end
+            if check[3] == "page" then
+                local page = plainNumber(value)
+                if page == nil then return "unknown" end
+                if page > 1 then return check[1] end
+            elseif check[3] then
+                local offset = plainNumber(value)
+                if offset == nil then return "unknown" end
+                if offset > 0 then return check[1] end
+            else
+                local flag = app.Capabilities.Plain(value, "boolean")
+                if flag == nil then return "unknown" end
+                if flag then return check[1] end
+            end
+        end
+    end
+    return nil
+end
+
 local function place(self, bar, cfg, originY)
     local plan = Model:Plan(cfg)
     bar.plan = plan
@@ -230,6 +265,19 @@ local function render(self)
     for _, id in ipairs(Model.BARS) do
         local bar = createBar(self, id)
         local cfg = normalized.bars[id]
+        local reason = id == "bar1" and pagedReason() or nil
+        if id == "bar1" then self.paged = reason end
+        if reason then
+            bar.frame:Hide()
+            self:RestoreNative(id)
+            if app.Ownership then
+                app.Ownership:Set("ownedBars.bar1", { intent = "owned", active = "native",
+                    evidence = "simulated", reason = reason })
+            end
+        else
+        if id == "bar1" and app.Ownership then
+            app.Ownership:Set("ownedBars.bar1", { intent = "owned", active = "owned", evidence = "simulated" })
+        end
         originY = originY + place(self, bar, cfg, originY) + 4
         bar.frame:Show()
         for index = 1, 12 do
@@ -237,6 +285,7 @@ local function render(self)
                 RANGE[id][1] + index - 1)
         end
         self:HideNative(id)
+        end
     end
     ensureTicker(self)
     if app.Ownership then
@@ -261,6 +310,13 @@ component = app:RegisterComponent({ id = "ownedBars", label = "ownedBars", defau
         self:Listen("ACTIONBAR_UPDATE_STATE", function(current)
             if config().enabled then app:Call("ownedBars/paint", current.Paint, current) end
         end)
+        for _, event in ipairs({ "ACTIONBAR_PAGE_CHANGED", "UPDATE_BONUS_ACTIONBAR",
+            "UPDATE_VEHICLE_ACTIONBAR", "UPDATE_OVERRIDE_ACTIONBAR", "UPDATE_SHAPESHIFT_FORM",
+            "UPDATE_POSSESS_BAR", "UPDATE_STEALTH" }) do
+            self:Listen(event, function(current)
+                if config().enabled then app:Call("ownedBars/page", render, current) end
+            end)
+        end
         self:Listen("PLAYER_ENTERING_WORLD", function(current)
             if config().enabled then app:Call("ownedBars/render", render, current) end
         end)
@@ -308,11 +364,18 @@ function component:HideNative(id)
     end)
 end
 
-function component:RestoreNative()
+function component:RestoreNative(only)
     -- Clear the record before scheduling: the queue may run immediately, and a
     -- job that still sees its own entry would skip the restore.
     local pending = self.native
-    self.native = nil
+    if only then
+        local record = pending and pending[only]
+        if not record then return end
+        pending[only] = nil
+        pending = { [only] = record }
+    else
+        self.native = nil
+    end
     for id, record in pairs(pending or {}) do
         local frame = record.frame
         if frame and record.shown then
@@ -352,8 +415,9 @@ end
 
 function component:Diagnose()
     local cfg = Model:Normalize(config())
-    app:Print(string.format("ownedBars: running=%s enabled=%s bindings=native paging=native",
-        self.running and "yes" or "no", cfg.enabled and "yes" or "no"))
+    app:Print(string.format("ownedBars: running=%s enabled=%s bindings=native paging=%s",
+        self.running and "yes" or "no", cfg.enabled and "yes" or "no",
+        self.paged and ("native(" .. self.paged .. ")") or "base-page"))
     for _, id in ipairs(Model.BARS) do
         local bar = cfg.bars[id]
         local plan = Model:Plan(bar)

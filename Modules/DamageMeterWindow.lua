@@ -35,8 +35,36 @@ local function text(value)
     return app.Capabilities.Plain(value, "string")
 end
 
+-- Opt-in official source (015 phase 13, UNVERIFIED on a real client). The
+-- field names below are a best guess; every read is plain-checked and any
+-- missing piece yields no data, so a wrong guess shows nothing instead of
+-- wrong numbers. Off by default (`ui.meterOfficial`); an external provider wins.
+local function officialWanted()
+    return app.Store:Profile().ui.meterOfficial == true
+        and type(_G.C_DamageMeter) == "table"
+        and type(C_DamageMeter.GetCombatSessionFromType) == "function"
+        and rawget(_G, "Enum") ~= nil and type(Enum.DamageMeterSessionType) == "table"
+        and type(Enum.DamageMeterType) == "table"
+end
+
+local function officialProvider()
+    local ok, session = pcall(C_DamageMeter.GetCombatSessionFromType,
+        Enum.DamageMeterSessionType.Current, Enum.DamageMeterType.DamageDone)
+    if not ok or type(session) ~= "table" or type(session.combatSources) ~= "table" then return nil end
+    local rows = {}
+    for _, source in ipairs(session.combatSources) do
+        if type(source) == "table" then
+            rows[#rows + 1] = { name = source.name, className = source.classFilename,
+                amount = source.totalAmount }
+        end
+    end
+    return { title = app.L.meterSample, total = session.totalAmount, rows = rows }
+end
+
 local function provider()
-    return app.DamageMeterProvider
+    if type(app.DamageMeterProvider) == "function" then return app.DamageMeterProvider end
+    if officialWanted() then return officialProvider end
+    return nil
 end
 
 -- Normalizes one provider result. Rows keep their order; `percent` is computed
@@ -166,7 +194,7 @@ local function draw(self)
 end
 
 component = app:RegisterComponent({ id = ID, label = ID, defaultEnabled = false,
-    Supported = function() return type(app.DamageMeterProvider) == "function" end,
+    Supported = function() return provider() ~= nil end,
     Enable = function(self)
         build(self)
         draw(self)

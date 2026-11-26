@@ -15,7 +15,7 @@ local module = app:RegisterComponent({ id = "launcher", label = "launcher",
             -- minimap glyph lives on its own field so it does not shadow it.
             self.icon, self.button = icon, button
             button:SetScript("OnClick", function(_, which)
-                if which == "RightButton" then app.Layout:Toggle() else app.Settings:Toggle() end
+                if which == "RightButton" then app.Unlock:Toggle() else app.Settings:Toggle() end
             end)
             button:SetScript("OnEnter", function()
                 GameTooltip:SetOwner(button, "ANCHOR_LEFT")
