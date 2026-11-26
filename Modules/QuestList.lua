@@ -1300,11 +1300,22 @@ end
 -- and a missing minimap keeps the normal placement.
 local function placeBelowMap(self)
     local profile = app.Store:Profile()
-    if profile.ui.questBelowMap ~= true or profile.positions.questList then return end
-    local map = rawget(_G, "Minimap")
-    if not self.frame or not map then return end
-    self.frame:ClearAllPoints()
-    self.frame:SetPoint("TOPRIGHT", map, "BOTTOMRIGHT", 0, -16)
+    if not self.frame then return end
+    -- A saved position (manual or from unlock mode) always wins.
+    if profile.positions.questList then return end
+    if profile.ui.questBelowMap == true then
+        local map = rawget(_G, "Minimap")
+        if not map then return end
+        self.frame:ClearAllPoints()
+        self.frame:SetPoint("TOPRIGHT", map, "BOTTOMRIGHT", 0, -16)
+        return
+    end
+    -- The switch was turned off (or the map is missing): go back to the entry's
+    -- own default instead of leaving the panel where the old rule put it.
+    if self.placing then return end
+    self.placing = true
+    app.Layout:Apply("questList")
+    self.placing = nil
 end
 
 local function nativeFrame()

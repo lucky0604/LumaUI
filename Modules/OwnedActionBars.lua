@@ -350,13 +350,43 @@ local function nativeName(id)
     return "MultiBarBottomRight"
 end
 
+-- The client's own placement and look are recorded before the first write, so a
+-- stopped or unvalidated own bar can hand the frame back exactly: parent,
+-- anchors, scale, alpha and shown state. Without this a refused handover left
+-- the client's bar at LumaUI's scale or anchor.
+local function recordNative(frame)
+    local record = {
+        frame = frame, parent = frame:GetParent(), scale = frame:GetScale(), alpha = frame:GetAlpha(),
+        points = {}, shown = app.Capabilities.Plain(frame:IsShown(), "boolean"),
+    }
+    for index = 1, 4 do
+        local ok, point, relative, relativePoint, x, y = pcall(frame.GetPoint, frame, index)
+        if not ok or not point then break end
+        record.points[#record.points + 1] = { point, relative, relativePoint, x, y }
+    end
+    return record
+end
+
+local function restoreNative(record)
+    local frame = record and record.frame
+    if not frame then return end
+    if record.parent then pcall(frame.SetParent, frame, record.parent) end
+    pcall(frame.ClearAllPoints, frame)
+    for _, point in ipairs(record.points or {}) do
+        pcall(frame.SetPoint, frame, point[1], point[2], point[3], point[4], point[5])
+    end
+    pcall(frame.SetScale, frame, record.scale or 1)
+    pcall(frame.SetAlpha, frame, record.alpha or 1)
+    if record.shown == false then pcall(frame.Hide, frame) else pcall(frame.Show, frame) end
+end
+
 function component:HideNative(id)
     local name = nativeName(id)
     local frame = _G[name]
     if not frame then return end
     self.native = self.native or {}
     if self.native[id] then return end
-    self.native[id] = { frame = frame, shown = frame:IsShown() }
+    self.native[id] = recordNative(frame)
     app.Queue:Run(HIDE_JOB .. "/" .. id, function()
         if not self.running then return end
         if not (app.Store:Profile().ui.ownedBars.enabled == true) then return end
@@ -377,13 +407,10 @@ function component:RestoreNative(only)
         self.native = nil
     end
     for id, record in pairs(pending or {}) do
-        local frame = record.frame
-        if frame and record.shown then
-            app.Queue:Run(HIDE_JOB .. "/" .. id, function()
-                if self.native and self.native[id] then return end
-                pcall(frame.Show, frame)
-            end)
-        end
+        app.Queue:Run(HIDE_JOB .. "/" .. id, function()
+            if self.native and self.native[id] then return end
+            restoreNative(record)
+        end)
     end
 end
 

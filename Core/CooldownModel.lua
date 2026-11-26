@@ -20,7 +20,10 @@ Model.GROUP_IDS = { "essential", "utility", "buffs" }
 Model.maxEntries = 24
 Model.sizeRange = { 18, 40 }
 Model.gapRange = { 0, 8 }
+-- `max` is icons per row (its historical meaning); `limit` is how many entries
+-- of the list are drawn at all, so a group can show 9 per row but only 6 total.
 Model.maxRange = { 1, 15 }
+Model.limitRange = { 1, 24 }
 
 -- `kind` says where a group's live state comes from: "cooldown" groups read the
 -- spell's cooldown/charges, "buff" reads the player's aura. It is not a style
@@ -89,6 +92,9 @@ function Model:Normalize(input)
             size = whole(source.size, defaults.size, self.sizeRange[1], self.sizeRange[2]),
             gap = whole(source.gap, defaults.gap, self.gapRange[1], self.gapRange[2]),
             max = whole(source.max, defaults.max, self.maxRange[1], self.maxRange[2]),
+            -- No total cap by default: an older profile keeps drawing exactly
+            -- the list it had until the player sets a limit.
+            limit = whole(source.limit, self.maxEntries, self.limitRange[1], self.limitRange[2]),
             vertical = source.vertical == true,
             -- `auto` is the shipped mode; a manual add/remove/reorder turns it
             -- off, and `import` turns it back on (a copy no longer follows).

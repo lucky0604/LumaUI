@@ -30,6 +30,14 @@ function Frame:GetSize() return self.width or 100, self.height or 30 end
 function Frame:SetCooldown(start, duration)
     self.cooldownStart, self.cooldownDuration = start, duration
 end
+-- The client's duration-object entry point. The stub records the object and the
+-- flag it was called with so a test can prove the object was passed through
+-- untouched; a test may replace it with a refusal.
+function Frame:SetCooldownFromDurationObject(duration, clearIfZero)
+    -- Documented second argument: clear the sweep when the duration is zero.
+    self.durationObject, self.durationClearIfZero = duration, clearIfZero
+    return true
+end
 
 function Frame:SetPoint(...) restricted(self); self.point = { ... } end
 function Frame:ClearAllPoints() restricted(self); self.point = nil end
@@ -187,7 +195,16 @@ function Frame:SetMinMaxValues(minimum, maximum) self.minimum, self.maximum = mi
 function Frame:SetBackdrop(spec) self.backdrop = spec end
 function Frame:SetBackdropColor(...) self.backgroundColor = { ... } end
 function Frame:SetBackdropBorderColor(...) self.borderColor = { ... } end
-function Frame:SetAlpha(alpha) self.alpha = alpha end
+-- The live client only accepts a finite number here. A stub that stored
+-- whatever it was given hid a real defect: a boolean `true` reached SetAlpha
+-- from the unlock inspector and no test noticed. Anything else is a hard error
+-- so the whole suite reports it.
+function Frame:SetAlpha(alpha)
+    if type(alpha) ~= "number" or alpha ~= alpha or alpha == math.huge or alpha == -math.huge then
+        error("SetAlpha expects a finite number, got " .. type(alpha) .. " (" .. tostring(alpha) .. ")", 2)
+    end
+    self.alpha = alpha
+end
 function Frame:GetAlpha() return self.alpha or 1 end
 function Frame:SetDrawLayer(layer) self.drawLayer = layer end
 function Frame:SetTexture(texture) self.texture = texture; self.atlas = nil end
@@ -244,7 +261,25 @@ function Frame:CreateAnimationGroup()
     end
     return group
 end
-for _, name in ipairs({ "SetClampedToScreen", "SetMovable", "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetJustifyH", "SetJustifyV", "SetStatusBarTexture", "SetOrientation", "SetValueStep", "SetObeyStepOnDrag", "SetThumbTexture", "SetAutoFocus", "SetMaxLetters", "RegisterForClicks", "SetBagItem", "SetTextInsets" }) do Frame[name] = noop end
+for _, name in ipairs({ "SetClampedToScreen", "SetMovable", "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetJustifyV", "SetStatusBarTexture", "SetOrientation", "SetValueStep", "SetObeyStepOnDrag", "SetThumbTexture", "SetAutoFocus", "SetMaxLetters", "RegisterForClicks", "SetBagItem", "SetTextInsets" }) do Frame[name] = noop end
+function Frame:SetJustifyH(value) self.justifyH = value end
+function Frame:GetJustifyH() return self.justifyH or "CENTER" end
+function Frame:SetTextColor(r, g, b, a) self.textColor = { r, g, b, a } end
+function Frame:GetTextColor()
+    local color = self.textColor or { 1, 1, 1, 1 }
+    return color[1], color[2], color[3], color[4]
+end
+-- Button font objects. The client's template gives every state its own object;
+-- the stub keeps the assignment so a skin test can prove which one is installed
+-- and that the original comes back.
+function Frame:GetNormalFontObject() return self.normalFontObject end
+function Frame:SetNormalFontObject(font) self.normalFontObject = font end
+function Frame:GetHighlightFontObject() return self.highlightFontObject end
+function Frame:SetHighlightFontObject(font) self.highlightFontObject = font end
+function Frame:GetDisabledFontObject() return self.disabledFontObject end
+function Frame:SetDisabledFontObject(font) self.disabledFontObject = font end
+function Frame:GetNormalTexture() return self.normalTexture end
+function Frame:GetHighlightTexture() return self.highlightTexture end
 -- A real EditBox fires OnEditFocusLost from ClearFocus; the settings input
 -- relies on that chain to leave its focus state, and HasFocus must agree.
 function Frame:ClearFocus()
@@ -338,16 +373,24 @@ function H.Advance(seconds)
     local timers = {}
     for i, timer in ipairs(H.timers or {}) do timers[i] = timer end
     for _, timer in ipairs(timers) do
-        if timer.callback and (timer.interval or 0) > 0 and not timer.cancelled and not timer.fired then
-            timer.elapsed = (timer.elapsed or 0) + seconds
-            local steps = math.floor(timer.elapsed / timer.interval)
-            if steps > 0 then
-                timer.elapsed = timer.elapsed - steps * timer.interval
-                for _ = 1, math.min(steps, 500) do
-                    if timer.cancelled then break end
-                    timer.callback()
-                    -- A one-shot fires once, ever.
-                    if timer.after then timer.fired = true; break end
+        if timer.callback and not timer.cancelled and not timer.fired then
+            local interval = timer.interval or 0
+            -- A zero-delay one-shot is the client's "next frame": it fires on the
+            -- first advance, exactly once. The Unlock probe and the Esc-menu
+            -- hover check both rely on this path.
+            if interval <= 0 then
+                if timer.after then timer.fired = true; timer.callback() end
+            else
+                timer.elapsed = (timer.elapsed or 0) + seconds
+                local steps = math.floor(timer.elapsed / interval)
+                if steps > 0 then
+                    timer.elapsed = timer.elapsed - steps * interval
+                    for _ = 1, math.min(steps, 500) do
+                        if timer.cancelled then break end
+                        timer.callback()
+                        -- A one-shot fires once, ever.
+                        if timer.after then timer.fired = true; break end
+                    end
                 end
             end
         end
@@ -492,6 +535,19 @@ function H.Load(saved)
         end
         function menu:AddButton(text, callback)
             local button = table.remove(self.free) or H.NewFrame(nil, self, "MainMenuFrameButtonTemplate")
+            if not button.Left then
+                -- The client's BigRedThreeSliceButtonTemplate: three red slices,
+                -- a highlight atlas, and three state font objects.
+                button.Left = H.NewFrame(nil, button)
+                button.Center = H.NewFrame(nil, button)
+                button.Right = H.NewFrame(nil, button)
+                button.normalTexture = H.NewFrame(nil, button)
+                button.highlightTexture = H.NewFrame(nil, button)
+                button:SetHeight(36)
+                button.normalFontObject = _G.GameFontHighlightLarge
+                button.highlightFontObject = _G.GameFontHighlightLarge
+                button.disabledFontObject = _G.GameFontHighlightLarge
+            end
             self.counter = self.counter + 1
             button.layoutIndex = self.counter
             button:SetText(text)
@@ -508,6 +564,21 @@ function H.Load(saved)
             self:AddButton(_G.ADDONS, function() end)
             self:AddButton("Quit", function() end)
         end
+        menu.width, menu.height = 260, 120
+        menu.topPadding, menu.bottomPadding = 48, 34
+        menu.leftPadding, menu.rightPadding, menu.spacing = 28, 28, 0
+        -- DialogBorderTemplate + DialogHeaderTemplate, reduced to the parts the
+        -- skin has to paint out and hand back.
+        menu.Border = H.NewFrame(nil, menu)
+        menu.Border.Bg = H.NewFrame(nil, menu.Border)
+        menu.Border.NineSlice = H.NewFrame(nil, menu.Border)
+        menu.Header = H.NewFrame(nil, menu)
+        menu.Header.LeftBG = H.NewFrame(nil, menu.Header)
+        menu.Header.RightBG = H.NewFrame(nil, menu.Header)
+        menu.Header.CenterBG = H.NewFrame(nil, menu.Header)
+        menu.Header.Text = H.NewFrame(nil, menu.Header)
+        menu.Header.Text:SetFont("Fonts/Mock.ttf", 12, "")
+        menu.Header.Text:SetTextColor(1, 0.82, 0)
         menu.scripts.OnShow = function(self) self:InitButtons() end
         menu.scripts.OnEvent = function(self) self:InitButtons() end
         _G.HideUIPanel = function(frame) frame:Hide() end
@@ -759,6 +830,33 @@ function H.Load(saved)
     _G.GetLocale = function() return H.locale or "zhCN" end
     _G.GetBuildInfo = function() return "12.1.5", "12345", "", 120105 end
     _G.InCombatLockdown = function() return H.combat end
+    -- FontObjects: enough of the client contract for LumaUI's own button type.
+    local FontObject = {}
+    FontObject.__index = FontObject
+    function FontObject:SetFont(path, size, flags) self.font, self.size, self.flags = path, size, flags end
+    function FontObject:GetFont() return self.font, self.size, self.flags end
+    function FontObject:SetTextColor(r, g, b, a) self.color = { r, g, b, a } end
+    function FontObject:GetTextColor() local c = self.color or { 1, 1, 1, 1 }; return c[1], c[2], c[3], c[4] end
+    H.fonts = {}
+    _G.CreateFont = function(name)
+        local font = setmetatable({ name = name }, FontObject)
+        if name then H.fonts[name] = font end
+        return font
+    end
+    _G.GameFontHighlightLarge = setmetatable({ name = "GameFontHighlightLarge", font = "Fonts/Mock.ttf", size = 16 }, FontObject)
+    _G.GameFontNormal = setmetatable({ name = "GameFontNormal", font = "Fonts/Mock.ttf", size = 12 }, FontObject)
+    -- The client's secure visibility driver. The stub records the rule so a test
+    -- can assert the condition was delegated instead of written by hand.
+    H.stateDrivers = {}
+    _G.RegisterStateDriver = function(frame, state, rule)
+        frame.stateDrivers = frame.stateDrivers or {}
+        frame.stateDrivers[state] = rule
+        H.stateDrivers[#H.stateDrivers + 1] = { frame = frame, state = state, rule = rule }
+    end
+    _G.UnregisterStateDriver = function(frame, state)
+        if frame.stateDrivers then frame.stateDrivers[state] = nil end
+        frame.stateDriverRemovals = (frame.stateDriverRemovals or 0) + 1
+    end
     _G.IsLoggedIn = function() return false end
     _G.issecretvalue = function(value) return secretValues[value] ~= nil end
     _G.UnitFullName = function() return "Tester", "Realm" end

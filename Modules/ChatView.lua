@@ -64,15 +64,19 @@ local function atBottom(view)
     return not ok or value == true
 end
 
+local syncShell
+
 local function refreshButton(entry)
     local button = entry.toBottom
-    if not button then return end
+    if button then
     local show = entry.active == true and not atBottom(entry.view)
     button:SetShown(show)
     if show then
         local count = entry.unread or 0
         button:SetText(count > 0 and string.format(app.L.chatViewUnread, count) or app.L.chatViewBottom)
     end
+    end
+    if syncShell then syncShell(entry) end
 end
 
 local function toBottom(entry)
@@ -81,6 +85,62 @@ local function toBottom(entry)
         pcall(entry.view.ScrollToBottom, entry.view)
     end
     refreshButton(entry)
+end
+
+-- The shell is LumaUI's own surface around the message area: a card, a compact
+-- header with the window name and the unread count, and a hairline between the
+-- header and the first line. It is the visible difference between "the client's
+-- window with new text" and a LumaUI panel; the client keeps the window frame,
+-- the tabs, the edit box, the routing, the moderation and the hit zones.
+local function buildShell(entry)
+    if entry.shell then return entry.shell end
+    local frame = CreateFrame("Frame", "LumaUIChatShell" .. entry.index, UIParent, "BackdropTemplate")
+    if not frame then return nil end
+    frame:EnableMouse(false)
+    if type(frame.SetFrameStrata) == "function" then frame:SetFrameStrata("LOW") end
+    app.Surface:Plate(frame, "card")
+    local header = CreateFrame("Frame", nil, frame)
+    header:EnableMouse(false)
+    header:SetPoint("TOPLEFT", 10, -6)
+    header:SetPoint("TOPRIGHT", -10, -6)
+    header:SetHeight(14)
+    frame.title = app.Type:Text(header, "label")
+    frame.title:SetPoint("LEFT", 0, 0)
+    frame.title:SetText(string.format(app.L.chatWindowLabel, entry.index))
+    frame.state = app.Type:Text(header, "micro")
+    frame.state:SetPoint("RIGHT", 0, 0)
+    frame.state:SetText("")
+    frame.rule = app.Surface:HLine(frame, 0.35)
+    frame.rule:SetPoint("TOPLEFT", 10, -24)
+    frame.rule:SetPoint("TOPRIGHT", -10, -24)
+    frame.rule:SetHeight(app.Pixel:Pixels(1, frame))
+    frame:Hide()
+    entry.shell = frame
+    return frame
+end
+
+syncShell = function(entry)
+    local shell, view = entry.shell, entry.view
+    if not shell then return end
+    local active = entry.active == true and entry.frame and entry.frame.IsShown and entry.frame:IsShown()
+    shell:SetShown(active == true)
+    if not active then return end
+    -- Anchored to the client's window: a resize, a dock move or a UI scale
+    -- change carries the shell with it without LumaUI writing the window's
+    -- anchors.
+    shell:ClearAllPoints()
+    shell:SetPoint("TOPLEFT", entry.frame, "TOPLEFT", 0, 0)
+    shell:SetPoint("BOTTOMRIGHT", entry.frame, "BOTTOMRIGHT", 0, 0)
+    if type(shell.SetFrameLevel) == "function" and type(entry.frame.GetFrameLevel) == "function" then
+        local ok, level = pcall(entry.frame.GetFrameLevel, entry.frame)
+        level = ok and app.Capabilities.Plain(level, "number") or nil
+        if level and level > 1 then shell:SetFrameLevel(level - 1) end
+    end
+    if view and type(view.SetFrameLevel) == "function" and type(shell.GetFrameLevel) == "function" then
+        view:SetFrameLevel((shell:GetFrameLevel() or 1) + 2)
+    end
+    local unread = entry.unread or 0
+    shell.state:SetText(unread > 0 and string.format(app.L.chatViewUnread, unread) or "")
 end
 
 local function buildView(entry)
@@ -183,6 +243,17 @@ local function syncShown(entry)
         entry.unread = 0
         refreshButton(entry)
     end
+    -- The shell follows the window: the header and card are never left on
+    -- screen above a hidden or released window.
+    local shell = entry.shell
+    if shell then
+        shell:SetShown(shown == true)
+        if shown then
+            shell:ClearAllPoints()
+            shell:SetPoint("TOPLEFT", entry.frame, "TOPLEFT", 0, 0)
+            shell:SetPoint("BOTTOMRIGHT", entry.frame, "BOTTOMRIGHT", 0, 0)
+        end
+    end
 end
 
 local function release(entry)
@@ -191,6 +262,7 @@ local function release(entry)
     local saved = entry.saved
     entry.saved = nil
     if entry.view then entry.view:Hide() end
+    if entry.shell then entry.shell:Hide() end
     if entry.toBottom then entry.toBottom:Hide() end
     if saved and entry.frame then
         pcall(entry.frame.SetAlpha, entry.frame, saved.alpha)
@@ -216,6 +288,7 @@ local function hookWindow(entry)
     end)
     frame:HookScript("OnHide", function()
         if entry.view and entry.active then entry.view:Hide() end
+        if entry.shell then entry.shell:Hide() end
     end)
 end
 
@@ -227,12 +300,16 @@ local function take(entry)
     if other then release(entry); publish(entry, false, "thirdparty"); return end
     hookWindow(entry)
     if not entry.hooked then release(entry); publish(entry, false, "nohook"); return end
+    local shell = buildShell(entry)
+    if not shell then release(entry); publish(entry, false, "noshell"); return end
     local view = buildView(entry)
     if not view then release(entry); publish(entry, false, "noview"); return end
     if not entry.active then
+        -- Inside the shell, below the header and its hairline: the first line
+        -- never collides with the window name or the unread count.
         view:ClearAllPoints()
-        view:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
-        view:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+        view:SetPoint("TOPLEFT", shell, "TOPLEFT", 10, -28)
+        view:SetPoint("BOTTOMRIGHT", shell, "BOTTOMRIGHT", -6, 6)
         if type(frame.GetFont) == "function" and type(view.SetFont) == "function" then
             local ok, file, height, flags = pcall(frame.GetFont, frame)
             file = ok and app.Capabilities.Plain(file, "string") or nil

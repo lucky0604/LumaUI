@@ -3,13 +3,22 @@ local _, app = ...
 -- Three movable bars with independent profile scales. Unmoved bars start in a
 -- central stack, and all three share the fade. Secure button behaviour and
 -- protected layout writes stay with the client and the out-of-combat queue.
+--
+-- Bars 4–8 (`MultiBarRight`, `MultiBarLeft`, `MultiBar5–7`) are **not** touched.
+-- Earlier iterations reparented them into a hidden parking frame so the central
+-- HUD looked tidy, which also hid bars the player had enabled in Edit Mode; the
+-- client's own layout and visibility are the authority for every bar this
+-- component does not manage. A bar parked by an older session is put back from
+-- its recorded parent/anchors once, then left alone.
 
 local BARS = {
     { key = "main", frame = "MainActionBar", prefix = "ActionButton" },
     { key = "bar2", frame = "MultiBarBottomLeft", prefix = "MultiBarBottomLeftButton" },
     { key = "bar3", frame = "MultiBarBottomRight", prefix = "MultiBarBottomRightButton" },
 }
-local HIDDEN = { "MultiBarRight", "MultiBarLeft", "MultiBar5", "MultiBar6", "MultiBar7" }
+-- Bars this component only observes. The catalog is the one definition of their
+-- slot ranges and binding prefixes; it is never used to move or hide them.
+local OBSERVED = { "MultiBarRight", "MultiBarLeft", "MultiBar5", "MultiBar6", "MultiBar7" }
 local GAP = 4
 local FADE_STEP, HIDE_DELAY, HOVER_PAD = 0.05, 0.9, 22
 local LAYOUT_JOB, RESTORE_JOB = "actionBars/layout", "actionBars/restore"
@@ -28,11 +37,16 @@ local function inCombat()
     return type(InCombatLockdown) == "function" and InCombatLockdown()
 end
 
+-- The parking frame from earlier sessions. It is only used to hand a bar back:
+-- nothing is parented into it any more.
 local park
 local function parked()
     if not park then
-        park = CreateFrame("Frame", "LumaUIActionBarsPark", UIParent)
-        park:Hide()
+        park = _G.LumaUIActionBarsPark
+        if not park then
+            park = CreateFrame("Frame", "LumaUIActionBarsPark", UIParent)
+            park:Hide()
+        end
     end
     return park
 end
@@ -167,16 +181,218 @@ local function anchor(bar, point, relative, relativePoint, x, y)
     end)
 end
 
-local function layout(self)
-    if inCombat() then return false end
+-- Hands every observed bar back to the client. Only a bar this session (or an
+-- older build) actually parked is written: a bar the client still owns is not
+-- touched at all, so its Edit Mode parent, anchors and shown state stay.
+local function releaseObserved()
     local parkFrame = parked()
-    for _, name in ipairs(HIDDEN) do
+    for _, name in ipairs(OBSERVED) do
         local bar = named(name)
         if bar then
-            recordBar(bar)
-            if bar:GetParent() ~= parkFrame then pcall(bar.SetParent, bar, parkFrame) end
+            local parkedHere = parkFrame and bar:GetParent() == parkFrame
+            if bar.lumaActionBarsOriginal then
+                restoreBar(bar)
+            elseif parkedHere then
+                -- Parked by a build that kept no record (a session older than
+                -- this one): hand the frame back to the client, which owns its
+                -- anchors and re-applies them on the next layout update.
+                pcall(bar.SetParent, bar, UIParent)
+            end
         end
     end
+end
+
+-- Per-bar display owner. Bars LumaUI positions are published by the placement
+-- loop; the observed ones say "the client draws this" with the reason, so
+-- `/luma ownership` never claims a bar that was left alone.
+local function publishObserved()
+    if not app.Ownership then return end
+    local model = app.BarModel
+    for _, name in ipairs(OBSERVED) do
+        local entry = model and model:NativeByFrame(name)
+        if entry then
+            local frame = named(name)
+            app.Ownership:Set("actionBars." .. entry.key, {
+                intent = "native", active = "native", evidence = "none",
+                reason = frame and "client-managed" or "absent",
+            })
+        end
+    end
+end
+
+----------------------------------------------------------------------
+-- Fixed-bar layout overrides (Phase 07)
+----------------------------------------------------------------------
+-- The client's bars keep their buttons, bindings, paging and click handling.
+-- An explicit override only rearranges those same buttons: capacity, rows, size
+-- and gap, plus a supported visibility rule. The client's own sizes and anchors
+-- are recorded once and written back when the override is cleared, so a player
+-- who never opens the page sees no difference at all. Every write happens out of
+-- combat through the same queued pass as the anchor layout.
+local VISIBILITY_RULES = {
+    always = "show",
+    combat = "[combat] show; hide",
+    outofcombat = "[combat] hide; show",
+}
+
+local function fixedSpec(slot)
+    local layouts = app.Store:Profile().ui.actionBarLayout
+    return layouts and layouts[slot]
+end
+
+-- Records the client's own button geometry once per bar. A second override
+-- never records the first override as "native".
+local function recordFixed(bar, buttons)
+    if bar.lumaButtonLayout then return bar.lumaButtonLayout end
+    local width = app.Capabilities.Plain(bar:GetWidth(), "number")
+    local height = app.Capabilities.Plain(bar:GetHeight(), "number")
+    -- A bar the client has not laid out yet reports 0; recording that would
+    -- restore the bar to zero size later. Only a real measurement is recorded.
+    local record = { buttons = {}, width = width and width > 0 and width or nil,
+        height = height and height > 0 and height or nil }
+    for _, button in ipairs(buttons) do
+        local points = {}
+        for index = 1, 4 do
+            local ok, point, relative, relativePoint, x, y = pcall(button.GetPoint, button, index)
+            if not ok or not point then break end
+            points[#points + 1] = { point, relative, relativePoint, x, y }
+        end
+        record.buttons[button] = {
+            width = button:GetWidth(), height = button:GetHeight(),
+            shown = app.Capabilities.Plain(button:IsShown(), "boolean"), points = points,
+        }
+    end
+    bar.lumaButtonLayout = record
+    return record
+end
+
+local function restoreFixed(bar)
+    local record = bar and bar.lumaButtonLayout
+    if not record then return end
+    bar.lumaButtonLayout = nil
+    if type(UnregisterStateDriver) == "function" then pcall(UnregisterStateDriver, bar, "visibility") end
+    for button, state in pairs(record.buttons) do
+        pcall(button.SetSize, button, state.width, state.height)
+        pcall(button.ClearAllPoints, button)
+        for _, point in ipairs(state.points) do
+            pcall(button.SetPoint, button, point[1], point[2], point[3], point[4], point[5])
+        end
+        if state.shown == false then pcall(button.Hide, button) else pcall(button.Show, button) end
+    end
+    if record.width and record.height then pcall(bar.SetSize, bar, record.width, record.height) end
+end
+
+local function applyVisibility(bar, mode)
+    mode = VISIBILITY_RULES[mode] and mode or "always"
+    if type(UnregisterStateDriver) == "function" then pcall(UnregisterStateDriver, bar, "visibility") end
+    if mode == "hidden" then
+        pcall(bar.Hide, bar)
+        return "hidden"
+    end
+    if type(RegisterStateDriver) == "function" and pcall(RegisterStateDriver, bar, "visibility", VISIBILITY_RULES[mode]) then
+        return mode
+    end
+    -- No state driver on this build: show the bar and say the rule is not
+    -- enforced instead of pretending the condition works.
+    pcall(bar.Show, bar)
+    return mode .. "-unavailable"
+end
+
+local function applyFixed(self, entry, bar)
+    local spec = fixedSpec(entry.id)
+    local _, buttons = buttonsOf({ frame = entry.frame, prefix = entry.prefix })
+    if #buttons == 0 then return nil end
+    if not app.BarModel:LayoutActive(spec) then
+        restoreFixed(bar)
+        return nil
+    end
+    local record = recordFixed(bar, buttons)
+    local first = buttons[1]
+    local fallback = record and record.buttons[first] and record.buttons[first].width or 30
+    local plan = app.BarModel:LayoutPlan(spec, #buttons, fallback)
+    for index, button in ipairs(buttons) do
+        local cell = plan.cells[index]
+        if cell then
+            pcall(button.Show, button)
+            if plan.size > 0 then
+                pcall(button.SetSize, button, plan.size, plan.size)
+                pcall(button.ClearAllPoints, button)
+                pcall(button.SetPoint, button, "BOTTOMLEFT", bar, "BOTTOMLEFT", cell.x, cell.y)
+            end
+        else
+            -- Capacity is a display decision: a hidden button keeps its action
+            -- and its binding, so the key still performs it.
+            pcall(button.Hide, button)
+        end
+    end
+    if plan.sized then pcall(bar.SetSize, bar, plan.width, plan.height) end
+    return applyVisibility(bar, spec.visible or "always"), plan
+end
+
+-- Contextual bars (Phase 08) are not re-numbered like the fixed bars and are
+-- not moved by LumaUI: the pet bar follows the pet, the stance bar the
+-- shapeshift slots, and the extra/zone buttons belong to the encounter. They are
+-- registered as placeholders so the layout editor can show and reserve their
+-- measured area, and their ownership says "the client draws this" instead of
+-- pretending a takeover exists.
+local CONTEXTUAL_KINDS = { pet = true, stance = true, extra = true, zone = true }
+
+local function registerContextual()
+    local model = app.BarModel
+    for _, entry in ipairs(model.native) do
+        if CONTEXTUAL_KINDS[entry.kind] then
+            if not app.Layout.entries[entry.key] then
+                local frame = named(entry.frame)
+                local width, height = 220, 30
+                if frame then
+                    local okW, w = pcall(frame.GetWidth, frame)
+                    local okH, h = pcall(frame.GetHeight, frame)
+                    width = okW and app.Capabilities.Plain(w, "number") or width
+                    height = okH and app.Capabilities.Plain(h, "number") or height
+                end
+                -- A placeholder reserves and outlines the area in the layout
+                -- editor; it never moves the client's frame.
+                app.Layout:RegisterPlaceholder(entry.key, entry.kind, 0, -300, width, height)
+            end
+            if app.Ownership then
+                app.Ownership:Set("actionBars." .. entry.key, {
+                    intent = "native", active = "native", evidence = "none", reason = "client-managed",
+                })
+            end
+        end
+    end
+end
+
+local function layoutFixed(self)
+    self.fixed = self.fixed or {}
+    for _, entry in ipairs(app.BarModel:NativeFixed()) do
+        if entry.id >= 2 then
+            local bar = named(entry.frame)
+            if bar then
+                local activeSpec = app.BarModel:LayoutActive(fixedSpec(entry.id))
+                local mode, plan = applyFixed(self, entry, bar)
+                self.fixed[entry.id] = { bar = bar, visible = mode,
+                    buttons = plan and plan.buttons or nil, rows = plan and plan.rows or nil,
+                    active = activeSpec }
+                if activeSpec and app.Ownership then
+                    local active = "owned"
+                    -- A visibility rule the build cannot enforce is not an owned
+                    -- display: the client still decides what is on screen.
+                    if mode and mode:find("-unavailable", 1, true) then active = "native" end
+                    app.Ownership:Set("actionBars." .. entry.key, {
+                        intent = "owned", active = active, evidence = "simulated",
+                        reason = active == "native" and mode or nil,
+                    })
+                end
+            end
+        end
+    end
+end
+
+local function layout(self)
+    if inCombat() then return false end
+    releaseObserved()
+    publishObserved()
 
     local layoutService, profile = app.Layout, app.Store:Profile()
     for index, def in ipairs(BARS) do
@@ -234,8 +450,16 @@ local function layout(self)
                 entry.hidden = true
                 self.bars[def.key] = nil
             end
+            if app.Ownership then
+                app.Ownership:Set("actionBars.actionBar" .. index, {
+                    intent = "owned", active = placed and "owned" or "native",
+                    evidence = "simulated", reason = placed and nil or "placement-failed",
+                })
+            end
         end
     end
+    layoutFixed(self)
+    registerContextual()
     self.geometry = layoutService:Central()
     skinButtons(self)
     self.pending = nil
@@ -371,11 +595,13 @@ end
 local function restoreAll(self)
     releaseSkins(self)
     for _, bar in pairs(self.bars or {}) do restoreBar(bar) end
-    for _, name in ipairs(HIDDEN) do
-        local bar = named(name)
-        if bar then restoreBar(bar) end
+    for _, entry in ipairs(app.BarModel:NativeFixed()) do
+        local bar = named(entry.frame)
+        if bar and bar.lumaButtonLayout then restoreFixed(bar) end
     end
+    releaseObserved()
     self.bars = {}
+    self.fixed = {}
 end
 
 app:RegisterComponent({

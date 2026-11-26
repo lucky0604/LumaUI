@@ -159,6 +159,22 @@ function Cell:SetCooldown(cell, start, duration)
     return true
 end
 
+-- A client duration object handed to the widget's own supported entry point.
+-- The object is passed as-is (never decomposed into start/end), and a build
+-- without the method returns false so the caller can keep plain numbers.
+function Cell:SetDuration(cell, duration)
+    if not cell or duration == nil then return false end
+    -- `SetCooldownFromDurationObject` is documented as a protected function with
+    -- `SecretArguments = AllowedWhenUntainted`. LumaUI's cells are not secure
+    -- frames, but the conservative rule is the same as everywhere else: only
+    -- hand the object over outside combat, otherwise keep the plain numbers.
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then return false end
+    local swipe = cell.swipe
+    if not swipe or type(swipe.SetCooldownFromDurationObject) ~= "function" then return false end
+    local ok, result = pcall(swipe.SetCooldownFromDurationObject, swipe, duration, true)
+    return ok and result ~= false
+end
+
 function Cell:Clear(cell)
     if not cell then return end
     cell.icon:Hide()
@@ -212,7 +228,9 @@ function Cell:Apply(cell, data)
     self:SetIcon(cell, data.icon)
     self:SetCount(cell, data.count)
     self:SetTime(cell, data.remaining)
-    if data.start and data.duration then
+    if data.durationObject and self:SetDuration(cell, data.durationObject) then
+        -- The client draws the sweep from its own object.
+    elseif data.start and data.duration then
         self:SetCooldown(cell, data.start, data.duration)
     elseif data.remaining == nil then
         self:SetCooldown(cell, nil, nil)

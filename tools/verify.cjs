@@ -18,6 +18,31 @@ for (const entry of files) {
 }
 let parser;
 try { parser = require(process.env.LUMA_LUAPARSE || 'luaparse'); } catch { /* Optional external syntax parser. */ }
+// Without the Lua 5.1 grammar module, fall back to an installed Lua 5.1
+// compatible parser. LuaJIT is the same grammar; a 5.4/5.5 interpreter is not,
+// so it is never accepted here even if `lua` happens to be first on PATH.
+const { spawnSync } = require('node:child_process');
+function findLua51() {
+  for (const command of ['luajit', 'luac5.1', 'lua5.1']) {
+    const probe = spawnSync(command, ['-v'], { encoding: 'utf8' });
+    if (probe.error) continue;
+    const banner = `${probe.stdout || ''}${probe.stderr || ''}`;
+    if (/LuaJIT/i.test(banner) || /Lua 5\.1/.test(banner)) return command;
+  }
+  return null;
+}
+const lua51 = parser ? null : findLua51();
+function externalParse(file) {
+  if (!lua51) return true;
+  const args = lua51 === 'luac5.1' ? ['-p', file] : ['-b', file, process.platform === 'win32' ? 'NUL' : '/dev/null'];
+  const result = spawnSync(lua51, args, { encoding: 'utf8' });
+  if (result.error) return true;
+  if (result.status !== 0) {
+    check(false, `${file}: ${(result.stderr || result.stdout || 'syntax error').trim()}`);
+    return false;
+  }
+  return true;
+}
 // Release textures, checked at the byte level: every one is an uncompressed
 // 32-bit TGA of the size the Lua theme names, produced by tools/make-media.py
 // from neutral values. A texture that silently becomes 24-bit or 8-bit alpha
@@ -50,6 +75,7 @@ for (const [rel, width, height] of MEDIA) {
 const forbiddenIndex = process.argv.indexOf('--forbid-name');
 const forbidden = forbiddenIndex >= 0 ? process.argv[forbiddenIndex + 1]?.toLowerCase() : null;
 let luaCount = 0;
+let externallyParsed = 0;
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, {withFileTypes:true})) {
     if (['.git','node_modules','dist'].includes(entry.name)) continue;
@@ -64,11 +90,15 @@ function walk(dir) {
       if (parser) {
         try { parser.parse(source, { luaVersion:'5.1' }); }
         catch (err) { check(false, `${file}: ${err.message}`); }
+      } else if (externalParse(file)) {
+        externallyParsed++;
       }
       if (!file.includes(`${path.sep}tests${path.sep}`)) check(!/SetScript\s*\(\s*['"]OnUpdate/.test(source), `Idle frame loop: ${file}`);
     }
   }
 }
 walk(root);
+const syntax = parser ? 'Lua 5.1 passed'
+  : (lua51 ? `${lua51} (Lua 5.1 compatible) passed on ${externallyParsed} files` : 'not installed (syntax not checked)');
 if (errors) process.exitCode = 1;
-else console.log(`Manifest: ${files.length} files; Lua: ${luaCount}; syntax parser: ${parser ? 'Lua 5.1 passed' : 'not installed (syntax not checked)'}; static checks passed.`);
+else console.log(`Manifest: ${files.length} files; Lua: ${luaCount}; syntax parser: ${syntax}; static checks passed.`);

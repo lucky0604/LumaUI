@@ -20,7 +20,8 @@ SettingsUI.registry = {
     { id = "nameplates", label = "navNameplates", components = { "nameplates" } },
     { id = "resources", label = "navResources", components = { "playerResource", "playerCast", "edgeAuras" } },
     { id = "minimap", label = "navMinimap", components = { "minimap", "launcher", "gameMenu", "utilityCorner" } },
-    { id = "quests", label = "navQuests", components = { "questTracker", "questIndicators", "questList" } },
+    { id = "quests", label = "navQuests", extras = "Quests",
+      components = { "questTracker", "questIndicators", "questList" } },
     { id = "containers", label = "navContainers", extras = "Containers", components = { "inventory", "bank" } },
     { id = "windows", label = "navWindows", components = { "characterWindow", "systemWindows" } },
     { id = "info", label = "navInfo", extras = "Info",
@@ -52,6 +53,28 @@ function SettingsUI:ModuleSummary()
     return L.active .. ": " .. app.Store.current .. "\n" .. text
 end
 
+-- A module's status in one short sentence. Technical detail — which sub-part,
+-- which ownership record, which evidence level — stays on the diagnostics page;
+-- this line answers "can I use the page I am looking at".
+function SettingsUI:ModuleStatus(entry)
+    local running, failed, unsupported, disabled = 0, 0, 0, 0
+    for _, id in ipairs(entry.components or {}) do
+        local component = app.components[id]
+        if component then
+            local status = component.status
+            if status == "running" then running = running + 1
+            elseif status == "failed" then failed = failed + 1
+            elseif status == "unsupported" then unsupported = unsupported + 1
+            else disabled = disabled + 1 end
+        end
+    end
+    if app.Store.readonly then return L.moduleStatusReadonly end
+    if failed > 0 then return string.format(L.moduleStatusFailed, failed) end
+    if unsupported > 0 then return string.format(L.moduleStatusUnsupported, unsupported) end
+    if running > 0 then return string.format(L.moduleStatusRunning, running) end
+    return L.moduleStatusOff
+end
+
 local function ownerText(entry)
     local lines = {}
     if app.Ownership then
@@ -69,15 +92,187 @@ local function simpleToggle(body, text, getter, setter)
     return Controls:Toggle(body, text, 0, getter, setter, { width = 462 })
 end
 
--- Per-module extras. Each builder returns a function that lays its controls out
--- from `top` and returns the next free offset; the page calls it on every
--- refresh so a profile switch or a long translation never leaves stale spacing.
+----------------------------------------------------------------------
+-- Selectable objects
+----------------------------------------------------------------------
+-- A module page starts with "which object am I editing". The list is the real
+-- layout/handle or catalog set; an object that is disabled this run is still
+-- listed (its controls say so) instead of disappearing and silently moving the
+-- selection to something else.
+local Objects = {}
+
+function Objects.actionBars()
+    local list = {}
+    for _, bar in ipairs(app.BarModel:NativeFixed()) do
+        list[#list + 1] = { id = bar.key, label = string.format(L.actionBarLabel, bar.display), bar = bar }
+    end
+    return list
+end
+
+function Objects.unitFrames()
+    local list, seen = {}, {}
+    for _, unit in ipairs({ "player", "target", "focus", "pet", "targettarget" }) do
+        local id = "unit_" .. unit
+        if app.Layout.entries[id] and not seen[id] then
+            seen[id] = true
+            local label = L["object_" .. unit] or unit
+            list[#list + 1] = { id = id, label = label }
+        end
+    end
+    return list
+end
+
+function Objects.cooldowns()
+    local list = {}
+    for _, id in ipairs(app.CooldownModel.GROUP_IDS) do
+        local label = id == "essential" and L.hudGroupEssential
+            or (id == "utility" and L.hudGroupUtility or L.hudGroupBuffs)
+        list[#list + 1] = { id = "cdGroup_" .. id, label = label, group = id }
+    end
+    return list
+end
+
+function Objects.chat()
+    local list = {}
+    for _, id in ipairs(app.Layout:IDs()) do
+        if id:sub(1, 4) == "chat" and not (app.Layout.entries[id] or {}).member then
+            list[#list + 1] = { id = id, label = L.viewLabel or L.navChat }
+            break
+        end
+    end
+    return list
+end
+
+function SettingsUI:ObjectList(moduleID)
+    local provider = Objects[moduleID]
+    if provider then
+        local ok, list = pcall(provider)
+        if ok and type(list) == "table" then return list end
+        return {}
+    end
+    -- Modules without a dedicated object list fall back to their own layout
+    -- handles, so "Position" still targets something real.
+    local list = {}
+    local entry = self.moduleByID[moduleID]
+    for _, component in ipairs(entry and entry.components or {}) do
+        local layoutEntry = app.Layout.entries[component]
+        if layoutEntry and not layoutEntry.member then
+            list[#list + 1] = { id = component, label = layoutEntry.label or component }
+        end
+    end
+    return list
+end
+
+function SettingsUI:SelectedObject(moduleID)
+    local list = self:ObjectList(moduleID)
+    self.moduleObject = self.moduleObject or {}
+    local wanted = self.moduleObject[moduleID]
+    for _, object in ipairs(list) do
+        if object.id == wanted then return wanted end
+    end
+    return list[1] and list[1].id or nil
+end
+
+function SettingsUI:SelectObject(moduleID, id)
+    self.moduleObject = self.moduleObject or {}
+    self.moduleObject[moduleID] = id
+    self:Update()
+end
+
+-- The real bar entry behind the selected action-bar object (nil when the
+-- selection is not a bar).
+function SettingsUI:SelectedBar(moduleID)
+    local id = self:SelectedObject(moduleID or "actionBars")
+    return id and app.BarModel:Native(id) or nil
+end
+
+----------------------------------------------------------------------
+-- Per-module controls
+----------------------------------------------------------------------
+-- Each builder returns a function that lays its controls out from `top` and
+-- returns the next free offset; the page calls it on every refresh so a profile
+-- switch or a long translation never leaves stale spacing.
 local Extras = {}
 
+-- Action bars: object first (1–8), then the real controls for that bar. Bars
+-- 1–3 also carry LumaUI's own scale; bars 4–8 keep the client's position and
+-- gain capacity, rows, size, spacing and visibility through the safe adapter.
 function Extras.ActionBars(page, body)
     local self = SettingsUI
-    local hint = note(body, L.nativeLayoutHint, 0, 462)
-    local editMode = Controls:Button(body, L.openEditMode, 250, function()
+    local scope = note(body, L.actionBarScopeHint, 0, 462)
+    local function bar()
+        return self:SelectedBar("actionBars")
+    end
+    local function barID() return bar() and bar().id or 1 end
+    local function layoutKey(key)
+        local layouts = profileUI().actionBarLayout
+        local spec = layouts and layouts[barID()]
+        return spec and spec[key]
+    end
+    local function stage(key, value)
+        local slot = barID()
+        local current = app.Store.Clone(profileUI().actionBarLayout or {})
+        local spec = current[slot] or {}
+        spec[key] = value
+        current[slot] = spec
+        self:Result(app.Store:Set("ui", "actionBarLayout", current))
+        self:Update()
+    end
+    local function countLabel(number) return string.format("%d", math.floor(number + 0.5)) end
+    local controls = {
+        -- 0 is "the client's own value": the control is a real choice, not a
+        -- reset that silently writes 12.
+        buttons = Controls:Range(body, L.actionBarButtons, 0, 0, 12, 1,
+            function() return layoutKey("buttons") or 0 end,
+            function(value) stage("buttons", value) end, { width = 462, format = countLabel }),
+        rows = Controls:Range(body, L.actionBarRows, 0, 0, 12, 1,
+            function() return layoutKey("rows") or 0 end,
+            function(value) stage("rows", value) end, { width = 462, format = countLabel }),
+        size = Controls:Range(body, L.actionBarSize, 0, 0, 60, 1,
+            function() return layoutKey("size") or 0 end,
+            function(value) stage("size", value) end, { width = 462, format = countLabel }),
+        gap = Controls:Range(body, L.actionBarGap, 0, 0, 12, 1,
+            function() return layoutKey("gap") or 4 end,
+            function(value) stage("gap", value) end, { width = 462, format = countLabel }),
+    }
+    for _, control in pairs(controls) do settingsControl(page, control) end
+    local scale = Controls:Range(body, L.actionBarScaleSelected, 0, 0.5, 1.5, 0.05,
+        function()
+            local index = barID()
+            return profileUI().actionBarScales[index] or 1
+        end,
+        function(value)
+            local index = barID()
+            local current = app.Store.Clone(profileUI().actionBarScales)
+            current[index] = value
+            self:Result(app.Store:Set("ui", "actionBarScales", current))
+        end, { width = 462 })
+    settingsControl(page, scale)
+    local visibility = {}
+    for index, mode in ipairs({ { "always", L.visibilityAlways }, { "combat", L.visibilityCombat },
+        { "outofcombat", L.visibilityOutOfCombat }, { "hidden", L.visibilityHidden } }) do
+        local key = mode[1]
+        visibility[index] = Controls:Button(body, mode[2], 108, function()
+            stage("visible", key)
+        end)
+        visibility[index].mode = key
+        settingsControl(page, visibility[index])
+    end
+    local hint = note(body, L.actionBarLayoutHint, 0, 462)
+    local reset = Controls:Button(body, L.actionBarReset, 200, function()
+        local slot = barID()
+        local current = app.Store:Clone(profileUI().actionBarLayout or {})
+        current[slot] = nil
+        self:Result(app.Store:Set("ui", "actionBarLayout", current))
+        if profileUI().actionBarScales[slot] then
+            local scales = app.Store:Clone(profileUI().actionBarScales)
+            scales[slot] = 1
+            self:Result(app.Store:Set("ui", "actionBarScales", scales))
+        end
+        self:Update()
+    end)
+    settingsControl(page, reset)
+    local editMode = Controls:Button(body, L.openEditMode, 200, function()
         if EditModeManagerFrame and ShowUIPanel then
             ShowUIPanel(EditModeManagerFrame)
         else
@@ -85,36 +280,47 @@ function Extras.ActionBars(page, body)
         end
     end)
     self.layoutEditMode = editMode
-    local scales = {}
-    for index in ipairs(app.Layout.actionBarNames) do
-        local slot = index
-        scales[slot] = Controls:Range(body, string.format(L.actionBarScale, slot), 0,
-            0.5, 1.5, 0.05, function() return profileUI().actionBarScales[slot] end,
-            function(value)
-                local current = app.Store.Clone(profileUI().actionBarScales)
-                current[slot] = value
-                self:Result(app.Store:Set("ui", "actionBarScales", current))
-            end, { width = 462 })
-        settingsControl(page, scales[slot])
-    end
+    settingsControl(page, editMode)
+    page.barControls = controls
+    page.barScale = scale
+    page.barVisibility = visibility
+    page.barReset = reset
     return function(top)
         local readonly = app.Store.readonly
-        hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
-        top = top - noteHeight(hint, 28)
-        for index, control in ipairs(scales) do
-            local entry = app.Layout.entries["actionBar" .. index]
-            local available = entry and not entry.hidden
-            control:SetShown(available == true)
-            control:SetEnabled(available == true and not readonly)
-            if available then
-                control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
-                control:Update()
-                top = top - 62
-            end
+        local entry = bar()
+        local managed = entry and entry.manageable
+        scope:ClearAllPoints(); scope:SetPoint("TOPLEFT", 0, top)
+        top = top - noteHeight(scope, 28)
+        for _, key in ipairs({ "buttons", "rows", "size", "gap" }) do
+            local control = controls[key]
+            -- Bars 4–8 cannot be moved by LumaUI yet; capacity, rows, size and
+            -- spacing are still real because they only rearrange the client's
+            -- own buttons.
+            control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
+            control:Update(); control:SetEnabled(not readonly and entry ~= nil)
+            top = top - 62
         end
-        editMode:ClearAllPoints(); editMode:SetPoint("TOPLEFT", 0, top)
+        scale:SetShown(managed == true)
+        if managed then
+            scale:ClearAllPoints(); scale:SetPoint("TOPLEFT", 0, top)
+            scale:Update(); scale:SetEnabled(not readonly)
+            top = top - 62
+        end
+        local current = layoutKey("visible") or "always"
+        for index, button in ipairs(visibility) do
+            button:ClearAllPoints()
+            button:SetPoint("TOPLEFT", ((index - 1) % 2) * 116, top - math.floor((index - 1) / 2) * 36)
+            button:SetSelected(button.mode == current)
+            button:SetEnabled(not readonly and entry ~= nil)
+        end
+        top = top - 76
+        hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
+        top = top - noteHeight(hint, 34)
+        reset:ClearAllPoints(); reset:SetPoint("TOPLEFT", 0, top)
+        reset:SetEnabled(not readonly)
+        editMode:ClearAllPoints(); editMode:SetPoint("TOPLEFT", 208, top)
         editMode:SetEnabled(not readonly)
-        return top - 40
+        return top - 42
     end
 end
 
@@ -139,6 +345,30 @@ function Extras.Chat(page, body)
         settingsControl(page, Controls:Range(body, L.chatActiveOpacity, 0, 0.2, 1, 0.05,
             function() return get("chatActiveOpacity") end, function(v) set("chatActiveOpacity", v) end,
             { width = 462 })),
+        settingsControl(page, Controls:Range(body, L.chatWidthLabel, 0, 240, 600, 10,
+            function() return profileUI().chatWidth > 0 and profileUI().chatWidth or 380 end,
+            function(value)
+                -- One writer saves width and height together and applies them;
+                -- two independent writes could leave a half-applied size.
+                local chat = app.components and app.components.chat
+                local height = profileUI().chatHeight > 0 and profileUI().chatHeight or 140
+                if chat and chat.running then
+                    self:Result(chat:SetSize(math.floor(value), height))
+                else
+                    self:Result(app.Store:Set("ui", "chatWidth", math.floor(value)))
+                end
+            end, { width = 462, format = function(n) return string.format("%d", math.floor(n + 0.5)) end })),
+        settingsControl(page, Controls:Range(body, L.chatHeightLabel, 0, 100, 400, 10,
+            function() return profileUI().chatHeight > 0 and profileUI().chatHeight or 140 end,
+            function(value)
+                local chat = app.components and app.components.chat
+                local width = profileUI().chatWidth > 0 and profileUI().chatWidth or 380
+                if chat and chat.running then
+                    self:Result(chat:SetSize(width, math.floor(value)))
+                else
+                    self:Result(app.Store:Set("ui", "chatHeight", math.floor(value)))
+                end
+            end, { width = 462, format = function(n) return string.format("%d", math.floor(n + 0.5)) end })),
     }
     return function(top)
         local readonly = app.Store.readonly
@@ -214,6 +444,29 @@ function Extras.Info(page, body)
     end
 end
 
+-- Quests: the one layout switch 015 added without an entry. It used to be a save
+-- field only; the switch now applies both directions and a manually placed panel
+-- keeps its position.
+function Extras.Quests(page, body)
+    local self = SettingsUI
+    local belowMap = settingsControl(page, simpleToggle(body, L.questBelowMap,
+        function() return profileUI().questBelowMap == true end,
+        function(value)
+            self:Result(app.Store:Set("ui", "questBelowMap", value))
+            local quests = app.components and app.components.questList
+            if quests and quests.running then quests:Refresh() end
+            self:Update()
+        end))
+    local hint = note(body, L.questBelowMapHint, 0, 462)
+    return function(top)
+        belowMap:ClearAllPoints(); belowMap:SetPoint("TOPLEFT", 0, top)
+        belowMap:Update(); belowMap:SetEnabled(not app.Store.readonly)
+        top = top - 44
+        hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
+        return top - noteHeight(hint, 28)
+    end
+end
+
 function Extras.Tooltip(page, body)
     local self = SettingsUI
     local toggle = settingsControl(page, simpleToggle(body, L.tooltipQuality,
@@ -233,6 +486,11 @@ function Extras.Cooldowns(page, body)
     local hudControls = {}
     local hudHeading = note(body, L.hudEditorHint, 0, 462)
     local function groupComponent() return app.components and app.components.cooldownGroups end
+    -- The selected object chooses the group; the editor edits that group only.
+    local function selectedGroup()
+        local id = self:SelectedObject("cooldowns")
+        return id and id:match("^cdGroup_(.+)$") or "essential"
+    end
     -- The mode switch. Without it the groups never draw, so the editor would
     -- offer geometry for a block the player cannot see.
     local hudOwned = Controls:Toggle(body, L.hudOwned, 0,
@@ -292,6 +550,7 @@ function Extras.Cooldowns(page, body)
         local model = app.CooldownModel
         hudControls[#hudControls + 1] = { follow = follow, vertical = vertical, id = id,
             max = range("max", L.hudMax, model.maxRange[1], model.maxRange[2]),
+            limit = range("limit", L.hudLimit, model.limitRange[1], model.limitRange[2]),
             size = range("size", L.hudSize, model.sizeRange[1], model.sizeRange[2]),
             gap = range("gap", L.hudGap, model.gapRange[1], model.gapRange[2]),
             import = Controls:Button(body, title .. " · " .. L.hudImport, 250, function()
@@ -403,6 +662,7 @@ function Extras.Cooldowns(page, body)
         local readonly = app.Store.readonly
         local component = groupComponent()
         local live = component and component.running == true
+        local active = selectedGroup()
         hudHeading:ClearAllPoints(); hudHeading:SetPoint("TOPLEFT", 0, top - 4)
         top = top - 4 - noteHeight(hudHeading, 28)
         hudOwned:SetShown(live)
@@ -420,46 +680,46 @@ function Extras.Cooldowns(page, body)
             top = top - 38
         end
         for _, group in ipairs(hudControls) do
-            group.follow:SetShown(live)
-            group.follow:SetEnabled(live and not readonly)
-            if live then
+            -- Only the selected group's geometry is editable here; the other
+            -- groups keep their values and are chosen with the object row above.
+            local shown = live and group.id == active
+            group.follow:SetShown(shown)
+            group.follow:SetEnabled(shown and not readonly)
+            if shown then
                 group.follow:ClearAllPoints(); group.follow:SetPoint("TOPLEFT", 0, top)
                 group.follow:Update(component)
                 top = top - 38
             end
-            for _, key in ipairs({ "vertical", "max", "size", "gap" }) do
+            for _, key in ipairs({ "vertical", "max", "limit", "size", "gap" }) do
                 local control = group[key]
-                control:SetShown(live)
-                control:SetEnabled(live and not readonly)
-                if live then
+                control:SetShown(shown)
+                control:SetEnabled(shown and not readonly)
+                if shown then
                     control:ClearAllPoints()
                     control:SetPoint("TOPLEFT", 0, top)
                     control:Update()
                     top = top - (key == "vertical" and 38 or 62)
                 end
             end
-            -- In follow mode the stored list is empty on purpose; the note then
-            -- explains where the spells come from instead of calling the group
-            -- empty.
             local auto = (app.CooldownModel:Normalize(profileUI().cooldownGroups).groups[group.id] or {}).auto ~= false
-            local empty = live and (auto or #orderOf(group.id) == 0)
+            local empty = shown and (auto or #orderOf(group.id) == 0)
             group.empty:SetText(auto and L.hudAutoGroup or L.hudEmptyGroup)
             group.empty:SetShown(empty == true)
-            group.import:SetShown(live)
-            group.import:SetEnabled(live and not readonly)
+            group.import:SetShown(shown)
+            group.import:SetEnabled(shown and not readonly)
             if empty then
                 group.empty:ClearAllPoints(); group.empty:SetPoint("TOPLEFT", 0, top)
                 top = top - noteHeight(group.empty, 20)
             end
-            if live then
+            if shown then
                 group.import:ClearAllPoints(); group.import:SetPoint("TOPLEFT", 0, top)
                 top = top - 38
-            end
-            group.reset:SetShown(live)
-            group.reset:SetEnabled(live and not readonly)
-            if live then
+                group.reset:SetShown(true)
+                group.reset:SetEnabled(not readonly)
                 group.reset:ClearAllPoints(); group.reset:SetPoint("TOPLEFT", 0, top)
                 top = top - 40
+            else
+                group.reset:SetShown(false)
             end
         end
         for _, record in ipairs(orderRows) do
@@ -492,8 +752,8 @@ function Extras.Cooldowns(page, body)
     end
 end
 
--- A module page: header with this module's switches and who draws it now, the
--- "Position" action, then the module's own controls.
+-- A module page: header, the module's status in one line, the object selector,
+-- the object's real controls, then the internal component switches folded away.
 function SettingsUI:BuildModule(page, entry)
     local scroll = Controls:Scroll(page, 464, 420)
     scroll:SetPoint("TOPLEFT")
@@ -503,9 +763,29 @@ function SettingsUI:BuildModule(page, entry)
     page.scroll, page.module, page.rows, page.rowList = scroll, entry, {}, {}
     local heading = section(body, L[entry.label], 0)
     page.heading = heading
+    page.status = note(body, "", 0, 462)
+    page.tabs = {}
+    for index, object in ipairs(self:ObjectList(entry.id)) do
+        local tab = Controls:Tab(body, object.label, 100, function() self:SelectObject(entry.id, object.id) end)
+        page.tabs[index] = { button = tab, id = object.id }
+        settingsControl(page, tab)
+    end
+    -- The module's main switch stays visible; the components it runs alongside
+    -- are internal plumbing and live in the fold below.
+    local primary
     for _, id in ipairs(entry.components) do
         local component = app.components[id]
-        if component then
+        if component and not primary then
+            local label = type(component.label) == "string" and component.label or id
+            primary = Controls:Toggle(body, L[label], 0,
+                function() return app.Store:Profile().modules[id] == true end,
+                function(v) self:Result(app.Store:Set("modules", id, v)) end,
+                { width = 462, component = component })
+            primary.componentID = id
+            page.primary = primary
+            page.rows[id] = primary
+            settingsControl(page, primary)
+        elseif component then
             local label = type(component.label) == "string" and component.label or id
             local row = Controls:Toggle(body, L[label], 0,
                 function() return app.Store:Profile().modules[id] == true end,
@@ -517,9 +797,15 @@ function SettingsUI:BuildModule(page, entry)
             settingsControl(page, row)
         end
     end
+    local switches = Controls:FoldHeader(body, L.moduleInternals, 462, function() self:Update() end)
+    switches:SetFolded(true)
+    page.switches = switches
     local owner = note(body, "", 0, 462)
+    owner:SetText("")
     page.owner = owner
-    local locate = Controls:Button(body, L.moduleLocate, 150, function() self:Locate(entry.id) end)
+    local locate = Controls:Button(body, L.moduleLocate, 150, function()
+        self:Locate(entry.id, self:SelectedObject(entry.id))
+    end)
     page.locate = locate
     local diagnostics = Controls:Button(body, L.openDiagnostics, 150, function() self:Select("diagnostics") end)
     page.diagButton = diagnostics
@@ -527,44 +813,95 @@ function SettingsUI:BuildModule(page, entry)
     page.Update = function()
         local readonly = app.Store.readonly
         local top = -22
-        for _, row in ipairs(page.rowList) do
-            row:ClearAllPoints(); row:SetPoint("TOPLEFT", 0, top)
-            row:Update(app.components[row.componentID])
-            row:SetEnabled(not readonly)
-            top = top - 38
+        local selected = self:SelectedObject(entry.id)
+        page.selected = selected
+        local shown = #page.tabs > 1
+        for index, tab in ipairs(page.tabs) do
+            tab.button:SetShown(shown)
+            if shown then
+                tab.button:ClearAllPoints()
+                tab.button:SetPoint("TOPLEFT", ((index - 1) % 4) * 112, top - math.floor((index - 1) / 4) * 34)
+                tab.button:SetSelected(tab.id == selected)
+                tab.button:SetEnabled(not readonly)
+            end
         end
-        owner:SetText(ownerText(entry))
-        owner:ClearAllPoints(); owner:SetPoint("TOPLEFT", 0, top - 4)
-        top = top - 4 - noteHeight(owner, 28)
+        if shown then top = top - math.ceil(#page.tabs / 4) * 34 end
+        page.status:SetText(self:ModuleStatus(entry))
+        page.status:ClearAllPoints(); page.status:SetPoint("TOPLEFT", 0, top)
+        top = top - noteHeight(page.status, 20)
+        if primary then
+            primary:ClearAllPoints(); primary:SetPoint("TOPLEFT", 0, top)
+            primary:Update(app.components[primary.componentID])
+            primary:SetEnabled(not readonly)
+            top = top - 40
+        end
+        if extra then top = extra(top) end
         locate:ClearAllPoints(); locate:SetPoint("TOPLEFT", 0, top)
         diagnostics:ClearAllPoints(); diagnostics:SetPoint("TOPLEFT", 164, top)
-        locate:SetEnabled(not readonly)
-        top = top - 44
-        if extra then top = extra(top) end
+        locate:SetEnabled(not readonly and selected ~= nil)
+        top = top - 40
+        -- Internal switches, folded by default. The fold keeps its own state
+        -- across refreshes; nothing below moves while it is closed.
+        switches:ClearAllPoints(); switches:SetPoint("TOPLEFT", 0, top)
+        top = top - 32
+        local open = switches.folded == false
+        for _, row in ipairs(page.rowList) do
+            row:SetShown(open)
+            row:Update(app.components[row.componentID])
+            row:SetEnabled(not readonly)
+            if open then
+                row:ClearAllPoints(); row:SetPoint("TOPLEFT", 0, top)
+                top = top - 38
+            end
+        end
+        if open and #page.rowList == 0 then
+            switches:SetShown(false)
+            top = top - 0
+        else
+            switches:SetShown(true)
+        end
         body:SetHeight(math.max(420, -top + 6))
         scroll:UpdateRange()
     end
 end
 
--- "Position": hand the player to the on-screen mover. Phase 05 selects the
--- module's own handles in that mode; until then this opens the same editor.
-function SettingsUI:Locate(moduleID)
-    self.locateTarget = moduleID
+-- The first handle a module owns, used when the page has no selected object or
+-- the remembered object is disabled this run.
+function SettingsUI:SuggestLayoutID(moduleID)
     local entry = self.moduleByID[moduleID]
-    local pick
     for _, component in ipairs(entry and entry.components or {}) do
-        if app.Layout.entries[component] then pick = component; break end
+        if app.Unlock:CanSelect(component) then return component end
     end
-    if not pick then
-        -- Module ids that own several handles (unit frames, cooldown groups)
-        -- select their first handle by prefix.
-        local prefixes = { unitFrames = "unit_", cooldowns = "cdGroup_", groups = "party", chat = "chat" }
-        local prefix = prefixes[moduleID]
-        local ids = app.Layout:IDs()
-        for _, id in ipairs(ids) do
-            if prefix and id:sub(1, #prefix) == prefix and not (app.Layout.entries[id] or {}).member then pick = id; break end
+    -- Module ids that own several handles (unit frames, cooldown groups, the
+    -- action bars) fall back to the first handle with their prefix.
+    local prefixes = { actionBars = "actionBar", unitFrames = "unit_", cooldowns = "cdGroup_",
+        groups = "party", chat = "chat" }
+    local prefix = prefixes[moduleID]
+    if not prefix then return nil end
+    local ids = app.Layout:IDs()
+    for _, id in ipairs(ids) do
+        if id:sub(1, #prefix) == prefix and app.Unlock:CanSelect(id) then return id end
+    end
+    return nil
+end
+
+-- "Position": hand the player to the on-screen mover with the object the page
+-- currently shows selected. A stored object that is disabled this run is named
+-- in chat so the fall back to the global mode is visible, not silent.
+function SettingsUI:Locate(moduleID, objectID)
+    self.locateTarget = moduleID
+    local wanted = objectID or self.moduleObject and self.moduleObject[moduleID]
+    local pick
+    if wanted then
+        if app.Unlock:CanSelect(wanted) then
+            pick = wanted
+        elseif app.Layout.entries[wanted] or app.BarModel:Native(wanted) then
+            -- A real object of this build that has no movable handle right now
+            -- (a bar the client owns, a disabled panel): say so, then fall back.
+            app:Print(string.format(L.unlockTargetMissing, tostring(wanted)))
         end
     end
+    if not pick then pick = self:SuggestLayoutID(moduleID) end
     return app.Unlock:Enter({ page = moduleID, select = pick })
 end
 

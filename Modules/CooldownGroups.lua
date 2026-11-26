@@ -26,6 +26,11 @@ local function plainNumber(value)
     return app.Capabilities.Plain(value, "number")
 end
 
+local function nowSeconds()
+    local ok, value = pcall(GetTime)
+    return ok and plainNumber(value) or nil
+end
+
 local function profileGroups()
     return app.Store:Profile().ui.cooldownGroups
 end
@@ -132,14 +137,38 @@ local function spellInfo(spellID)
     return info
 end
 
--- One spell's live state, in plain numbers only. A restricted cooldown table
--- returns an empty state: the caller then draws the icon without a sweep, which
--- is truthful, instead of a frozen remaining time.
+-- A duration object from the client, or nil. These objects are the supported way
+-- to hand a cooldown's timing to a client Cooldown widget: the object is passed
+-- through untouched, so no start/end value is compared, subtracted or stored.
+-- A secret object is not passed on either — the cell keeps its icon without a
+-- sweep, which is truthful.
+-- Documented shapes (checked against the 12.1.5 UI source): the cooldown form
+-- takes `(spellIdentifier, ignoreGCD)`, the charge form only the identifier.
+local function durationObject(spellID, charge)
+    local api = _G.C_Spell
+    if type(api) ~= "table" then return nil end
+    local value
+    if charge then
+        if type(api.GetSpellChargeDuration) ~= "function" then return nil end
+        local ok, result = pcall(api.GetSpellChargeDuration, spellID)
+        value = ok and result or nil
+    else
+        if type(api.GetSpellCooldownDuration) ~= "function" then return nil end
+        local ok, result = pcall(api.GetSpellCooldownDuration, spellID, true)
+        value = ok and result or nil
+    end
+    if value == nil or app.Capabilities.IsSecret(value) then return nil end
+    return value
+end
+
+-- One spell's live state. Plain numbers fill the text; the duration object, when
+-- the build offers one, is handed to the client's own sweep. A restricted
+-- cooldown record leaves the icon and marks the state unknown instead of
+-- inventing a remaining time.
 local function spellState(spellID)
     local api = _G.C_Spell
     local state = { start = nil, duration = nil, remaining = nil, charges = nil, maxCharges = nil }
-    local now = type(GetTime) == "function" and select(2, pcall(GetTime)) or nil
-    now = plainNumber(now)
+    local now = nowSeconds()
     if type(api) == "table" and type(api.GetSpellCharges) == "function" then
         local ok, charges = pcall(api.GetSpellCharges, spellID)
         if ok and type(charges) == "table" then
@@ -181,10 +210,15 @@ local function spellState(spellID)
         local ok, on = pcall(overlay, spellID)
         if ok and app.Capabilities.Plain(on, "boolean") == true then state.proc = true end
     end
+    -- The client's own duration object, when this build has one. The cell passes
+    -- it straight to `Cooldown:SetCooldownFromDurationObject`; nothing here reads
+    -- a start or an end out of it.
+    state.durationData = durationObject(spellID, state.charges ~= nil) or durationObject(spellID, false)
     -- Where the displayed state comes from, in plain words for the cell.
     if state.charges ~= nil then state.source = "charges"
     elseif state.unknown then state.source = "unknown"
     elseif state.remaining then state.source = "cooldown"
+    elseif state.durationData then state.source = "duration"
     else state.source = "ready" end
     return state
 end
@@ -216,24 +250,29 @@ local function auraCandidates(spellID)
     return list
 end
 
+-- One aura lookup for a tracked buff. Returns `state, readable`:
+--   state    nil when the aura is not on the player
+--   readable false when the aura API itself cannot answer, true when it can —
+--            "no aura" and "cannot read auras" are different branches, and only
+--            the first one means the buff is inactive.
 local function buffState(spellIDs)
     local api = _G.C_UnitAuras
-    if type(api) ~= "table" or type(api.GetPlayerAuraBySpellID) ~= "function" then return nil end
+    if type(api) ~= "table" or type(api.GetPlayerAuraBySpellID) ~= "function" then return nil, false end
     local aura
     for _, id in ipairs(spellIDs or {}) do
         local ok, value = pcall(api.GetPlayerAuraBySpellID, id)
-        if ok and type(value) == "table" then
+        if not ok then return nil, false end
+        if type(value) == "table" then
             aura = value
             break
         end
     end
-    if not aura then return nil end
+    if not aura then return nil, true end
     local icon = plainNumber(aura.icon)
     local expiration = plainNumber(aura.expirationTime)
     local duration = plainNumber(aura.duration)
     local applications = plainNumber(aura.applications)
-    local now = type(GetTime) == "function" and select(2, pcall(GetTime)) or nil
-    now = plainNumber(now)
+    local now = nowSeconds()
     local remaining
     if expiration and now and expiration > 0 then
         remaining = math.max(0, expiration - now)
@@ -242,7 +281,19 @@ local function buffState(spellIDs)
     end
     -- A permanent aura reports duration 0: stacks stay, the timer stays empty.
     if remaining and remaining <= 0 then remaining = nil end
-    return { icon = icon, count = applications, remaining = remaining }
+    -- The client can hand a duration object for this aura instance; it is passed
+    -- straight to the cell's own Cooldown widget, never decomposed into start
+    -- and duration here. A secret object is not passed on.
+    local durationObject
+    if type(api.GetAuraDuration) == "function" then
+        local instance = plainNumber(aura.auraInstanceID)
+        if instance then
+            local ok, value = pcall(api.GetAuraDuration, "player", instance)
+            if ok and value ~= nil and not app.Capabilities.IsSecret(value) then durationObject = value end
+        end
+    end
+    return { icon = icon, count = applications, remaining = remaining,
+        durationObject = durationObject }, true
 end
 
 local function anyActive(container)
@@ -284,7 +335,7 @@ local CATEGORY_KEYS = {
     utility = { "Utility", "UtilityCooldowns" },
     buffs = { "TrackedBuff", "TrackedBuffCooldowns" },
 }
-local clientOrder, toSpellIDs
+local clientOrder, toSpellIDs, rawCategoryList, importableSpell
 
 local function categoryOf(id)
     local enum = _G.Enum and _G.Enum.CooldownViewerCategory
@@ -304,16 +355,6 @@ local function isGroupID(id)
     return false
 end
 
--- The client list, cached for a moment: a counting cooldown re-renders ten times
--- a second and the provider walks every entry each call. Event-driven refreshes
--- clear the cache, so an edit in the client's CDM shows up immediately.
-local orderCache = {}
-local ORDER_TTL = 1
-local function nowSeconds()
-    local ok, value = pcall(GetTime)
-    return ok and plainNumber(value) or nil
-end
-
 -- The client's own viewer for a group is the most faithful source: its item list
 -- is exactly what the player sees and edits, whatever category that viewer was
 -- configured with.
@@ -323,39 +364,213 @@ local GROUP_VIEWERS = {
     buffs = { "BuffIconCooldownViewer", "BuffBarCooldownViewer" },
 }
 
-local function viewerOrder(id)
-    for _, name in ipairs(GROUP_VIEWERS[id] or {}) do
-        local frame = rawget(_G, name)
-        if frame and type(frame.GetCooldownIDs) == "function" then
-            local ok, list = pcall(frame.GetCooldownIDs, frame)
-            if ok and type(list) == "table" and #list > 0 then return list end
-        end
-    end
+-- One read of one viewer. `nil` means "this viewer could not answer" (absent,
+-- threw, or is not a list); an empty table is a real answer: the player has no
+-- entries configured there. Conflating those two is what made a confirmed empty
+-- group and a transient read failure take the same branch.
+local function readViewer(name)
+    local frame = name and rawget(_G, name)
+    if not frame or type(frame.GetCooldownIDs) ~= "function" then return nil, "absent" end
+    local ok, list = pcall(frame.GetCooldownIDs, frame)
+    if not ok then return nil, "error" end
+    if type(list) ~= "table" then return nil, "no-list" end
+    return list, nil
+end
+
+-- The provider fallback. It answers for a category, not for a viewer, so it is
+-- the second choice: a build without viewers can still read the same order.
+local function providerList(id)
+    if not rawCategoryList then return nil end
+    local list = rawCategoryList(categoryOf(id))
+    if type(list) == "table" then return list end
     return nil
 end
 
-local function clientList(id)
-    if id == nil or not clientOrder then return nil end
-    local now = nowSeconds()
-    local cached = orderCache[id]
-    if cached and now and (now - cached.time) < ORDER_TTL then return cached.list end
-    local list
-    local ids = viewerOrder(id)
-    if ids then list = toSpellIDs(ids) end
-    if not list or #list == 0 then list = clientOrder(categoryOf(id)) end
-    if list == nil then return cached and cached.list or nil end
-    orderCache[id] = { list = list, time = now or 0 }
-    return list
+----------------------------------------------------------------------
+-- Session manifest
+----------------------------------------------------------------------
+-- The saved group configuration and the client's live list are different
+-- objects and live in different places:
+--
+--   * profile     what the player configured (`order`, `max`, `limit`, ...)
+--   * manifest    what the client currently says, read on identity and source
+--                 changes, cached as the last complete readable copy
+--   * live state  per-cell cooldown/charge/aura values, re-read on their events
+--
+-- An ordinary cooldown or aura tick no longer touches the manifest. A provider
+-- that blinks out for one event therefore keeps the last complete list instead
+-- of dropping the group back to the client's viewer, while a confirmed empty
+-- list still clears the display.
+local manifest = { identity = nil, groups = {} }
+
+local function identity()
+    local spec
+    if type(GetSpecialization) == "function" then
+        local ok, value = pcall(GetSpecialization)
+        spec = ok and plainNumber(value) or nil
+    end
+    return { profile = app.Store.current, spec = spec or 0 }
+end
+
+local function sameIdentity(a, b)
+    return type(a) == "table" and type(b) == "table"
+        and a.profile == b.profile and a.spec == b.spec
+end
+
+-- Which client viewer answers for a group right now, in priority order. The
+-- tracked-buff group has two renderings for one list; they are reported apart.
+local function readGroupManifest(id)
+    local viewers = GROUP_VIEWERS[id] or {}
+    local reasons = {}
+    for _, name in ipairs(viewers) do
+        local list, problem = readViewer(name)
+        if list then
+            local entries, unmapped = {}, 0
+            for _, value in ipairs(list) do
+                local cooldownID = plainNumber(value)
+                if cooldownID then
+                    local spell = importableSpell(cooldownID)
+                    if spell then
+                        entries[#entries + 1] = { cooldownID = cooldownID, spellID = spell, viewer = name }
+                    else
+                        unmapped = unmapped + 1
+                        entries[#entries + 1] = { cooldownID = cooldownID, viewer = name }
+                    end
+                end
+            end
+            return {
+                status = (#entries == 0 and "empty") or (unmapped > 0 and "partial") or "complete",
+                entries = entries, viewer = name, unmapped = unmapped, source = "viewer",
+            }
+        end
+        if problem then reasons[#reasons + 1] = name .. ":" .. problem end
+    end
+    local list = providerList(id)
+    if list then
+        local entries, unmapped = {}, 0
+        for _, value in ipairs(list) do
+            local cooldownID = plainNumber(value)
+            if cooldownID then
+                -- The provider record is authoritative for the mapping; the
+                -- cooldown ID itself is never used as a spell ID.
+                local spell = importableSpell(cooldownID)
+                if spell then
+                    entries[#entries + 1] = { cooldownID = cooldownID, spellID = spell, source = "provider" }
+                else
+                    unmapped = unmapped + 1
+                    entries[#entries + 1] = { cooldownID = cooldownID, source = "provider" }
+                end
+            end
+        end
+        return {
+            status = (#entries == 0 and "empty") or (unmapped > 0 and "partial") or "complete",
+            entries = entries, viewer = "provider", unmapped = unmapped, source = "provider",
+        }
+    end
+    return { status = "unreadable", entries = {}, reason = table.concat(reasons, ","), source = nil }
+end
+
+-- Re-reads one group's source and replaces the cache. A readable answer (even an
+-- empty one) is authoritative; an unreadable one keeps the last readable copy
+-- for the same profile/spec, so a source that blinks for one event does not
+-- drop the group back to the client's viewer. Without any copy the status stays
+-- "unreadable" and the caller hands that group back.
+local function readManifest(group)
+    local id = group.id
+    local current = identity()
+    if not sameIdentity(manifest.identity, current) then
+        -- A different profile or specialization invalidates every cached list:
+        -- reusing them would show another character's skills.
+        manifest.identity, manifest.groups = current, {}
+    end
+    local previous = manifest.groups[id]
+    local read = readGroupManifest(id)
+    local entry = previous or { id = id }
+    entry.pending = nil
+    if read.status ~= "unreadable" then
+        entry.status, entry.entries, entry.snapshot = read.status, read.entries, true
+        entry.source, entry.viewer, entry.reason = read.source, read.viewer, read.reason
+        entry.unmapped = read.unmapped or 0
+        entry.empty = read.status == "empty"
+        entry.stale = nil
+        entry.time = nowSeconds() or 0
+    else
+        entry.unmapped = 0
+        if not entry.snapshot then
+            entry.status, entry.entries = "unreadable", entry.entries or {}
+            entry.source, entry.reason = nil, read.reason
+        else
+            -- With a snapshot the status stays whatever that snapshot said; the
+            -- blink is reported in `stale` instead of changing the display.
+            entry.stale = true
+        end
+    end
+    manifest.groups[id] = entry
+    return entry
+end
+
+-- The cached manifest, read once per identity/source change. The cooldown
+-- ticker and every ordinary refresh go through here: they never walk the
+-- client's provider.
+local function manifestFor(group)
+    if not group then return { status = "unreadable", entries = {} } end
+    local current = identity()
+    if not sameIdentity(manifest.identity, current) then
+        manifest.identity, manifest.groups = current, {}
+    end
+    local entry = manifest.groups[group.id]
+    -- An entry that never produced a list is retried: the client can load its
+    -- viewers late. An entry with a snapshot is not re-read here unless a source
+    -- event marked it.
+    if entry and not entry.pending and (entry.snapshot or entry.status ~= "unreadable") then return entry end
+    return readManifest(group)
+end
+
+-- A source or identity change marks the cached lists for a re-read on the next
+-- render. The previous readable copy is kept so one unreadable event cannot
+-- erase what is on screen. Ordinary cooldown, charge and aura events do not
+-- call this.
+local function invalidateManifest(id)
+    for key, entry in pairs(manifest.groups) do
+        if not id or key == id then entry.pending = true end
+    end
+end
+
+-- Spell ids a group draws right now, with the manifest status that produced
+-- them. `unmapped` counts entries the client listed but this build cannot name
+-- as a spell; they leave a reported gap instead of an empty square.
+local function groupList(group, entries)
+    entries = entries or manifestFor(group)
+    local list, unmapped = {}, entries.unmapped or 0
+    if entries.status == "unreadable" then return list, entries, unmapped end
+    for _, item in ipairs(entries.entries or {}) do
+        if item.spellID then list[#list + 1] = item.spellID end
+    end
+    return list, entries, unmapped
 end
 
 -- A group's list: the player's own Cooldown Manager by default (`auto`), and the
 -- stored copy once anything was added, removed or reordered by hand.
-local function effectiveOrder(group)
+local function effectiveOrder(group, entries)
     if group and group.auto then
-        local list = clientList(group.id)
-        if list and #list > 0 then return list end
+        local list, status = groupList(group, entries)
+        return list, status
     end
-    return group and group.order or {}
+    if not group then return {}, nil end
+    -- A stored copy is the player's explicit list; it has no source to be
+    -- unreadable from, though entries may still fail to resolve.
+    return group.order or {}, { status = "manual", entries = {}, source = "manual" }
+end
+
+-- The total display cap. `max` keeps its historical meaning (icons per row);
+-- `limit` is how many entries of the list are shown at all. Trimming happens
+-- before the row plan so the geometry follows the number actually drawn.
+local function cappedList(list, group)
+    local limit = group and plainNumber(group.limit) or nil
+    if not limit or limit >= #list then return list end
+    local trimmed = {}
+    for index = 1, math.max(0, math.floor(limit)) do trimmed[index] = list[index] end
+    return trimmed
 end
 
 local function cellFor(container, index)
@@ -399,20 +614,30 @@ local function placeCells(container)
     end
 end
 
--- The tracked-buff block packs only the buffs that are actually on the player.
--- Planning from the full list would leave a hole for every idle entry, while
--- the client's viewer closes the row up.
 -- One word per group for what is on screen and why, so "nothing drawn" is never
--- ambiguous: off, unreadable (the client's list cannot be read and no stored
--- copy exists), empty (a readable empty list), idle (buffs listed, none active),
--- unresolved (entries the client cannot name or draw), drawing.
-local function groupStatus(owned, group, container, order)
+-- ambiguous:
+--   off          the group is switched off or the own mode is off
+--   unreadable   the client's list cannot be read and no complete copy exists
+--   stale        the source blinked; the last complete copy is being drawn
+--   partial      the list was read but some entries cannot be named as spells
+--   empty        a readable empty list
+--   idle         tracked buffs are listed but none is active
+--   unresolved   entries are listed but none can be drawn
+--   drawing      at least one cell is drawn
+local function groupStatus(owned, group, container, order, entries)
     if not owned or not group.enabled then return "off" end
+    local status = entries and entries.status or (group.auto and "unreadable" or "manual")
+    if group.kind == "buff" and entries and entries.readable == false then return "unreadable" end
+    if group.auto and status == "unreadable" then return "unreadable" end
+    if (container and container.drawn or 0) > 0 then
+        if group.auto and entries and entries.stale then return "stale" end
+        if group.auto and status == "partial" then return "partial" end
+        return "drawing"
+    end
     if #order == 0 then
-        if group.auto and clientList(group.id) == nil then return "unreadable" end
+        if group.auto and status == "unreadable" then return "unreadable" end
         return "empty"
     end
-    if (container and container.drawn or 0) > 0 then return "drawing" end
     if group.kind == "buff" then return "idle" end
     return "unresolved"
 end
@@ -420,10 +645,12 @@ end
 local function buffRender(self, container)
     local group = container.group
     local maxWidth = math.max(80, (self.maxWidth or 400))
-    local order = effectiveOrder(group)
-    local active, states = {}, {}
+    local order, entries = effectiveOrder(group)
+    order = cappedList(order, group)
+    local active, states, readable = {}, {}, true
     for _, spellID in ipairs(order) do
-        local state = buffState(auraCandidates(spellID))
+        local state, canRead = buffState(auraCandidates(spellID))
+        if canRead == false then readable = false end
         if state then
             active[#active + 1] = spellID
             states[spellID] = state
@@ -444,13 +671,18 @@ local function buffRender(self, container)
                 icon = state.icon,
                 count = state.count,
                 remaining = state.remaining,
-                state = state.remaining and "tracking" or "ready",
+                durationObject = state.durationObject,
+                state = (state.remaining or state.durationObject) and "tracking" or "ready",
             })
             cell.lumaSpellID = spellID
             cell.lumaRemaining = state.remaining
         end
     end
     container.drawn = #active
+    -- Auras the client cannot read at all keep the native buff viewers: nothing
+    -- on screen may silently replace them with an empty block.
+    container.auraReadable = readable
+    if entries then entries.readable = readable end
 end
 
 local function renderOne(self, container)
@@ -461,8 +693,11 @@ local function renderOne(self, container)
     end
     local maxWidth = math.max(80, (self.maxWidth or 400))
     -- The plan must count the same list the loop draws, or follow mode would lay
-    -- out the stored copy and draw the client's.
-    local order = effectiveOrder(group)
+    -- out the stored copy and draw the client's. The total cap is applied before
+    -- the row plan, so the geometry follows the number of icons on screen.
+    local order, entries = effectiveOrder(group)
+    order = cappedList(order, group)
+    container.manifest = entries
     container.plan = Model:Plan({
         order = order, size = group.size, gap = group.gap, max = group.max,
         style = group.style, vertical = group.vertical,
@@ -490,13 +725,14 @@ local function renderOne(self, container)
                 local state = spellState(shown)
                 local label = state.unknown and "unknown"
                     or (state.proc and "proc")
-                    or (state.remaining and "tracking" or "ready")
+                    or (state.remaining and "tracking" or (state.durationData and "tracking" or "ready"))
                 container.states[label] = (container.states[label] or 0) + 1
                 app.PearlCell:Apply(cell, {
                     icon = info.texture,
                     count = state.charges,
                     remaining = state.remaining,
                     start = state.start, duration = state.duration,
+                    durationObject = state.durationData,
                     state = label,
                 })
                 cell.lumaSpellID = spellID
@@ -611,7 +847,7 @@ end
 -- it knows the base spell, an override and the linked spells — and a trinket
 -- without a base spell still has one of them. Only an entry with no spell at all
 -- (a pure equip-slot entry) is skipped, and it is reported by `unresolved`.
-local function importableSpell(cooldownID)
+importableSpell = function(cooldownID)
     local info = cooldownInfo(cooldownID)
     if not info then return legacyImportSpell(cooldownID) end
     local spell = plainNumber(info.spellID)
@@ -639,13 +875,18 @@ toSpellIDs = function(ids)
     return list
 end
 
--- Reads the list the player actually configured. The Cooldown Manager's own
--- settings data provider is the same source its viewers render from, so an edit
--- in the client's CDM editor (order, hiding, a spell removed from the group) is
--- what `import` brings in. The documented category set is the fallback for
--- builds without the provider, and the legacy globals stay for older ones; a
--- missing source still changes nothing.
-clientOrder = function(category)
+-- The raw cooldown-ID list the player configured, in the client's order. The
+-- Cooldown Manager's own settings data provider is the same source its viewers
+-- render from, so an edit in the client's CDM editor (order, hiding, a spell
+-- removed from the group) is what the manifest sees. The documented category set
+-- is the fallback for builds without the provider, and the legacy globals stay
+-- for older ones.
+--
+-- A table is always an answer, even an empty one: `{}` means "the player has
+-- nothing configured here", `nil` means "this source could not answer". An empty
+-- answer with `#list == 0` used to fall through to the next source, which is how
+-- a confirmed empty group became indistinguishable from an unreadable one.
+rawCategoryList = function(category)
     if category == nil then return nil end
     local settings = _G.CooldownViewerSettings
     if type(settings) == "table" and type(settings.GetDataProvider) == "function" then
@@ -653,37 +894,34 @@ clientOrder = function(category)
         if okProvider and type(provider) == "table"
             and type(provider.GetOrderedCooldownIDsForCategory) == "function" then
             local ok, list = pcall(provider.GetOrderedCooldownIDsForCategory, provider, category)
-            if ok and type(list) == "table" and #list > 0 then
-                local spells = toSpellIDs(list)
-                if #spells > 0 then return spells end
-            end
+            if ok and type(list) == "table" then return list end
         end
     end
     local viewers = _G.C_CooldownViewer
     if type(viewers) == "table" then
         if type(viewers.GetCooldownViewerCategorySet) == "function" then
             local ok, list = pcall(viewers.GetCooldownViewerCategorySet, category, false)
-            if ok and type(list) == "table" and #list > 0 then
-                local spells = toSpellIDs(list)
-                if #spells > 0 then return spells end
-            end
+            if ok and type(list) == "table" then return list end
         end
         if type(viewers.GetOrderedCooldownIDsForCategory) == "function" then
             local ok, list = pcall(viewers.GetOrderedCooldownIDsForCategory, category)
-            if ok and type(list) == "table" and #list > 0 then
-                local spells = toSpellIDs(list)
-                if #spells > 0 then return spells end
-            end
+            if ok and type(list) == "table" then return list end
         end
     end
     if type(_G.GetOrderedCooldownIDsForCategory) == "function" then
         local ok, list = pcall(_G.GetOrderedCooldownIDsForCategory, category)
-        if ok and type(list) == "table" and #list > 0 then
-            local spells = toSpellIDs(list)
-            if #spells > 0 then return spells end
-        end
+        if ok and type(list) == "table" then return list end
     end
     return nil
+end
+
+-- The same list as spell IDs, for callers that only need drawable spells.
+-- Entries the client lists but this build cannot name are skipped here; the
+-- manifest counts them separately.
+clientOrder = function(category)
+    local list = rawCategoryList(category)
+    if list == nil then return nil end
+    return toSpellIDs(list)
 end
 
 --------------------------------------------------------------------
@@ -743,28 +981,39 @@ component = app:RegisterComponent({ id = "cooldownGroups", label = "cooldownGrou
         self.containers = self.containers or {}
         local screenWidth = UIParent:GetWidth() or 1024
         self.maxWidth = screenWidth * MAX_WIDTH_RATIO
-        self:Listen("SPELL_UPDATE_COOLDOWN", function(current)
-            app:Call(JOB, current.Refresh, current)
-        end)
-        self:Listen("SPELL_UPDATE_CHARGES", function(current)
-            app:Call(JOB, current.Refresh, current)
-        end)
-        for _, event in ipairs({ "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" }) do
-            pcall(self.Listen, self, event, function(current)
+        -- Live state events: they re-read the cells, never the client's list.
+        -- This is what keeps a counting cooldown from walking the manifest ten
+        -- times a second and from dropping the block when the provider blinks.
+        local function stateEvent(event)
+            self:Listen(event, function(current)
                 app:Call(JOB, current.Refresh, current)
             end)
         end
-        self:Listen("SPELLS_CHANGED", function(current)
-            app:Call(JOB, current.Refresh, current)
-        end)
-        -- The buff group draws the player's auras, so an aura change is data:
-        -- the icon, the stacks and the remaining time all move on this event.
+        stateEvent("SPELL_UPDATE_COOLDOWN")
+        stateEvent("SPELL_UPDATE_CHARGES")
+        stateEvent("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+        stateEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+        -- `UNIT_AURA` for the player is state too: the buff group draws the
+        -- aura's icon, stacks and remaining time.
         self:Listen("UNIT_AURA", function(current)
             app:Call(JOB, current.Refresh, current)
         end, "player")
-        self:Listen("PLAYER_ENTERING_WORLD", function(current)
-            app:Call(JOB, current.Refresh, current)
-        end)
+        -- Source events: the client's list itself changed. These are the only
+        -- places that rebuild the manifest.
+        local function sourceEvent(event)
+            self:Listen(event, function(current)
+                app:Call(JOB, current.RefreshSource, current)
+            end)
+        end
+        sourceEvent("SPELLS_CHANGED")
+        sourceEvent("PLAYER_ENTERING_WORLD")
+        for _, event in ipairs({ "PLAYER_SPECIALIZATION_CHANGED", "TRAIT_CONFIG_UPDATED",
+            "PLAYER_EQUIPMENT_CHANGED", "COOLDOWN_VIEWER_SETTINGS_CHANGED",
+            "EDIT_MODE_LAYOUTS_UPDATED" }) do
+            pcall(self.Listen, self, event, function(current)
+                app:Call(JOB, current.RefreshSource, current)
+            end)
+        end
         self:Listen("PLAYER_REGEN_DISABLED", function(current) current:CancelDraft() end)
         app:Subscribe(self, "PROFILE_CHANGED", function(current)
             if self.running then self:CancelDraft() end
@@ -774,10 +1023,9 @@ component = app:RegisterComponent({ id = "cooldownGroups", label = "cooldownGrou
         end)
         self:Render()
     end,
+    -- Live-state pass: keeps the manifest and the applied geometry, re-reads the
+    -- cells. Ordinary cooldown, charge, proc and aura events land here.
     Refresh = function(self)
-        -- Every event-driven pass re-reads the client's Coolown Manager list; the
-        -- ten-a-second ticker keeps using the cached copy.
-        orderCache = {}
         self.maxWidth = (UIParent:GetWidth() or 1024) * MAX_WIDTH_RATIO
         self:Render()
     end,
@@ -796,17 +1044,68 @@ component = app:RegisterComponent({ id = "cooldownGroups", label = "cooldownGrou
     end,
 })
 
+-- Requests the client's viewer to be hidden and reads the effective state back.
+-- `pcall(Hide)` returning true only means the call did not throw; a refused
+-- write leaves the viewer on screen and the group must not claim to own it.
+-- Returns hidden:boolean, problem:string|nil.
+function component:ApplyViewerHidden(id, frame)
+    frame = frame or viewerFrame(id)
+    if not frame then return false, "absent" end
+    self.hidden = self.hidden or {}
+    if viewerIsBeingEdited(frame) then
+        self.hidden[id] = nil
+        return false, "editing"
+    end
+    local okShown, shown = pcall(frame.IsShown, frame)
+    if not okShown then
+        self.hidden[id] = nil
+        return false, "unreadable"
+    end
+    if shown == true then
+        local okCall = pcall(frame.Hide, frame)
+        local okRead, after = pcall(frame.IsShown, frame)
+        if not okCall or not okRead or after ~= false then
+            self.hidden[id] = nil
+            return false, "hide-refused"
+        end
+    end
+    -- A hidden child of a hidden parent is not "visible"; IsVisible covers the
+    -- parent chain where the build has it. A viewer left at alpha 0 is also not
+    -- on screen, and reading that is the third check the client offers.
+    local okVisible, visible = pcall(frame.IsVisible, frame)
+    if okVisible and visible == true then
+        local okAlpha, alpha = pcall(frame.GetAlpha, frame)
+        alpha = okAlpha and plainNumber(alpha) or nil
+        if not alpha or alpha > 0.01 then
+            self.hidden[id] = nil
+            return false, "still-visible"
+        end
+    end
+    self.hidden[id] = true
+    return true
+end
+
 -- Hides the client's viewer for a group while that group is drawn, and puts it
 -- back when the group stops drawing, the component stops or the player edits the
 -- client's cooldowns. The client recomputes its own visibility often (edit-mode
 -- layout, cvar change, combat change), so the suppression is re-applied after
 -- its decision instead of writing anything into its settings.
+-- The returned flag is the read-back result, not "the call was made".
 function component:SuppressNativeViewer(id, active)
     local frame = viewerFrame(id)
-    if not frame then return false end
     self.viewerHooks = self.viewerHooks or {}
     self.suppressed = self.suppressed or {}
+    self.hidden = self.hidden or {}
     if active then
+        -- No frame at all means the client has no such display in this session
+        -- (the viewers load with their own addon). Nothing can be on screen, so
+        -- the own layer is the only display; report the absence instead of
+        -- dropping our block for a viewer that does not exist.
+        if not frame then
+            self.suppressed[id] = true
+            self.hidden[id] = true
+            return true, "absent"
+        end
         if not self.viewerHooks[id] and type(frame.UpdateShownState) == "function"
             and type(hooksecurefunc) == "function" then
             self.viewerHooks[id] = true
@@ -814,22 +1113,21 @@ function component:SuppressNativeViewer(id, active)
                 if not (self.suppressed and self.suppressed[id]) then return end
                 if viewerIsBeingEdited(frame) then return end
                 if frame:IsShown() then pcall(frame.Hide, frame) end
+                -- Re-read after the client's own decision so the ownership record
+                -- never says "hidden" while the viewer is on screen.
+                if component.running then component:ApplyViewerHidden(id, frame) end
             end)
         end
         self.suppressed[id] = true
-        -- Only pay for the edit checks when the client just put it on screen.
-        local okShown, shown = pcall(frame.IsShown, frame)
-        if okShown and shown == true and not viewerIsBeingEdited(frame) then
-            pcall(frame.Hide, frame)
-        end
-        return true
+        return self:ApplyViewerHidden(id, frame)
     end
-    if not self.suppressed[id] then return false end
+    if not self.suppressed[id] then return false, "not-suppressed" end
     self.suppressed[id] = nil
+    self.hidden[id] = nil
     -- Let the client decide again: it shows the viewer only when its own rules
     -- say so, so a CDM the player turned off stays off.
-    if type(frame.UpdateShownState) == "function" then pcall(frame.UpdateShownState, frame) end
-    return true
+    if frame and type(frame.UpdateShownState) == "function" then pcall(frame.UpdateShownState, frame) end
+    return true, "released"
 end
 
 -- The spell ids the centre tracked-buff group is drawing right now, so the edge
@@ -838,7 +1136,8 @@ function component:TrackedSpells()
     local set = {}
     local container = self.running and self.containers and self.containers.buffs
     if container and (container.drawn or 0) > 0 and container.group then
-        for _, spellID in ipairs(effectiveOrder(container.group)) do set[spellID] = true end
+        local list = effectiveOrder(container.group)
+        for _, spellID in ipairs(list) do set[spellID] = true end
     end
     return set
 end
@@ -854,8 +1153,10 @@ function component:Render()
         local group = groups.groups[id]
         local container = self.containers[id] or ensureContainer(self, group)
         container.group = group
-        local order = effectiveOrder(group)
+        local order, entries = effectiveOrder(group)
+        order = cappedList(order, group)
         local drew = false
+        local drawnNow = false
         if owned and group.enabled and #order > 0 then
             refreshGroup(self, container, false)
             drew = (container.drawn or 0) > 0
@@ -898,29 +1199,87 @@ function component:Render()
         -- the client's block instead of leaving an empty hole on screen.
         -- An empty cooldown group still replaces the client's block (that is the
         -- point of the takeover), but an empty buff list must not: nothing would
-        -- be drawn for the buffs the player expects to see.
+        -- be drawn for the buffs the player expects to see, and an unreadable
+        -- aura list must never replace them either.
+        local status = groupStatus(owned, group, container, order, entries)
         local suppress
         if group.kind == "buff" then
-            suppress = owned and group.enabled and drew
-        else
-            -- An unreadable source with no stored copy hands the block back.
+            suppress = owned and group.enabled and drew and container.auraReadable ~= false
+        elseif group.auto then
+            -- Automatic lists replace the block only when the client's list was
+            -- read. `partial` keeps the native block: an entry that cannot be
+            -- named here is still drawn by the client, and hiding it would lose
+            -- a trinket or an equip-slot cooldown. `empty` is a confirmed answer
+            -- and does replace it.
             suppress = owned and group.enabled
-                and (drew or (#order == 0 and groupStatus(owned, group, container, order) ~= "unreadable"))
+                and (entries and (entries.status == "complete" or entries.status == "empty"))
+                and (drew or #order == 0)
+        else
+            -- A stored copy is the player's own list; there is no source to wait
+            -- for. Entries that resolve to nothing hand the block back.
+            suppress = owned and group.enabled and (drew or #order == 0)
         end
-        local status = groupStatus(owned, group, container, order)
+        -- Handover per viewer: hide, read the result back, and only then claim
+        -- the block. A refused hide disables this group's own layer instead of
+        -- leaving two displays on screen.
+        local verified, problem = false, nil
+        for _, viewer in ipairs(VIEWER_GROUPS[id] or {}) do
+            local keepBuff = (viewer == "buffIcon" or viewer == "buffBar")
+                and groups.hideBuffViewers == false
+            if suppress and not keepBuff then
+                local hidden, why = self:SuppressNativeViewer(viewer, true)
+                if hidden then
+                    verified = true
+                else
+                    problem = problem or why
+                end
+            else
+                self:SuppressNativeViewer(viewer, false)
+            end
+        end
+        if suppress and not verified then
+            -- Nothing could be handed over: drop our layer for this group so the
+            -- client's own viewer is the only display, and name the reason.
+            container.frame:Hide()
+            container.visibleHeight = 0
+            container.anchorSignature = nil
+            container.drawn = 0
+            for _, cell in ipairs(container.cells or {}) do
+                app.PearlCell:Clear(cell)
+                cell:Hide()
+            end
+            status = "handover-" .. tostring(problem or "unknown")
+        elseif suppress and problem then
+            -- At least one viewer of a two-viewer group stayed visible; the
+            -- block is still owned and the exception is reported.
+            status = "partial"
+        end
         container.status = status
+        container.source = entries and entries.source
+        container.stale = entries and entries.stale == true
         if app.Ownership then
             app.Ownership:Set("cooldownGroups." .. id, {
                 intent = owned and "owned" or "native",
-                active = (suppress and "owned") or "native",
+                active = (suppress and verified) and "owned" or "native",
                 evidence = "simulated",
                 reason = status ~= "drawing" and status or nil,
             })
         end
+        -- Per-viewer records live under their own namespace: a group id and one
+        -- viewer id can be the same word ("utility"), and one must never
+        -- overwrite the other's record.
         for _, viewer in ipairs(VIEWER_GROUPS[id] or {}) do
-            local keepBuff = (viewer == "buffIcon" or viewer == "buffBar")
-                and groups.hideBuffViewers == false
-            self:SuppressNativeViewer(viewer, suppress and not keepBuff)
+            local groupRecord = app.Ownership and app.Ownership:Get("cooldownGroups." .. id)
+            if groupRecord then
+                local hiddenNow = self.hidden and self.hidden[viewer]
+                app.Ownership:Set("cooldownGroups.viewer." .. viewer, {
+                    intent = groupRecord.intent,
+                    active = hiddenNow and "owned" or "native",
+                    evidence = "simulated",
+                    reason = hiddenNow and nil
+                        or ((self.suppressed and self.suppressed[viewer]) and "hide-refused" or "client-managed"),
+                })
+            end
         end
     end
     ensureTicker(self)
@@ -931,6 +1290,14 @@ function component:Render()
             evidence = "simulated",
         })
     end
+end
+
+-- Source pass: the client's own list changed (spells, specialization, talents,
+-- equipment, a Cooldown Manager edit). Only this path rebuilds the manifest.
+function component:RefreshSource()
+    if not self.running then return end
+    invalidateManifest()
+    self:Refresh()
 end
 
 -- Draft editing. `SetDraft` previews one option at once; `ApplyDraft` writes
@@ -1011,10 +1378,26 @@ end
 
 function component:Import(id, replace)
     id = isGroupID(id) and id or "essential"
-    local order = clientOrder(categoryOf(id))
-    if not order then
+    -- The viewer's own list is what the player arranged; the category lookup is
+    -- the fallback for a build without that viewer. Entries the client lists but
+    -- this build cannot name are counted, not silently dropped into the copy.
+    local read = readGroupManifest(id)
+    local order, unmapped = {}, 0
+    if read.status ~= "unreadable" then
+        for _, item in ipairs(read.entries) do
+            if item.spellID then order[#order + 1] = item.spellID else unmapped = unmapped + 1 end
+        end
+    end
+    if #order == 0 then
+        local fallback = clientOrder(categoryOf(id))
+        if fallback then order = fallback end
+    end
+    if read.status == "unreadable" and #order == 0 then
         app:Print(app.L.cdsNoSource)
         return false
+    end
+    if unmapped > 0 then
+        app:Print(string.format(app.L.cdsImportUnmapped, unmapped))
     end
     local added, replaced = 0, 0
     local ok = self:Edit(function(groups)
@@ -1193,8 +1576,12 @@ function component:Diagnose()
     local groups = Model:Normalize(profileGroups())
     local viewers = {}
     for _, id in ipairs({ "essential", "utility", "buffIcon", "buffBar" }) do
-        viewers[#viewers + 1] = string.format("%s=%s", id,
-            self.suppressed and self.suppressed[id] and "hidden" or "kept")
+        -- Readback state, not the request: `hidden` means the frame reported
+        -- itself off screen after the write.
+        local state = "kept"
+        if self.hidden and self.hidden[id] then state = "hidden"
+        elseif self.suppressed and self.suppressed[id] then state = "refused" end
+        viewers[#viewers + 1] = string.format("%s=%s", id, state)
     end
     app:Print(string.format("cooldownGroups: running=%s owned=%s buff-viewers=%s native-viewers=%s",
         yes(self.running), yes(groups.owned), groups.hideBuffViewers and "hide" or "keep",
@@ -1208,10 +1595,17 @@ function component:Diagnose()
         if group.kind == "buff" then
             idle = string.format(" idle=%d", container and container.inactive or 0)
         end
+        local manifest = manifest.groups[id]
         app:Print(string.format("  %s: status=%s", id, container and container.status or "off"))
-        app:Print(string.format("  %s: entries=%d%s enabled=%s size=%d gap=%d max=%d rows=%d perRow=%d drawn=%s%s",
+        app:Print(string.format("  %s: entries=%d%s enabled=%s size=%d gap=%d max=%d limit=%d rows=%d perRow=%d drawn=%s%s",
             id, #order, group.auto and " (auto)" or "", yes(group.enabled), group.size, group.gap, group.max,
-            #plan.rows, plan.perRow or 0, container and tostring(container.drawn or 0) or "-", idle))
+            group.limit, #plan.rows, plan.perRow or 0, container and tostring(container.drawn or 0) or "-", idle))
+        -- Where the list came from and whether the last read worked. No timing
+        -- values, no entry names: a reader can tell a stale snapshot from an
+        -- unreadable source without seeing a single restricted number.
+        app:Print(string.format("    source=%s snapshot=%s stale=%s unmapped=%d",
+            tostring(manifest and manifest.source or "-"), yes(manifest and manifest.snapshot),
+            yes(manifest and manifest.stale), manifest and manifest.unmapped or 0))
         if #order > 0 then
             local ids, unresolved = {}, 0
             for index, spellID in ipairs(order) do

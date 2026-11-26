@@ -589,6 +589,7 @@ end)
 test("the Esc menu gets one LumaUI entry before AddOns and cleans up on rebuild", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local menu = _G.GameMenuFrame
+    local trace = app.EdgeTrace
     eq(app.components.gameMenu.running, true)
     local function mine()
         local found = {}
@@ -603,26 +604,74 @@ test("the Esc menu gets one LumaUI entry before AddOns and cleans up on rebuild"
     local addons
     for button in menu.buttonPool:EnumerateActive() do if button.text == "AddOns" then addons = button end end
     eq(entry.layoutIndex < addons.layoutIndex, true)
+    -- The decoration is four edge textures on the button, never a full panel.
+    eq(entry.lumaTrace ~= nil, true)
+    eq(entry.lumaTrace.progress, 0)
+    eq(entry.lumaTrace.segments.top:IsShown(), false)
     -- Repeated opens and an event rebuild never duplicate the entry.
     menu:Hide(); menu:Show(); menu.scripts.OnEvent(menu); menu.scripts.OnEvent(menu)
     eq(#mine(), 1)
     entry = mine()[1]
-    -- Hover draws the outline; leaving removes it.
-    local overlay = app.components.gameMenu.overlay
+    -- Hover walks the perimeter: first frame grows, mid state keeps every edge
+    -- at the formula's length, and the end state stays visible.
     entry.scripts.OnEnter(entry)
-    app.Transitions:SettleAll()
-    eq(overlay:GetAlpha(), 1)
+    H.Advance(0.016)
+    local early = entry.lumaTrace.progress
+    eq(early > 0 and early < 1, true)
+    H.Advance(0.08)
+    local mid = entry.lumaTrace.progress
+    local width, height = entry:GetWidth(), entry:GetHeight()
+    local lengths = trace:Lengths(width, height, mid)
+    eq(entry.lumaTrace.segments.top:GetWidth(), lengths.top)
+    eq(entry.lumaTrace.segments.left:GetHeight(), lengths.left)
+    eq(entry.lumaTrace.segments.bottom:GetWidth(), lengths.bottom)
+    H.Advance(0.3)
+    eq(entry.lumaTrace.progress, 1)
+    eq(entry.lumaTrace.segments.top:IsShown(), true)
+    eq(entry.lumaTrace.segments.top:GetWidth(), width)
+    eq(entry.lumaTrace.segments.right:GetHeight(), height)
+    -- Resting at the end leaves no animation driver behind.
+    eq(app.Transitions:Count(), 0)
+    -- A repeated OnEnter in the same hover does not restart the walk.
+    entry.scripts.OnEnter(entry)
+    eq(entry.lumaTrace.progress, 1)
+    eq(app.Transitions:Count(), 0)
+    -- Leaving reverses from the progress that is on screen, then hides it.
     entry.scripts.OnLeave(entry)
-    app.Transitions:SettleAll()
-    eq(overlay:GetAlpha(), 0)
-    -- A native rebuild releases the button: no script or overlay is left on it.
+    H.Advance(0.016)
+    local reversed = entry.lumaTrace.progress
+    eq(reversed < 1 and reversed > 0, true)
+    H.Advance(0.3)
+    eq(entry.lumaTrace.progress, 0)
+    eq(entry.lumaTrace.segments.top:IsShown(), false)
+    eq(app.Transitions:Count(), 0)
+    -- Fast in-and-out: the leave starts from a partly drawn ring.
+    entry.scripts.OnEnter(entry)
+    H.Advance(0.04)
+    local partial = entry.lumaTrace.progress
+    entry.scripts.OnLeave(entry)
+    H.Advance(0.016)
+    eq(entry.lumaTrace.progress < partial, true)
+    H.Advance(0.3)
+    -- A native rebuild releases the button. The client's own scripts are not
+    -- cleared by LumaUI: the old listener becomes inert instead.
+    local segments = entry.lumaTrace.segments
     menu:Reset()
-    eq(entry.scripts.OnEnter, nil)
-    eq(entry.scripts.OnMouseDown, nil)
-    eq(overlay:IsShown(), false)
-    -- Click closes the menu and opens the overview.
+    eq(entry.lumaTrace, nil)
+    eq(segments.top:IsShown(), false)
+    entry.scripts.OnEnter(entry)
+    eq(entry.lumaTrace, nil)
+    -- The pooled instance may come back as our entry; the old generation stays
+    -- inert and only the new one draws.
     menu:Hide(); menu:Show()
     entry = mine()[1]
+    eq(entry.lumaTrace ~= nil, true)
+    local stale = segments.top
+    entry.scripts.OnEnter(entry)
+    H.Advance(0.3)
+    eq(entry.lumaTrace.progress, 1)
+    eq(stale:IsShown(), false)
+    -- Click closes the menu and opens the overview; the host handler is intact.
     entry.scripts.OnClick(entry)
     eq(menu:IsShown(), false)
     eq(app.Settings.active, "overview")
@@ -635,7 +684,102 @@ test("the Esc menu gets one LumaUI entry before AddOns and cleans up on rebuild"
     eq(#app.errors, 0)
 end)
 
-test("the Esc entry stays static with reduced motion", function()
+test("the Esc menu wears LumaUI's own surface, header, buttons and layout", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local menu = _G.GameMenuFrame
+    eq(app.components.gameMenu.running, true)
+    menu:Show()
+    -- The client's stone border and nine-slice are painted out; LumaUI's card
+    -- plate (the same recipe as the settings window) is the visible surface.
+    eq(menu.lumaPlate ~= nil, true)
+    eq(menu.lumaPlate:IsShown(), true)
+    eq(menu.lumaSurfaceRole, "card")
+    eq(menu.Border.Bg:GetAlpha(), 0)
+    eq(menu.Border.NineSlice:GetAlpha(), 0)
+    -- The metal header art is gone; the title takes LumaUI's title role.
+    eq(menu.Header.LeftBG:GetAlpha(), 0)
+    eq(menu.Header.RightBG:GetAlpha(), 0)
+    eq(menu.Header.CenterBG:GetAlpha(), 0)
+    eq(menu.Header.Text.font, app.Type:Face())
+    eq(menu.Header.Text.justifyH, "LEFT")
+    -- Every pooled button loses its red slices and gains LumaUI's surfaces and
+    -- state fonts.
+    local button = menu.active[1]
+    eq(button.Left:GetAlpha(), 0)
+    eq(button.Center:GetAlpha(), 0)
+    eq(button.Right:GetAlpha(), 0)
+    eq(button.normalTexture:GetAlpha(), 0)
+    eq(button.highlightTexture:GetAlpha(), 0)
+    eq(button.normalFontObject.name, "LumaUIGameMenuNormal")
+    eq(button.highlightFontObject.name, "LumaUIGameMenuHighlight")
+    eq(button.disabledFontObject.name, "LumaUIGameMenuDisabled")
+    eq(button.lumaPlate ~= nil, true)
+    eq(button:GetHeight(), 34)
+    -- Layout constants and width are the LumaUI card, not the native dialog.
+    eq(menu:GetWidth(), 300)
+    eq(menu.topPadding, 54)
+    eq(menu.leftPadding, 18)
+    -- The LumaUI entry is still inserted in front of the add-ons entry.
+    local entry
+    for current in menu.buttonPool:EnumerateActive() do
+        if current.text == app.L.menuEntry then entry = current end
+    end
+    eq(entry ~= nil, true)
+    -- A native rebuild re-applies the skin to the finished menu.
+    menu:InitButtons()
+    eq(menu.active[1].Left:GetAlpha(), 0)
+    eq(menu.active[1].normalFontObject.name, "LumaUIGameMenuNormal")
+    -- A theme change retints the hover state without rebuilding the menu.
+    app.Store:Set("appearance", "accent", "ember")
+    eq(button.highlightFontObject.color[1], app.Theme:Accent()[1])
+    -- Disabling hands every recorded value back.
+    app.Store:Set("modules", "gameMenu", false)
+    eq(menu.Border.Bg:GetAlpha(), 1)
+    eq(menu.Border.NineSlice:GetAlpha(), 1)
+    eq(menu.Header.CenterBG:GetAlpha(), 1)
+    eq(menu.Header.Text.font, "Fonts/Mock.ttf")
+    eq(menu:GetWidth(), 260)
+    eq(menu.topPadding, 48)
+    eq(button.Left:GetAlpha(), 1)
+    eq(button.Center:GetAlpha(), 1)
+    eq(button.normalTexture:GetAlpha(), 1)
+    eq(button.normalFontObject, _G.GameFontHighlightLarge)
+    eq(menu.lumaSurfaceRole, nil)
+    eq(#app.errors, 0)
+end)
+
+test("the Esc entry starts its trace when the menu opens under the pointer", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local menu = _G.GameMenuFrame
+    local function mine()
+        for button in menu.buttonPool:EnumerateActive() do
+            if button.text == app.L.menuEntry then return button end
+        end
+    end
+    menu:Show()
+    local entry = mine()
+    -- No OnEnter is dispatched when the menu appears under a resting pointer:
+    -- the component asks IsMouseOver once on the next frame.
+    entry.mouseOver = true
+    H.Advance(0.001)
+    H.Advance(0.3)
+    eq(entry.lumaTrace.progress, 1)
+    -- The probe never runs twice: hiding and re-showing with the pointer still
+    -- there, but the entry already drawn, keeps one state.
+    local before = entry.lumaTrace
+    H.Advance(0.5)
+    eq(entry.lumaTrace, before)
+    eq(app.Transitions:Count(), 0)
+    -- A pointer that is not over the button starts nothing.
+    menu:Hide(); menu:Show()
+    entry = mine()
+    eq(entry.lumaTrace.progress, 0)
+    H.Advance(0.3)
+    eq(entry.lumaTrace.progress, 0)
+    eq(#app.errors, 0)
+end)
+
+test("the Esc entry stays static with reduced motion and settles mid-run", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Store:Set("appearance", "reduceMotion", true)
     local menu = _G.GameMenuFrame
@@ -643,8 +787,35 @@ test("the Esc entry stays static with reduced motion", function()
     local entry
     for button in menu.buttonPool:EnumerateActive() do if button.text == app.L.menuEntry then entry = button end end
     entry.scripts.OnEnter(entry)
-    eq(app.components.gameMenu.overlay:GetAlpha(), 1)
+    eq(entry.lumaTrace.progress, 1)
+    eq(entry.lumaTrace.segments.top:IsShown(), true)
     eq(app.Transitions:Count(), 0)
+    entry.scripts.OnLeave(entry)
+    eq(entry.lumaTrace.progress, 0)
+    -- Reduce motion switched on mid-run settles at the requested end state.
+    app.Store:Set("appearance", "reduceMotion", false)
+    entry.scripts.OnEnter(entry)
+    H.Advance(0.05)
+    local partial = entry.lumaTrace.progress
+    eq(partial > 0 and partial < 1, true)
+    app.Store:Set("appearance", "reduceMotion", true)
+    H.Advance(0.016)
+    eq(entry.lumaTrace.progress, 1)
+    eq(app.Transitions:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("the hover trace walks the full perimeter and reverses from its current value", function()
+    local app = H.Load()
+    local trace = app.EdgeTrace
+    local atHalf = trace:Lengths(100, 40, 0.5)
+    eq(atHalf.top, 70)
+    eq(atHalf.right, 0)
+    eq(atHalf.left, 40)
+    eq(atHalf.bottom, 30)
+    local full = trace:Lengths(100, 40, 1)
+    eq(full.top, 100); eq(full.right, 40); eq(full.left, 40); eq(full.bottom, 100)
+    eq(trace:Lengths(100, 40, 0).top, 0)
 end)
 
 test("geometry snaps to the grid, screen and other rectangles with fixed tie rules", function()
@@ -853,6 +1024,226 @@ test("unlock drag guides use a ticker that never outlives the drag", function()
     eq(#app.errors, 0)
 end)
 
+test("unlock handles keep numeric alphas and a failed start leaves no session", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local Layout, Unlock = app.Layout, app.Unlock
+    -- The harness SetAlpha now rejects anything but a finite number, so this
+    -- entry itself reproduces the boolean-alpha defect when it regresses.
+    eq(Unlock:Enter({}), true)
+    eq(Unlock.selected, nil)
+    for _, entry in pairs(Layout.entries) do
+        if entry.overlay then eq(entry.overlay:GetAlpha(), 1) end
+    end
+    eq(Unlock:Select("questList"), nil)
+    eq(Unlock.selected, "questList")
+    eq(Layout.entries.questList.overlay:GetAlpha(), 1)
+    local other
+    for id, entry in pairs(Layout.entries) do
+        if id ~= "questList" and entry.overlay then other = entry; break end
+    end
+    eq(other.overlay:GetAlpha(), 0.65)
+    -- An unknown id is not a selection: every handle is lit again.
+    Unlock:Select("not-a-handle")
+    eq(Unlock.selected, nil)
+    eq(other.overlay:GetAlpha(), 1)
+    -- A group member selects the container the player can really move.
+    local group = Layout.entries.party
+    if group and group.members and group.members[1] then
+        Unlock:Select(group.members[1])
+        eq(Unlock.selected, "party")
+    end
+    Unlock:Save()
+    eq(Layout.editing, false)
+    -- A failure while the session is being built undoes everything it created.
+    app.Settings:Toggle("chat")
+    Unlock.bar, Unlock.grid = nil, nil
+    local build, paint = Unlock.Build, Unlock.ApplyGrid
+    Unlock.Build = function() error("injected build failure") end
+    eq(Unlock:Enter({ page = "chat" }), false)
+    Unlock.Build, Unlock.ApplyGrid = build, paint
+    eq(Layout.editing, false)
+    eq(Layout.draft, nil)
+    eq(Unlock.bar, nil)
+    eq(Layout.onSelect, nil)
+    local owned = 0
+    for _, entry in ipairs(app.messages.PROFILE_CHANGED or {}) do
+        if entry.owner == Unlock then owned = owned + 1 end
+    end
+    eq(owned, 0)
+    -- The failure is reported once, then the session continues normally.
+    eq(#app.errors, 1)
+    app.errors = {}
+    eq(app.Settings.frame:IsShown(), true)
+    eq(app.Settings.active, "chat")
+    -- The next start builds again and works.
+    eq(Unlock:Enter({ page = "chat", select = "questList" }), true)
+    eq(Unlock.bar:IsShown(), true)
+    eq(Unlock.bar.keyboardEnabled, true)
+    Unlock:Cancel()
+    eq(Unlock.bar.keyboardEnabled, false)
+    eq(#app.errors, 0)
+end)
+
+test("bars 4-8 keep the client's own parent, visibility and entries", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local names = { "MultiBarRight", "MultiBarLeft", "MultiBar5", "MultiBar6", "MultiBar7" }
+    local bars = {}
+    for index, name in ipairs(names) do
+        local bar = H.NewFrame(name, UIParent)
+        bar:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", index * 10, 20)
+        bar:SetSize(200, 40)
+        bar:Show()
+        bars[name] = bar
+    end
+    -- One bar the player switched off in Edit Mode must stay off.
+    bars.MultiBarLeft:Hide()
+    app.Store:Set("modules", "actionBars", true)
+    local barsComponent = app.components.actionBars
+    barsComponent:Refresh()
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    H.Fire("PLAYER_ENTERING_WORLD")
+    for _, name in ipairs(names) do
+        local bar = bars[name]
+        eq(bar:GetParent(), UIParent)
+        eq(bar.lumaActionBarsOriginal, nil)
+        eq(bar:IsShown(), name ~= "MultiBarLeft")
+    end
+    local point = { bars.MultiBar5:GetPoint(1) }
+    eq(point[1], "BOTTOMLEFT")
+    eq(point[2], UIParent)
+    eq(point[4], 30)
+    -- Ownership says the client draws them, per bar, with the reason.
+    for _, id in ipairs({ 4, 5, 6, 7, 8 }) do
+        local record = app.Ownership:Get("actionBars.actionBar" .. id)
+        eq(record ~= nil, true)
+        eq(record.intent, "native")
+        eq(record.active, "native")
+        eq(record.reason, "client-managed")
+    end
+    -- A bar parked by an older session is put back from its record, once. The
+    -- parking frame is the one the component created on its first pass.
+    local parked = _G.LumaUIActionBarsPark
+    eq(parked ~= nil, true)
+    local bar = bars.MultiBarRight
+    bar.lumaActionBarsOriginal = { points = {}, scale = bar:GetScale(), alpha = bar:GetAlpha(),
+        parent = UIParent, shown = true }
+    bar:SetParent(parked)
+    barsComponent:Refresh()
+    eq(bar:GetParent(), UIParent)
+    eq(bar.lumaActionBarsOriginal, nil)
+    -- A park with no record still hands the frame back to the client.
+    bars.MultiBar6:SetParent(parked)
+    barsComponent:Refresh()
+    eq(bars.MultiBar6:GetParent(), UIParent)
+    -- Stop and start: the observed bars are never hidden or reparented.
+    app.Store:Set("modules", "actionBars", false)
+    for _, name in ipairs(names) do eq(bars[name]:GetParent(), UIParent) end
+    app.Store:Set("modules", "actionBars", true)
+    for _, name in ipairs(names) do
+        eq(bars[name]:GetParent(), UIParent)
+        eq(bars[name].lumaActionBarsOriginal, nil)
+    end
+    eq(bars.MultiBarLeft:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("the bar catalog names every host, slot range and binding prefix once", function()
+    local app = H.Load()
+    local model = app.BarModel
+    local seenFrames, seenKeys = {}, {}
+    for _, entry in ipairs(model.native) do
+        eq(seenFrames[entry.frame], nil)
+        eq(seenKeys[entry.key], nil)
+        seenFrames[entry.frame], seenKeys[entry.key] = true, true
+    end
+    local function entry(id) return model:Native(id) end
+    eq(entry(1).frame, "MainActionBar")
+    eq(entry(2).binding, "MULTIACTIONBAR1BUTTON")
+    eq(entry(3).slots[1], 49)
+    eq(entry(4).frame, "MultiBarRight")
+    eq(entry(5).slots[1], 37)
+    eq(entry(6).slots[1], 145)
+    eq(entry(7).slots[2], 168)
+    eq(entry(8).slots[2], 180)
+    eq(entry("actionBar6").id, 6)
+    eq(model:NativeByFrame("MultiBar7").key, "actionBar8")
+    -- Slot lookup never derives an id from the display position.
+    eq(model:ActionSlot(6, 1), 145)
+    eq(model:ActionSlot(6, 12), 156)
+    eq(model:ActionSlot(6, 13), nil)
+    eq(model:ActionSlot("petBar", 1), nil)
+    eq(#model:NativeFixed(), 8)
+    -- 1-3 are the bars this build positions; 4-8 stay with the client.
+    for _, bar in ipairs(model:NativeFixed()) do
+        eq(bar.manageable, bar.id <= 3)
+    end
+end)
+
+test("a locked draft writes every position in one transaction", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local Layout, Unlock = app.Layout, app.Unlock
+    eq(Unlock:Enter({}), true)
+    Layout:SetDraft("questList", 40, 40)
+    Layout:SetDraft("inventory", -60, 20)
+    -- A self-following rule is refused with a word; the placement still saves.
+    Layout:SetDraft("questList", 40, 40, { target = "questList" })
+    local ok, refused = Layout:Commit()
+    eq(ok, true)
+    eq(#refused, 1)
+    eq(refused[1]:find(":cycle", 1, true) ~= nil, true)
+    eq(app.Store:Profile().positions.questList.x, 40)
+    eq(app.Store:Profile().positions.inventory.x, -60)
+    eq(app.Store:Profile().positions.questList.anchor, nil)
+    -- A draft taken under another profile is dropped, not written elsewhere.
+    Unlock:Enter({})
+    Layout:SetDraft("questList", 11, 12)
+    Layout.draftProfile = "Another profile"
+    eq(Layout:Commit(), false)
+    eq(app.Store:Profile().positions.questList.x, 40)
+    eq(Layout.draft, nil)
+    -- A read-only database refuses the whole write.
+    Unlock:Enter({})
+    Layout:SetDraft("questList", 5, 5)
+    app.Store.readonly = true
+    eq(Layout:Commit(), false)
+    app.Store.readonly = false
+    eq(app.Store:Profile().positions.questList.x, 40)
+    Unlock:Cancel()
+    eq(#app.errors, 0)
+end)
+
+test("a module's Position opens the selected handle or names the missing one", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local Layout, Unlock = app.Layout, app.Unlock
+    app.Store:Set("modules", "actionBars", true)
+    app.Settings:Toggle("actionBars")
+    eq(app.Unlock:CanSelect("actionBar1"), true)
+    eq(type(app.Settings.ModuleSummary), "function")
+    eq(app.Settings:Locate("actionBars", "actionBar1"), true)
+    eq(Unlock.selected, "actionBar1")
+    Unlock:Cancel()
+    -- A stored object that no longer has a handle is reported, then the module's
+    -- first handle is used: never a silent phantom selection.
+    H.messages = {}
+    eq(app.Settings:Locate("actionBars", "actionBar6"), true)
+    eq(#H.messages > 0, true)
+    eq(H.messages[1]:find("actionBar6", 1, true) ~= nil, true)
+    eq(Unlock.selected, "actionBar1")
+    Unlock:Cancel()
+    -- A module with no handles at all still opens the global mode.
+    app.Store:Set("modules", "unitFrames", false)
+    eq(app.Settings:Locate("unitFrames"), true)
+    eq(Unlock.selected, nil)
+    Unlock:Cancel()
+    -- Combat refuses the entry and writes nothing.
+    H.Combat(true)
+    eq(app.Settings:Locate("actionBars"), false)
+    eq(Layout.draft, nil)
+    eq(Layout.editing, false)
+    H.Combat(false)
+    eq(#app.errors, 0)
+end)
+
 test("own chat stays native until asked, then takes a window only after back-fill", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local view = app.components.chatView
@@ -882,6 +1273,42 @@ test("own chat stays native until asked, then takes a window only after back-fil
     eq(ChatFrame1:GetAlpha(), 1)
     eq(ChatFrame1:IsMouseEnabled(), true)
     eq(entry.view:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("own chat draws its own shell and follows the client window", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local view = app.components.chatView
+    view:SetTakeover(true)
+    local entry = view.windows[1]
+    local shell = entry.shell
+    eq(shell ~= nil, true)
+    eq(shell:IsShown(), true)
+    eq(shell.title:GetText(), string.format(app.L.chatWindowLabel, 1))
+    -- The message area lives inside the shell, below the header line. (The
+    -- harness keeps the last anchor of a two-point pair.)
+    local point = { entry.view:GetPoint(1) }
+    eq(point[1], "BOTTOMRIGHT")
+    eq(point[2], shell)
+    eq(point[4], -6)
+    eq(point[5], 6)
+    -- Unread state is visible in the shell header, not only on the button.
+    ChatFrame1:AddMessage("a", 1, 1, 1, 1)
+    ChatFrame1:AddMessage("b", 1, 1, 1, 2)
+    entry.view:ScrollUp()
+    ChatFrame1:AddMessage("c", 1, 1, 1, 3)
+    eq(shell.state:GetText(), string.format(app.L.chatViewUnread, 1))
+    entry.toBottom.scripts.OnClick(entry.toBottom)
+    eq(shell.state:GetText(), "")
+    -- Hiding the client's window hides the shell; showing it brings it back.
+    ChatFrame1:Hide()
+    eq(shell:IsShown(), false)
+    ChatFrame1:Show()
+    eq(shell:IsShown(), true)
+    -- Releasing restores the native window and leaves no shell on screen.
+    view:SetTakeover(false)
+    eq(shell:IsShown(), false)
+    eq(ChatFrame1:GetAlpha(), 1)
     eq(#app.errors, 0)
 end)
 
@@ -7637,7 +8064,7 @@ test("the bar ownership report reads the client without touching anything", func
     eq(text:find("PetActionBar", 1, true) ~= nil, true)
     -- A bar that exists reports visibility and button count; without a rect
     -- from the client it says so instead of inventing coordinates.
-    local mainLine = text:match("MainActionBar%s+shown=%S+.*")
+    local mainLine = text:match("MainActionBar %(bar 1%)%s+shown=%S+.*")
     eq(mainLine ~= nil, true)
     eq(mainLine:find("shown=yes", 1, true) ~= nil, true)
     eq(mainLine:find("buttons=", 1, true) ~= nil, true)
@@ -7672,8 +8099,8 @@ test("the bar ownership report flags two visible bars on the same spot", functio
     SlashCmdList.LUMAUI("bars")
     local text = table.concat(H.messages, "\n")
     -- Each stacked bar names the other instead of both reading as normal rows.
-    local mainLine = text:match("MainActionBar%s+shown=%S+.*")
-    local leftLine = text:match("MultiBarBottomLeft%s+shown=%S+.*")
+    local mainLine = text:match("MainActionBar %(bar 1%)%s+shown=%S+.*")
+    local leftLine = text:match("MultiBarBottomLeft %(bar 2%)%s+shown=%S+.*")
     eq(mainLine:find(app.L.barsOverlapAt, 1, true) ~= nil, true)
     eq(leftLine:find(app.L.barsOverlapAt, 1, true) ~= nil, true)
     -- Separating the bars clears the flag on the next report.
@@ -14070,6 +14497,9 @@ test("the tracked-buff group draws the player's auras and collapses when idle", 
     _G.Enum = _G.Enum or {}
     _G.Enum.CooldownViewerCategory = { Essential = 0, Utility = 1, TrackedBuff = 2 }
     _G.C_CooldownViewerSettings = H.NewFrame("CooldownViewerSettings", UIParent)
+    -- The CDM settings panel is closed during play; a shown panel means the
+    -- player is editing the client's cooldowns and the viewers stay visible.
+    _G.C_CooldownViewerSettings:Hide()
     _G.C_CooldownViewerSettings.GetDataProvider = function()
         return {
             GetOrderedCooldownIDsForCategory = function() return { 7001, 7002 } end,
@@ -14137,11 +14567,19 @@ test("the own cooldown groups ship on and follow the client's list without comma
     eq(cds.containers.essential.frame:IsShown(), true)
     eq(#current().groups.essential.order, 0)
     -- An edit in the client's Cooldown Manager reaches the cells on the next
-    -- event-driven pass, without a command or a reload.
+    -- source pass (the client's own list changed), without a command or a reload.
     list = { 501, 777 }
-    cds:Refresh()
+    cds:RefreshSource()
     eq(cds.containers.essential.drawn, 2)
     eq(cds.containers.essential.cells[2].lumaSpellID, 777)
+    -- A plain live-state pass keeps the manifest: a provider that blinks for one
+    -- event is not a reason to change what is on screen.
+    local saved = _G.CooldownViewerSettings.GetDataProvider
+    _G.CooldownViewerSettings.GetDataProvider = function() return nil end
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 2)
+    eq(cds.containers.essential.status, "drawing")
+    _G.CooldownViewerSettings.GetDataProvider = saved
     -- A manual add leaves follow mode: the stored list is the display from then on.
     SlashCmdList.LUMAUI("cds add 888")
     eq(current().groups.essential.auto, false)
@@ -14156,6 +14594,294 @@ test("the own cooldown groups ship on and follow the client's list without comma
     eq(current().groups.essential.auto, true)
     cds:Refresh()
     eq(cds.containers.essential.drawn, 2)
+    eq(#app.errors, 0)
+end)
+
+-- A cooldown scene with a provider whose list a test can change or silence.
+local function cooldownScene(list)
+    local app = H.Load()
+    _G.Enum = _G.Enum or {}
+    _G.Enum.CooldownViewerCategory = { Essential = 0, Utility = 1, TrackedBuff = 2 }
+    local settings = H.NewFrame("CooldownViewerSettings", UIParent)
+    settings:Hide()
+    local state = { list = list }
+    settings.GetDataProvider = function()
+        if state.blink then return nil end
+        return {
+            GetOrderedCooldownIDsForCategory = function() return state.list end,
+            GetCooldownInfoForID = function(_, id) return { cooldownID = id, spellID = id } end,
+        }
+    end
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("cds owned")
+    return app, state, settings
+end
+
+test("the quest page switch hangs the panel under the map and puts it back", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "questList", true)
+    app.Settings:Toggle("quests")
+    local page = app.Settings.pages.quests
+    eq(page ~= nil, true)
+    local quests = app.components.questList
+    local frame = quests.frame
+    -- The switch used to be a save field with no UI and no way back.
+    local toggle = page.tabs and nil
+    -- It is the module page's only extra control besides the switches; find it by
+    -- walking the page body for the switch that reports this label.
+    local found
+    local function walk(root, depth)
+        if found or type(root) ~= "table" or depth > 4 then return end
+        local ok, children = pcall(root.GetChildren, root)
+        if not ok or type(children) ~= "table" then return end
+        for _, child in ipairs(children) do
+            if type(child) == "table" then
+                if child.text and type(child.text.GetText) == "function"
+                    and child.text:GetText() == app.L.questBelowMap then
+                    found = child
+                    return
+                end
+                walk(child, depth + 1)
+            end
+        end
+    end
+    walk(page, 0)
+    eq(found ~= nil, true)
+    H.Click(found)
+    eq(app.Store:Profile().ui.questBelowMap, true)
+    local point = { frame:GetPoint(1) }
+    eq(point[1], "TOPRIGHT")
+    eq(point[2], _G.Minimap)
+    H.Click(found)
+    eq(app.Store:Profile().ui.questBelowMap, false)
+    point = { frame:GetPoint(1) }
+    eq(point[1], "CENTER")
+    eq(point[2], UIParent)
+    eq(#app.errors, 0)
+end)
+
+test("the action bar page selects a real bar and its controls reach the client", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar = H.NewFrame("MultiBar5", UIParent)
+    bar:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 40, 100)
+    bar:SetSize(360, 36)
+    bar.actionButtons = {}
+    for index = 1, 12 do
+        local button = H.NewFrame("MultiBar5Button" .. index, bar)
+        button:SetSize(30, 30)
+        button:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", (index - 1) * 34, 0)
+        bar.actionButtons[index] = button
+    end
+    app.Store:Set("modules", "actionBars", true)
+    app.Settings:Toggle("actionBars")
+    local page = app.Settings.pages.actionBars
+    eq(#page.tabs, 8)
+    -- Object first: the page starts on bar 1 and follows an explicit selection.
+    eq(page.selected, "actionBar1")
+    app.Settings:SelectObject("actionBars", "actionBar6")
+    eq(page.selected, "actionBar6")
+    eq(app.Settings:SelectedBar("actionBars").frame, "MultiBar5")
+    -- No technical identifiers in the normal page.
+    eq(page.status:GetText():find("intent=", 1, true), nil)
+    eq(page.status:GetText():find("evidence=", 1, true), nil)
+    -- The controls are real: eight buttons in two rows, size and visibility.
+    local controls = page.barControls
+    controls.buttons.slider:SetValue(8)
+    controls.rows.slider:SetValue(2)
+    controls.size.slider:SetValue(28)
+    local visibility = page.barVisibility
+    visibility[2].scripts.OnClick(visibility[2], "LeftButton")
+    local stored = app.Store:Profile().ui.actionBarLayout[6]
+    eq(stored.buttons, 8)
+    eq(stored.rows, 2)
+    eq(stored.size, 28)
+    eq(stored.visible, "combat")
+    app.components.actionBars:Refresh()
+    -- Four per row: 8 buttons in 2 rows, the other four hidden but still bound.
+    eq(bar.actionButtons[1]:IsShown(), true)
+    eq(bar.actionButtons[8]:IsShown(), true)
+    eq(bar.actionButtons[9]:IsShown(), false)
+    eq(bar.actionButtons[12]:IsShown(), false)
+    eq(bar.actionButtons[1].width, 28)
+    local x1, y1 = select(4, bar.actionButtons[1]:GetPoint(1)), select(5, bar.actionButtons[1]:GetPoint(1))
+    local x5, y5 = select(4, bar.actionButtons[5]:GetPoint(1)), select(5, bar.actionButtons[5]:GetPoint(1))
+    eq(x1, 0); eq(y1, 0)
+    eq(x5, 0); eq(y5, 32)
+    -- Two rows of four at 28 + 4 spacing: 124 x 60.
+    eq(bar:GetWidth(), 4 * 28 + 3 * 4)
+    eq(bar:GetHeight(), 2 * 28 + 4)
+    -- Combat visibility is delegated to the client's own state driver.
+    eq(bar.stateDrivers.visibility, "[combat] show; hide")
+    eq(app.Ownership:Get("actionBars.actionBar6").active, "owned")
+    -- Reset returns the recorded client geometry and removes the driver.
+    page.barReset.scripts.OnClick(page.barReset, "LeftButton")
+    app.components.actionBars:Refresh()
+    eq(bar.stateDrivers.visibility, nil)
+    eq(bar:GetWidth(), 360)
+    eq(bar.actionButtons[9]:IsShown(), true)
+    eq(bar.actionButtons[12].width, 30)
+    eq(app.Store:Profile().ui.actionBarLayout[6], nil)
+    eq(#app.errors, 0)
+end)
+
+test("a cooldown source that blinks keeps the last complete list; an empty one clears it", function()
+    local app, state = cooldownScene({ 101, 102 })
+    local cds = app.components.cooldownGroups
+    local container = cds.containers.essential
+    cds:Refresh()
+    eq(container.drawn, 2)
+    eq(container.status, "drawing")
+    eq(app.Ownership:Get("cooldownGroups.essential").active, "owned")
+    -- Transient: the provider stops answering for one source event. The last
+    -- complete list keeps drawing instead of the client's block coming back.
+    state.blink = true
+    cds:RefreshSource()
+    eq(container.drawn, 2)
+    eq(container.status, "stale")
+    eq(app.Ownership:Get("cooldownGroups.essential").active, "owned")
+    -- A confirmed empty list is a real change: the cells are cleared, and the
+    -- block still replaces the client's (which is equally empty).
+    state.blink = false
+    state.list = {}
+    cds:RefreshSource()
+    eq(container.drawn, 0)
+    eq(container.status, "empty")
+    eq(container.frame:IsShown(), false)
+    -- Live state passes never re-read the source, so a blink on an ordinary
+    -- cooldown event changes nothing.
+    state.list = { 103 }
+    cds:Refresh()
+    eq(container.drawn, 0)
+    cds:RefreshSource()
+    eq(container.drawn, 1)
+    eq(#app.errors, 0)
+end)
+
+test("a refused viewer hide drops LumaUI's own block instead of doubling it", function()
+    local app = cooldownScene({ 201 })
+    local cds = app.components.cooldownGroups
+    cds:Refresh()
+    local viewer = _G.EssentialCooldownViewer
+    eq(viewer:IsShown(), false)
+    eq(cds.containers.essential.drawn, 1)
+    -- The client refuses the hide (silently, as a protected write can).
+    viewer.Hide = function() end
+    viewer:Show()
+    cds:Refresh()
+    eq(viewer:IsShown(), true)
+    eq(cds.containers.essential.frame:IsShown(), false)
+    eq(cds.containers.essential.drawn, 0)
+    eq(cds.containers.essential.status, "handover-hide-refused")
+    local record = app.Ownership:Get("cooldownGroups.essential")
+    eq(record.active, "native")
+    eq(record.reason, "handover-hide-refused")
+    local perViewer = app.Ownership:Get("cooldownGroups.viewer.essential")
+    eq(perViewer.active, "native")
+    -- Restoring the native write brings the own block back on the next pass.
+    viewer.Hide = nil
+    cds:Refresh()
+    eq(viewer:IsShown(), false)
+    eq(cds.containers.essential.drawn, 1)
+    eq(app.Ownership:Get("cooldownGroups.essential").active, "owned")
+    eq(#app.errors, 0)
+end)
+
+test("cooldown groups keep one committed geometry across live and source passes", function()
+    local app = cooldownScene({ 601, 602 })
+    local cds = app.components.cooldownGroups
+    cds:SetGroupOption("essential", "max", 1)
+    cds:SetGroupOption("essential", "limit", 2)
+    cds:Refresh()
+    local container = cds.containers.essential
+    -- The committed rows/per-row cap: two icons, one per row.
+    eq(#container.plan.rows, 2)
+    eq(#container.plan.slots, 2)
+    local first = { container.frame:GetPoint(1) }
+    cds:Refresh()
+    cds:RefreshSource()
+    -- Entering and leaving combat must not move or re-shape the block.
+    H.Combat(true)
+    cds:Refresh()
+    H.Combat(false)
+    cds:Refresh()
+    local after = { container.frame:GetPoint(1) }
+    eq(after[1], first[1])
+    eq(after[4], first[4])
+    eq(after[5], first[5])
+    eq(#container.plan.rows, 2)
+    eq(container.drawn, 2)
+    eq(#app.errors, 0)
+end)
+
+test("an unloaded client viewer does not blank the own cooldown block", function()
+    local app = cooldownScene({ 451 })
+    local cds = app.components.cooldownGroups
+    _G.EssentialCooldownViewer = nil
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 1)
+    eq(cds.containers.essential.frame:IsShown(), true)
+    eq(app.Ownership:Get("cooldownGroups.essential").active, "owned")
+    -- Nothing to hide is not a refused handover: the own block is the only
+    -- display and stays.
+    eq(cds.containers.essential.status, "drawing")
+    eq(#app.errors, 0)
+end)
+
+test("a specialization change rebuilds the list without a reload", function()
+    local app, state = cooldownScene({ 301 })
+    local cds = app.components.cooldownGroups
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 1)
+    eq(cds.containers.essential.cells[1].lumaSpellID, 301)
+    -- Another specialization supplies another list; the identity check alone
+    -- invalidates the old copy, so even a live-state pass picks it up.
+    state.list = { 302, 303 }
+    _G.GetSpecialization = function() return 2 end
+    cds:Refresh()
+    eq(cds.containers.essential.drawn, 2)
+    eq(cds.containers.essential.cells[1].lumaSpellID, 302)
+    eq(#app.errors, 0)
+end)
+
+test("a client duration object is handed to the widget untouched", function()
+    local app = cooldownScene({ 401 })
+    local token = { marker = "duration" }
+    _G.C_Spell.GetSpellCooldownDuration = function() return token end
+    local cds = app.components.cooldownGroups
+    cds:Refresh()
+    local cell = cds.containers.essential.cells[1]
+    eq(cell.swipe.durationObject, token)
+    eq(cell.swipe.durationClearIfZero, true)
+    -- A secret object is never passed on; the plain numbers still draw the sweep
+    -- and nothing compares or decomposes the object.
+    _G.C_Spell.GetSpellCooldownDuration = function() return H.Secret(token) end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 10, duration = 30, isEnabled = true } end
+    cds:Refresh()
+    eq(cell.swipe.durationObject, token)
+    eq(cell.swipe.cooldownDuration, 30)
+    eq(#app.errors, 0)
+end)
+
+test("the total cap trims icons before the row plan and a stable pass writes no anchors", function()
+    local app = cooldownScene({ 501, 502, 503, 504, 505 })
+    local cds = app.components.cooldownGroups
+    cds:SetGroupOption("essential", "limit", 3)
+    cds:SetGroupOption("essential", "max", 2)
+    cds:Refresh()
+    local container = cds.containers.essential
+    eq(container.drawn, 3)
+    eq(#container.plan.slots, 3)
+    eq(#container.plan.rows, 2)
+    local frame = container.frame
+    local calls = 0
+    local original = frame.SetPoint
+    frame.SetPoint = function(self, ...) calls = calls + 1; return original(self, ...) end
+    for _ = 1, 3 do cds:Refresh() end
+    eq(calls, 0)
+    frame.SetPoint = nil
     eq(#app.errors, 0)
 end)
 

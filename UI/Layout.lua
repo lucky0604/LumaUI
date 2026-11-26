@@ -463,17 +463,25 @@ function Layout:CenterOffset(id)
     return (x * ratio - cx) / scale, (y * ratio - cy) / scale
 end
 
+-- Why a follow rule cannot be saved, or nil. Shared by the single write and the
+-- whole-draft commit so both refuse the same cases with the same word.
+function Layout:AnchorProblem(id, anchor, links)
+    local entry = self.entries[id]
+    if not entry or entry.member then return "member" end
+    if not anchor then return "invalid" end
+    if anchor.target ~= "screen" and not self.entries[anchor.target] then return "unknown" end
+    links = links or self:Links()
+    links[id] = nil
+    if anchor.target ~= "screen" and app.Geometry.WouldCycle(links, id, anchor.target) then return "cycle" end
+end
+
 -- Saves a follow rule. Refused for group members (they follow their group),
 -- unknown targets, a component following itself and any loop.
 function Layout:SetAnchor(id, spec)
-    local entry = self.entries[id]
-    if not entry or entry.member then return false, "member" end
     local anchor = app.Geometry.CleanAnchor(spec)
-    if not anchor then return false, "invalid" end
-    if anchor.target ~= "screen" and not self.entries[anchor.target] then return false, "unknown" end
-    local links = self:Links()
-    links[id] = nil
-    if anchor.target ~= "screen" and app.Geometry.WouldCycle(links, id, anchor.target) then return false, "cycle" end
+    local problem = self:AnchorProblem(id, anchor)
+    if problem then return false, problem end
+    local entry = self.entries[id]
     local position = app.Store:Profile().positions[id]
     local x, y = position and position.x or entry.x or 0, position and position.y or entry.y or 0
     if not app.Store:SetPosition(id, x, y, anchor) then return false, "readonly" end
@@ -968,25 +976,54 @@ function Layout:DraftPosition(id)
     return entry and entry.x or 0, entry and entry.y or 0, nil
 end
 
--- Writes every held placement at once and ends the session.
+-- Writes every held placement in one transaction and ends the session. The new
+-- position table is built in memory first: a refused anchor drops only that
+-- anchor rule, and a failed write leaves the saved profile exactly as it was, so
+-- no half of the draft can land while the rest is refused.
 function Layout:Commit()
     local draft = self.draft
     if not draft then return false end
-    if app.Store.readonly then return false end
+    if app.Store.readonly then return false, { "readonly" } end
+    if self.draftProfile and self.draftProfile ~= app.Store.current then
+        -- The draft was taken under another profile; writing it here would move
+        -- components the player never edited.
+        self:SetEditing(false)
+        return false, { "profile" }
+    end
+    local positions = {}
+    for id, position in pairs(app.Store:Profile().positions or {}) do
+        if type(id) == "string" and type(position) == "table" then
+            positions[id] = { x = position.x, y = position.y, anchor = position.anchor }
+        end
+    end
+    local links = {}
+    for id, position in pairs(positions) do
+        if position.anchor and position.anchor.target ~= "screen" then links[id] = position.anchor.target end
+    end
     local refused = {}
     for id, held in pairs(draft) do
         if held.reset then
-            app.Store:Profile().positions[id] = nil
+            positions[id] = nil
+            links[id] = nil
         else
-            app.Store:SetPosition(id, held.x, held.y)
-            if held.anchor then
-                local ok, reason = self:SetAnchor(id, held.anchor)
-                if not ok then refused[#refused + 1] = id .. ":" .. tostring(reason) end
+            local anchor = held.anchor and app.Geometry.CleanAnchor(held.anchor) or nil
+            if anchor and anchor.target ~= "screen" then
+                local probe = {}
+                for key, value in pairs(links) do probe[key] = value end
+                probe[id] = anchor.target
+                local problem = self:AnchorProblem(id, anchor, probe)
+                if problem then
+                    refused[#refused + 1] = id .. ":" .. problem
+                    anchor = nil
+                end
             end
+            positions[id] = { x = held.x, y = held.y, anchor = anchor }
+            links[id] = anchor and anchor.target ~= "screen" and anchor.target or nil
         end
-        self:Apply(id)
     end
+    if not app.Store:SetPositions(positions) then return false, { "readonly" } end
     self.committed = true
+    for id in pairs(draft) do self:Apply(id) end
     self:SetEditing(false)
     return true, refused
 end
@@ -1044,7 +1081,7 @@ function Layout:SetEditing(wanted)
     if not wanted then
         self:StopDragTicker()
         local committed = self.committed == true
-        self.draft, self.committed = nil, nil
+        self.draft, self.committed, self.draftProfile = nil, nil, nil
         if self.onEditEnd then app:Call("layout/editEnd", self.onEditEnd, committed) end
     end
     return true

@@ -45,6 +45,10 @@ Store.defaults = {
         -- bars keep keys, paging and vehicle handling until the own path is
         -- validated in game.
         ownedBars = { enabled = false, bars = {} },
+        -- 016 phase 07: per-bar layout overrides for the client's own bars
+        -- (button count, rows, size, gap, visibility), applied and restored out
+        -- of combat. Empty means "the client's own layout", which is the default.
+        actionBarLayout = {},
         -- Layout-level native switches for the group frames. Party keeps its
         -- current default; raid stays off until its own validation exists.
         partyTakeover = true, raidTakeover = false,
@@ -152,6 +156,7 @@ function Store:Normalize(input)
     -- cannot disagree about an icon size, a cap or a spell ID.
     result.ui.cooldownGroups = app.CooldownModel:Normalize(ui.cooldownGroups)
     result.ui.ownedBars = app.BarModel:Normalize(ui.ownedBars)
+    result.ui.actionBarLayout = app.BarModel:NormalizeLayout(ui.actionBarLayout)
     if type(ui.partyTakeover) == "boolean" then result.ui.partyTakeover = ui.partyTakeover end
     if type(ui.raidTakeover) == "boolean" then result.ui.raidTakeover = ui.raidTakeover end
     result.ui.chatWidth = finite(ui.chatWidth) and ui.chatWidth >= 240 and ui.chatWidth <= 600

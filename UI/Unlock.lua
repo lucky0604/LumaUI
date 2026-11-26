@@ -35,32 +35,46 @@ function Unlock:PaintGrid()
     local thin = app.Pixel:Unit()
     local c = accent()
     local used = 0
-    for index = 0, math.floor(width / step) do
+    local function vertical(x, centre)
         used = used + 1
         local texture = line(self, used)
-        local x = index * step
-        local centre = math.abs(x - width / 2) < 0.5
         texture:ClearAllPoints()
         texture:SetPoint("TOPLEFT", grid, "TOPLEFT", x, 0)
         texture:SetPoint("BOTTOMLEFT", grid, "BOTTOMLEFT", x, 0)
         texture:SetWidth(thin)
-        if centre then texture:SetColorTexture(c[1], c[2], c[3], 0.55)
-        else texture:SetColorTexture(1, 1, 1, index % 4 == 0 and 0.10 or 0.05) end
+        texture:SetColorTexture(centre and c[1] or 1, centre and c[2] or 1, centre and c[3] or 1,
+            centre and 0.55 or (math.floor(x / step + 0.5) % 4 == 0 and 0.10 or 0.05))
         texture:Show()
     end
-    for index = 0, math.floor(height / step) do
+    local function horizontal(y, centre)
         used = used + 1
         local texture = line(self, used)
-        local y = index * step
-        local centre = math.abs(y - height / 2) < 0.5
         texture:ClearAllPoints()
         texture:SetPoint("BOTTOMLEFT", grid, "BOTTOMLEFT", 0, y)
         texture:SetPoint("BOTTOMRIGHT", grid, "BOTTOMRIGHT", 0, y)
         texture:SetHeight(thin)
-        if centre then texture:SetColorTexture(c[1], c[2], c[3], 0.55)
-        else texture:SetColorTexture(1, 1, 1, index % 4 == 0 and 0.10 or 0.05) end
+        texture:SetColorTexture(centre and c[1] or 1, centre and c[2] or 1, centre and c[3] or 1,
+            centre and 0.55 or (math.floor(y / step + 0.5) % 4 == 0 and 0.10 or 0.05))
         texture:Show()
     end
+    local centreX, centreY = false, false
+    for index = 0, math.floor(width / step) do
+        local x = index * step
+        local centre = math.abs(x - width / 2) < 0.5
+        centreX = centreX or centre
+        vertical(x, centre)
+    end
+    -- A screen width that is not a whole multiple of the step still needs the
+    -- centre guide: snapping compares against every drawn line, so the middle
+    -- must exist even when no grid line happens to land on it.
+    if not centreX then vertical(width / 2, true) end
+    for index = 0, math.floor(height / step) do
+        local y = index * step
+        local centre = math.abs(y - height / 2) < 0.5
+        centreY = centreY or centre
+        horizontal(y, centre)
+    end
+    if not centreY then horizontal(height / 2, true) end
     for index = used + 1, #self.lines do self.lines[index]:Hide() end
     self.gridLines = used
 end
@@ -124,15 +138,44 @@ function Unlock:RefreshInspector()
     for _, control in ipairs({ bar.inputX, bar.inputY, bar.follow, bar.detach, bar.reset }) do
         if control.SetEnabled then control:SetEnabled(entry ~= nil) end
     end
+    -- `and`/`or` reads as a boolean when `id` is nil: with no selection every
+    -- handle is fully lit, and the value handed to SetAlpha must stay a number.
     for other, otherEntry in pairs(app.Layout.entries) do
-        if otherEntry.overlay then otherEntry.overlay:SetAlpha(id == nil or other == id and 1 or 0.65) end
+        if otherEntry.overlay then
+            local highlighted = id == nil or other == id
+            otherEntry.overlay:SetAlpha(highlighted and 1 or 0.65)
+        end
     end
 end
 
 function Unlock:Select(id)
-    if id ~= nil and not app.Layout.entries[id] then id = nil end
+    if id ~= nil then
+        local entry = app.Layout.entries[id]
+        -- A group member has no handle of its own; its container is the thing
+        -- the player can actually move, so a member id selects the group.
+        if entry and entry.member and entry.groupId then
+            id = entry.groupId
+            entry = app.Layout.entries[id]
+        end
+        if not entry or entry.hidden or not entry.overlay then id = nil end
+    end
     self.selected = id
     self:RefreshInspector()
+end
+
+-- Whether `id` names a handle this session can actually move. Module pages ask
+-- before they hand a stored object id to Enter, so a disabled or unregistered
+-- object falls back to the global mode instead of a phantom selection. The
+-- overlay does not exist before the first editing session, so it is not part of
+-- this test: Enter creates it for every visible handle.
+function Unlock:CanSelect(id)
+    if type(id) ~= "string" then return false end
+    local entry = app.Layout.entries[id]
+    if entry and entry.member and entry.groupId then entry = app.Layout.entries[entry.groupId] end
+    if not entry or entry.hidden then return false end
+    local frame = entry.frame
+    if not frame or type(frame.IsShown) ~= "function" then return false end
+    return frame:IsShown() == true or entry.allowHiddenMove == true
 end
 
 function Unlock:Nudge(dx, dy)
@@ -275,40 +318,83 @@ end
 ----------------------------------------------------------------------
 -- Session
 ----------------------------------------------------------------------
+-- One exit path for every way a session can end: save, cancel, Esc, combat,
+-- a profile switch and a failed start. It releases exactly what Enter created —
+-- callbacks, subscriptions, the grid, the toolbar, keyboard capture and the
+-- draft — and never writes a saved position.
+function Unlock:Release()
+    local layout = app.Layout
+    app:Unsubscribe(self, "PROFILE_CHANGED")
+    layout.onSelect, layout.onDrag, layout.onDraft, layout.onEditEnd = nil, nil, nil, nil
+    if self.bar then
+        if type(self.bar.EnableKeyboard) == "function" then self.bar:EnableKeyboard(false) end
+        self.bar:Hide()
+    end
+    if self.grid then self.grid:Hide() end
+    self:ShowGuides(nil)
+    for _, entry in pairs(layout.entries) do
+        if entry.overlay then entry.overlay:SetAlpha(1) end
+    end
+    self.selected = nil
+    if layout.editing then layout:SetEditing(false); layout.draft, layout.committed = nil, nil end
+end
+
+-- A page the player came from is reopened only for a deliberate end of the
+-- session. A failed start passes `returnPage` through the same helper so the
+-- window does not vanish mid-error.
+local function reopen(page)
+    if page and not InCombatLockdown() then app.Settings:Open(page) end
+end
+
 function Unlock:Enter(opts)
     opts = opts or {}
     local layout, settings = app.Layout, app.Settings
-    if layout.draft then return true end
-    local reopen = opts.page
-    if not reopen and settings.frame and settings.frame:IsShown() and settings.wantsOpen then
-        reopen = settings.active
+    -- A second request while a session runs only changes the selection; it must
+    -- never rebuild the session underneath the player.
+    if layout.draft then
+        if opts.select ~= nil then self:Select(opts.select) end
+        return true
     end
-    layout.draft = {}
-    layout.committed = nil
-    if layout.gridOn == nil then layout.gridOn = true end
-    if not layout:SetEditing(true) then
-        layout.draft = nil
-        return false
+    local reopenPage = opts.page
+    if not reopenPage and settings.frame and settings.frame:IsShown() and settings.wantsOpen then
+        reopenPage = settings.active
     end
-    self:Build()
-    self.returnPage, self.noReturn = reopen, nil
-    layout.onSelect = function(id) self:Select(id) end
-    layout.onDrag = function(id, overlay)
-        local rect = layout:OverlayRect(overlay)
-        if rect then self:ShowGuides(layout:SnapRect(id, rect, type(IsShiftKeyDown) == "function" and IsShiftKeyDown())) end
-    end
-    layout.onDraft = function(id)
-        self:ShowGuides(nil)
-        if id == self.selected then self:RefreshInspector() end
-    end
-    layout.onEditEnd = function(committed) self:Teardown(committed) end
-    app:Subscribe(self, "PROFILE_CHANGED", function() self.noReturn = true; layout:SetEditing(false) end)
-    self.bar:Show()
-    self:ApplyGrid()
-    local pick = opts.select
-    if type(pick) == "string" and layout.entries[pick] and layout.entries[pick].overlay then self:Select(pick)
-    else self:Select(nil) end
-    return true
+    if InCombatLockdown() then app:Print(L.layoutCombat); return false end
+    if app.Store.readonly then app:Print(L.readonly); return false end
+    self.returnPage, self.noReturn = reopenPage, nil
+    local started = app:Call("unlock/enter", function()
+        layout.draft = {}
+        layout.draftProfile = app.Store.current
+        layout.committed = nil
+        if layout.gridOn == nil then layout.gridOn = true end
+        if not layout:SetEditing(true) then error("edit-mode refused") end
+        self:Build()
+        layout.onSelect = function(id) self:Select(id) end
+        layout.onDrag = function(id, overlay)
+            local rect = layout:OverlayRect(overlay)
+            if rect then self:ShowGuides(layout:SnapRect(id, rect, type(IsShiftKeyDown) == "function" and IsShiftKeyDown())) end
+        end
+        layout.onDraft = function(id)
+            self:ShowGuides(nil)
+            if id == self.selected then self:RefreshInspector() end
+        end
+        layout.onEditEnd = function(committed) self:Teardown(committed) end
+        app:Subscribe(self, "PROFILE_CHANGED", function() self.noReturn = true; layout:SetEditing(false) end)
+        if type(self.bar.EnableKeyboard) == "function" then self.bar:EnableKeyboard(true) end
+        self.bar:Show()
+        self:ApplyGrid()
+        local pick = opts.select
+        if self:CanSelect(pick) then self:Select(pick) else self:Select(nil) end
+        self.started = true
+    end)
+    if started and self.started then return true end
+    -- Failure before the session is usable: undo the whole attempt. The saved
+    -- configuration is untouched because a draft only ever lives in memory.
+    self:Release()
+    local page = self.returnPage
+    self.returnPage, self.noReturn, self.started = nil, nil, nil
+    reopen(page)
+    return false
 end
 
 -- A display or UI scale change: the grid is rebuilt for the new size and the
@@ -328,19 +414,11 @@ function Unlock:Toggle(opts)
 end
 
 function Unlock:Teardown()
-    local layout = app.Layout
-    app:Unsubscribe(self, "PROFILE_CHANGED")
-    layout.onSelect, layout.onDrag, layout.onDraft, layout.onEditEnd = nil, nil, nil, nil
-    if self.bar then self.bar:Hide() end
-    if self.grid then self.grid:Hide() end
-    self:ShowGuides(nil)
-    for _, entry in pairs(layout.entries) do
-        if entry.overlay then entry.overlay:SetAlpha(1) end
-    end
-    self.selected = nil
+    self:Release()
     local page = self.returnPage
-    self.returnPage = nil
-    if page and not self.noReturn and not InCombatLockdown() then app.Settings:Open(page) end
+    self.returnPage, self.started = nil, nil
+    if not self.noReturn then reopen(page) end
+    self.noReturn = nil
 end
 
 function Unlock:Save()

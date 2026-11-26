@@ -205,29 +205,24 @@ end
 -- exist, whether they are on screen, where their anchor sits and whether the
 -- client still considers them at the default layout position. This gives the
 -- /fstack answer ("which frame is that row?") without touching anything.
--- The Edit Mode system index names (MainBar, Bar2, Extra1...) come from the
--- client's own XML KeyValue wiring, so the report speaks Edit Mode's terms.
-local REPORT_BARS = {
-    { name = "MainActionBar", system = "MainBar" },
-    { name = "MultiBarBottomLeft", system = "Bar2" },
-    { name = "MultiBarBottomRight", system = "Bar3" },
-    { name = "MultiBarRight", system = "Right1" },
-    { name = "MultiBarLeft", system = "Right2" },
-    { name = "MultiBar5", system = "Extra1" },
-    { name = "MultiBar6", system = "Extra2" },
-    { name = "MultiBar7", system = "Extra3" },
-    { name = "StanceBar", system = "Stance" },
-    { name = "PetActionBar", system = "Pet" },
-}
+-- The report reads the shared bar catalog so every host, slot range and display
+-- number has exactly one definition. Edit Mode's own system index names
+-- (MainBar, Bar2, Extra1…) are not repeated here: the catalog's display number
+-- is what the player sees, and `/luma bars` prints the client frame name next to
+-- it.
+local function reportBars()
+    local model = app.BarModel
+    return model and model.native or {}
+end
 
 -- Top-left corners of the bars already reported as visible, used to flag two
 -- bars sitting on the same spot. Reset per report so repeated runs stay honest.
 local shownPlaces = {}
 
 local function reportLine(entry)
-    local frame = barFrame(entry.name)
+    local frame = barFrame(entry.frame)
     if not frame then
-        return string.format("  %-18s absent", entry.name)
+        return string.format("  %-18s absent", entry.frame)
     end
     local function yes(value) return value and "yes" or "no" end
     local shown = false
@@ -263,19 +258,27 @@ local function reportLine(entry)
             if okButton and shownButton then count = count + 1 end
         end
     end
-    local line = string.format("  %-18s shown=%s alpha=%s %s default=%s buttons=%d",
-        entry.name, yes(shown), alphaText, place, atDefault, count)
+    local slots = entry.slots and string.format(" slots=%d-%d", entry.slots[1], entry.slots[2]) or ""
+    local owner = ""
+    if app.Ownership then
+        local record = app.Ownership:Get("actionBars." .. (entry.key or entry.frame))
+        if record then owner = string.format(" owner=%s/%s", record.intent, record.active) end
+    end
+    local label = entry.display and entry.display > 0 and string.format("%s (bar %d)", entry.frame, entry.display)
+        or entry.frame
+    local line = string.format("  %-22s shown=%s alpha=%s %s default=%s buttons=%d%s%s",
+        label, yes(shown), alphaText, place, atDefault, count, slots, owner)
     -- Two visible bars at the same top-left corner are stacked on each other;
     -- naming the overlap turns "the screen is messy" into "these two bars".
     if left and bottom and shown then
         for otherName, otherPlace in pairs(shownPlaces) do
-            if otherName ~= entry.name and otherPlace.left == left and otherPlace.bottom == bottom then
+            if otherName ~= entry.frame and otherPlace.left == left and otherPlace.bottom == bottom then
                 line = line .. string.format(" · %s %s", app.L.barsOverlapAt, otherName)
             end
         end
     end
     if shown and left then
-        shownPlaces[entry.name] = { left = left, bottom = bottom }
+        shownPlaces[entry.frame] = { left = left, bottom = bottom }
     end
     return line
 end
@@ -285,7 +288,7 @@ function component:Diagnose()
     shownPlaces = {}
     app:Print(app.L.barsReportHeader)
     app:Print(string.format("actionPanel: status=%s", running))
-    for _, entry in ipairs(REPORT_BARS) do
+    for _, entry in ipairs(reportBars()) do
         local line = reportLine(entry)
         if line then app:Print(line) end
     end
