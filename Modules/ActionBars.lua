@@ -12,15 +12,19 @@ local _, app = ...
 -- its recorded parent/anchors once, then left alone.
 
 local BARS = {
-    { key = "main", frame = "MainActionBar", prefix = "ActionButton" },
-    { key = "bar2", frame = "MultiBarBottomLeft", prefix = "MultiBarBottomLeftButton" },
-    { key = "bar3", frame = "MultiBarBottomRight", prefix = "MultiBarBottomRightButton" },
+    { key = "main", id = "actionBar1", frame = "MainActionBar", prefix = "ActionButton" },
+    { key = "bar2", id = "actionBar2", frame = "MultiBarBottomLeft", prefix = "MultiBarBottomLeftButton" },
+    { key = "bar3", id = "actionBar3", frame = "MultiBarBottomRight", prefix = "MultiBarBottomRightButton" },
 }
 -- Bars this component only observes. The catalog is the one definition of their
 -- slot ranges and binding prefixes; it is never used to move or hide them.
 local OBSERVED = { "MultiBarRight", "MultiBarLeft", "MultiBar5", "MultiBar6", "MultiBar7" }
 local GAP = 4
-local FADE_STEP, HIDE_DELAY, HOVER_PAD = 0.05, 0.9, 22
+-- 018 Step 1: per-host hover. A tick advances every managed bar, but only the
+-- host the pointer is actually on wakes; the others settle independently.
+-- Leaving the whole stack keeps a short grace period first.
+local FADE_STEP, HIDE_DELAY = 0.05, 0.20
+local FADE_IN, FADE_OUT = 0.15, 0.20
 local LAYOUT_JOB, RESTORE_JOB = "actionBars/layout", "actionBars/restore"
 
 local function object(value)
@@ -163,11 +167,35 @@ local function skinButtons(self)
     self.sampleOwned = false
 end
 
+-- Every managed host publishes its own alpha. A backing panel is told which bar
+-- it belongs to, so the other two can never brighten with it.
 local function publishAlpha(self)
-    local alpha = self.alpha or 0
-    if self.publishedAlpha == alpha then return end
-    self.publishedAlpha = alpha
-    app:Publish("ACTION_BARS_ALPHA", alpha)
+    local list = self.alphas or {}
+    self.alphas = list
+    local changed = false
+    for _, def in ipairs(BARS) do
+        local state = self.state and self.state[def.id]
+        local alpha = state and (state.alpha or 0) or 1
+        if list[def.id] ~= alpha then
+            list[def.id] = alpha
+            changed = true
+        end
+    end
+    if not changed then return end
+    self.alpha = list.actionBar1 or 0
+    app:Publish("ACTION_BARS_ALPHA", list)
+end
+
+-- One state per managed host: the current alpha, its target and when the
+-- pointer last left it. A host that has never been hovered starts hidden.
+local function hostState(self, id)
+    self.state = self.state or {}
+    local state = self.state[id]
+    if not state then
+        state = { alpha = 0, target = 0, lastOver = 0 }
+        self.state[id] = state
+    end
+    return state
 end
 
 local function anchor(bar, point, relative, relativePoint, x, y)
@@ -411,10 +439,14 @@ local function layout(self)
             entry.hidden = nil
             local scale = layoutService:Scale(id)
             if app.Capabilities.Plain(bar:GetScale(), "number") ~= scale then pcall(bar.SetScale, bar, scale) end
-            if type(bar.IsShown) ~= "function" or not app.Capabilities.Plain(bar:IsShown(), "boolean") then
-                pcall(bar.Show, bar)
-            end
+            -- Bars 2 and 3 ship `hidden="true"` in the client XML but still exist,
+            -- are bound, and are what the player enables in Edit Mode. Hiding the
+            -- frame is therefore not "the player turned this bar off": the entry
+            -- stays registered and movable, and the client brings the bar back
+            -- through its own visibility setting. Only a bar the client will not
+            -- draw at all (no frame) drops out of the layout.
             self.bars[def.key] = bar
+            entry.allowHiddenMove = true
         elseif entry then
             entry.hidden, entry.detached = true, nil
         end
@@ -443,17 +475,31 @@ local function layout(self)
                     0, (previous and gap or bottom) / ratio)
                 if placed then previous = bar end
             end
+            -- The anchor is written for every bar, hidden or not: bars 2 and 3
+            -- ship hidden and become visible through the client's own setting,
+            -- and they must already be where the player put them when that
+            -- happens. The fade only owns bars the client currently draws.
             if placed then
-                pcall(bar.SetAlpha, bar, self.alpha or 0)
+                local shown = type(bar.IsShown) == "function"
+                    and app.Capabilities.Plain(bar:IsShown(), "boolean") == true
+                if shown then
+                    -- A layout pass must not wake a bar by itself. Each host keeps
+                    -- its own value, read here so a re-anchor cannot brighten the
+                    -- whole stack.
+                    local state = hostState(self, "actionBar" .. index)
+                    pcall(bar.SetAlpha, bar, state.alpha or 0)
+                end
             else
                 restoreBar(bar)
                 entry.hidden = true
                 self.bars[def.key] = nil
             end
             if app.Ownership then
+                -- `placed and nil or "x"` always yields "x": a successful
+                -- placement must report no reason at all.
                 app.Ownership:Set("actionBars.actionBar" .. index, {
                     intent = "owned", active = placed and "owned" or "native",
-                    evidence = "simulated", reason = placed and nil or "placement-failed",
+                    evidence = "simulated", reason = (not placed) and "placement-failed" or nil,
                 })
             end
         end
@@ -486,108 +532,269 @@ local function apply(self)
     self.layingOut = nil
 end
 
-local function mouseOver(region)
-    if not object(region) then return false end
-    if type(MouseIsOver) == "function" then
-        local ok, value = pcall(MouseIsOver, region, HOVER_PAD, HOVER_PAD, HOVER_PAD, HOVER_PAD)
-        if ok and not app.Capabilities.IsSecret(value) and value == true then return true end
-    end
-    if type(region.IsMouseOver) == "function" then
-        local ok, value = pcall(region.IsMouseOver, region)
-        if ok and not app.Capabilities.IsSecret(value) and value == true then return true end
-    end
-    -- Mouse focus is the fallback for clients where the predicate is unavailable
-    -- on protected buttons; it also catches a child button whose parent moved.
-    if type(GetMouseFocus) == "function" then
-        local ok, focus = pcall(GetMouseFocus)
-        if ok and object(focus) then
-            if focus == region then return true end
-            if type(focus.IsDescendantOf) == "function" then
-                local descendant, inside = pcall(focus.IsDescendantOf, focus, region)
-                if descendant and not app.Capabilities.IsSecret(inside) and inside == true then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
-
+-- Either edit mode reveals the bars this build manages: the client's Edit Mode
+-- and LumaUI's own position editor. Closing one re-evaluates on the next tick.
 local function editModeOpen()
+    if app.Layout and app.Layout.editing == true then return true end
     local frame = _G.EditModeManagerFrame
     if not object(frame) or type(frame.IsShown) ~= "function" then return false end
     local ok, shown = pcall(frame.IsShown, frame)
     return ok and not app.Capabilities.IsSecret(shown) and shown == true
 end
 
--- The hover area is the measured action rectangle, not each bar's own hit box:
--- a fade at alpha 0 keeps hit testing, but an explicit rectangle keeps the
--- reveal limited to the reserved area and away from the bottom strip (zero
--- bottom padding). Returns nil when the client exposes no cursor readback so
--- the caller can fall back to the native mouse predicates.
-local function cursorInside(geometry)
-    if not geometry or not geometry.action then return nil end
-    if #geometry.action.rows == 0 then return false end
-    if type(GetCursorPosition) ~= "function" or type(UIParent.GetCenter) ~= "function" then return nil end
-    local okPos, rawX, rawY = pcall(GetCursorPosition)
-    local okCenter, rawCX, rawCY = pcall(UIParent.GetCenter, UIParent)
-    local okScale, rawScale = pcall(UIParent.GetEffectiveScale, UIParent)
-    local x = okPos and app.Capabilities.Plain(rawX, "number") or nil
-    local y = okPos and app.Capabilities.Plain(rawY, "number") or nil
-    local cx = okCenter and app.Capabilities.Plain(rawCX, "number") or nil
-    local cy = okCenter and app.Capabilities.Plain(rawCY, "number") or nil
-    local scale = okScale and app.Capabilities.Plain(rawScale, "number") or nil
-    if not x or not y or not cx or not cy or not scale or scale <= 0 then return nil end
-    -- GetCursorPosition is in physical pixels; GetCenter already reports in
-    -- UIParent units, so only the cursor is divided by the effective scale.
-    local dx, dy = x / scale - cx, y / scale - cy
-    local half = geometry.action.width / 2 + HOVER_PAD
-    return dx >= -half and dx <= half
-        and dy >= geometry.action.bottomY and dy <= geometry.action.topY + HOVER_PAD
+-- The frames under the cursor, nearest first. GetMouseFoci is the documented
+-- readback on this build; GetMouseFocus is the single-frame fallback for a
+-- client without it. Only plain frames are returned.
+local function mouseFoci()
+    local list = {}
+    if type(GetMouseFoci) == "function" then
+        local ok, foci = pcall(GetMouseFoci)
+        if ok and type(foci) == "table" then
+            for index = 1, #foci do
+                local frame = foci[index]
+                if object(frame) then list[#list + 1] = frame end
+            end
+        end
+    end
+    if #list == 0 and type(GetMouseFocus) == "function" then
+        local ok, focus = pcall(GetMouseFocus)
+        if ok and object(focus) then list[1] = focus end
+    end
+    return list
 end
 
--- Chat sits in front of part of the action area on narrow screens. Excluding a
--- focused ChatFrame (or one of its children) keeps typing from summoning the
--- bars; other overlapping windows need their own evidence and follow-up.
-local function chatFocused()
-    if type(GetMouseFocus) ~= "function" then return false end
-    local ok, focus = pcall(GetMouseFocus)
-    if not ok or not object(focus) then return false end
-    local name = type(focus.GetName) == "function" and select(2, pcall(focus.GetName, focus)) or nil
-    name = app.Capabilities.Plain(name, "string")
-    return name ~= nil and name:find("^ChatFrame") ~= nil
+-- True when a frame under the cursor is the host, one of its buttons, one of
+-- those buttons' children (a flyout is parented to its button) or a frame that
+-- names the host as its recorded owner. Nothing is inferred from screen
+-- coordinates here.
+local function focusInside(host, foci)
+    if not object(host) then return false end
+    for _, frame in ipairs(foci) do
+        local node, depth = frame, 0
+        while node and depth <= 6 do
+            if node == host then return true end
+            if type(node.GetParent) ~= "function" then break end
+            local ok, parent = pcall(node.GetParent, node)
+            if not ok or not object(parent) or parent == node then break end
+            node, depth = parent, depth + 1
+        end
+        if object(frame.owner) and frame.owner == host then return true end
+    end
+    return false
 end
 
-local function isOver(self)
-    if editModeOpen() then return true end
-    if chatFocused() then return false end
-    local inside = cursorInside(self.geometry)
-    if inside then return true end
-    for index, def in ipairs(BARS) do
-        local entry = app.Layout.entries["actionBar" .. index]
-        if (inside == nil or (entry and entry.detached)) and mouseOver(self.bars[def.key]) then
-            return true
+-- A chat frame in front of a bar must not summon it. Reading the input focus is
+-- the documented signal while typing; the frame under the cursor is the general
+-- case (a chat panel overlapping the centre on a narrow screen).
+local function chatInFront(foci)
+    for _, frame in ipairs(foci) do
+        if type(frame.GetName) == "function" then
+            local named = app.Capabilities.Plain(select(2, pcall(frame.GetName, frame)), "string")
+            if named and named:find("^ChatFrame[%d]+") then return true end
+        end
+    end
+    if type(GetMouseFocus) == "function" then
+        local ok, focus = pcall(GetMouseFocus)
+        if ok and object(focus) and type(focus.GetName) == "function" then
+            local named = app.Capabilities.Plain(select(2, pcall(focus.GetName, focus)), "string")
+            if named and named:find("^ChatFrame[%d]+") then return true end
         end
     end
     return false
 end
 
+-- The host's own drawn rectangle, in UIParent units. `GetRect` returns values in
+-- the region's own scaled units — the client converts one by multiplying with
+-- `frame:GetScale()` (see `EditModeSystemMixin:GetScaledSelectionSides`) — so
+-- the UIParent-unit rectangle is `value * frameEffectiveScale /
+-- uiParentEffectiveScale`. A bar with its own profile scale is therefore not
+-- mistaken for a bigger or smaller hit box. A bar the client has not laid out
+-- yet has no rectangle; that is "unknown", never "hovered".
+local function hostRect(bar)
+    if not object(bar) or type(bar.GetRect) ~= "function" then return nil end
+    local ok, left, bottom, width, height = pcall(bar.GetRect, bar)
+    left, bottom = ok and app.Capabilities.Plain(left, "number") or nil,
+        ok and app.Capabilities.Plain(bottom, "number") or nil
+    width, height = ok and app.Capabilities.Plain(width, "number") or nil,
+        ok and app.Capabilities.Plain(height, "number") or nil
+    if not left or not bottom or not width or not height or width <= 0 or height <= 0 then return nil end
+    local scale = 1
+    if type(bar.GetEffectiveScale) == "function" and type(UIParent.GetEffectiveScale) == "function" then
+        local okScale, frameScale = pcall(bar.GetEffectiveScale, bar)
+        local okParent, parentScale = pcall(UIParent.GetEffectiveScale, UIParent)
+        frameScale = okScale and app.Capabilities.Plain(frameScale, "number") or nil
+        parentScale = okParent and app.Capabilities.Plain(parentScale, "number") or nil
+        if frameScale and parentScale and parentScale > 0 then scale = frameScale / parentScale end
+    end
+    return left * scale, bottom * scale, width * scale, height * scale
+end
+
+-- The cursor in UIParent units. GetCursorPosition is in physical pixels;
+-- UIParent's own scale is what converts them once.
+local function cursorPosition()
+    if type(GetCursorPosition) ~= "function" then return nil end
+    local ok, x, y = pcall(GetCursorPosition)
+    x = ok and app.Capabilities.Plain(x, "number") or nil
+    y = ok and app.Capabilities.Plain(y, "number") or nil
+    if not x or not y then return nil end
+    local scale = 1
+    if type(UIParent.GetEffectiveScale) == "function" then
+        local okScale, value = pcall(UIParent.GetEffectiveScale, UIParent)
+        value = okScale and app.Capabilities.Plain(value, "number") or nil
+        if value and value > 0 then scale = value end
+    end
+    local okLeft, left = pcall(UIParent.GetLeft, UIParent)
+    local okBottom, bottom = pcall(UIParent.GetBottom, UIParent)
+    left = okLeft and app.Capabilities.Plain(left, "number") or 0
+    bottom = okBottom and app.Capabilities.Plain(bottom, "number") or 0
+    return x / scale - left, y / scale - bottom
+end
+
+local function cursorOver(bar)
+    if not object(bar) then return false end
+    -- A zero-alpha bar keeps its hit box, so the client's own predicate is the
+    -- first and cheapest answer.
+    if type(bar.IsMouseOver) == "function" then
+        local ok, value = pcall(bar.IsMouseOver, bar)
+        if ok and not app.Capabilities.IsSecret(value) and value == true then return true end
+    end
+    local left, bottom, width, height = hostRect(bar)
+    local x, y = cursorPosition()
+    if left and x then
+        -- The drawn rectangle is the authority: a bar that spans the centre is
+        -- not "hovered" by a cursor parked in a gap between its buttons.
+        return x >= left and x <= left + width and y >= bottom and y <= bottom + height
+    end
+    -- No rectangle and no cursor readback: the frames under the pointer are the
+    -- remaining answer. `MouseIsOver` is not part of this build's API, so it is
+    -- not called. Without any readable answer this host is unknown, not hovered.
+    return focusInside(bar, mouseFoci())
+end
+
+-- A LumaUI window drawn in front of the stack (the bottom strip, a chat view,
+-- the settings window) owns the pixel under the cursor. Checked by walking the
+-- mouse foci up to the registered layout frames instead of guessing from names:
+-- the catalog is the one list of panels that can cover the centre.
+local function windowInFront(foci)
+    local entries = app.Layout and app.Layout.entries
+    if not entries then return false end
+    -- One frame -> entry lookup per pass; walking every entry for every ancestor
+    -- of every focus is the expensive shape this tick cannot afford.
+    local panels = {}
+    for _, entry in pairs(entries) do
+        if object(entry.frame) then panels[entry.frame] = true end
+    end
+    local settings = app.Settings and app.Settings.frame
+    if object(settings) then panels[settings] = true end
+    local function shown(node)
+        if type(node.IsShown) ~= "function" then return true end
+        local ok, value = pcall(node.IsShown, node)
+        return ok and app.Capabilities.Plain(value, "boolean") == true
+    end
+    for _, frame in ipairs(foci) do
+        local node, depth = frame, 0
+        while node and depth <= 8 do
+            if panels[node] and shown(node) then return true end
+            if type(node.GetParent) ~= "function" then break end
+            local ok, parent = pcall(node.GetParent, node)
+            if not ok or not object(parent) or parent == node then break end
+            node, depth = parent, depth + 1
+        end
+    end
+    return false
+end
+
+local function isOver(self, def, foci, blocked)
+    if editModeOpen() then return true end
+    if chatInFront(foci) then return false end
+    local bar = self.bars[def.key]
+    if not bar then return false end
+    -- A real foreground button (or its flyout) is the first answer.
+    if focusInside(bar, foci) then return true end
+    if blocked then return false end
+    local _, buttons = buttonsOf(def)
+    local readable = 0
+    -- Gaps between buttons and the empty part of a short row belong to no
+    -- button, so pointing there wakes nothing. Only buttons with a readable
+    -- rectangle can prove that; a build that reports none falls back to the
+    -- host's own rectangle below.
+    for _, button in ipairs(buttons) do
+        if hostRect(button) then
+            readable = readable + 1
+            if cursorOver(button) then return true end
+        end
+    end
+    if readable > 0 then return false end
+    return cursorOver(bar)
+end
+
+-- Advance one host: wake on hover, keep a grace period, then settle. `pinned`
+-- is the per-bar "always" policy; it holds the target at 1 without pretending
+-- the pointer is there. `instant` is the reduced-motion setting: the target is
+-- written directly instead of stepping toward it. `leftStack` drops the grace
+-- period because the pointer was seen on another bar: a neighbour starts to
+-- fade as soon as the pointer is on the new one, while leaving the whole stack
+-- keeps its 0.20 s.
+local function advance(state, over, pinned, now, instant, leftStack)
+    if over or pinned then
+        if over then state.lastOver = now end
+        state.target = 1
+    elseif state.target == 1 then
+        if leftStack or now - (state.lastOver or 0) > HIDE_DELAY then state.target = 0 end
+    end
+    local alpha = state.alpha or 0
+    if alpha ~= state.target then
+        if instant then
+            state.alpha = state.target
+            return true
+        end
+        -- Linear once per tick: the fade in finishes in FADE_IN and the fade out
+        -- in FADE_OUT, instead of approaching the target forever.
+        local duration = state.target == 1 and FADE_IN or FADE_OUT
+        local step = FADE_STEP / duration
+        if state.target == 1 then
+            alpha = math.min(state.target, alpha + step)
+        else
+            alpha = math.max(state.target, alpha - step)
+        end
+        state.alpha = alpha
+        return true
+    end
+    return false
+end
+
+local function reducedMotion()
+    local look = app.Store and app.Store:Profile().appearance
+    return look ~= nil and (look.motion ~= true or look.reduceMotion == true)
+end
+
 local function step(self)
     if not self.ticking then return end
     local now = type(GetTime) == "function" and GetTime() or 0
-    local over = isOver(self)
-    if over then
-        self.lastOver = now
-        self.target = 1
-    elseif self.target == 1 and now - (self.lastOver or 0) > HIDE_DELAY then
-        self.target = 0
+    local instant = reducedMotion()
+    local changed, hovered = false, nil
+    -- Hit testing first, so one pass knows both the new host and whether the
+    -- pointer is inside the stack at all. The cursor readback is sampled once.
+    local foci = mouseFoci()
+    local blocked = windowInFront(foci)
+    local over = {}
+    for _, def in ipairs(BARS) do
+        over[def.id] = isOver(self, def, foci, blocked)
+        if over[def.id] then hovered = def.id end
     end
-    local alpha = self.alpha or 0
-    if alpha ~= self.target then
-        alpha = alpha + (self.target - alpha) * 0.45
-        if math.abs(self.target - alpha) < 0.02 then alpha = self.target end
-        self.alpha = alpha
-        for _, bar in pairs(self.bars) do pcall(bar.SetAlpha, bar, alpha) end
+    for _, def in ipairs(BARS) do
+        local state = hostState(self, def.id)
+        state.mode = app.BarModel:HoverMode(def.id)
+        local pinned = state.mode == "always"
+        local leftStack = hovered ~= nil and hovered ~= def.id and not over[def.id]
+        if advance(state, over[def.id], pinned, now, instant, leftStack) then changed = true end
+    end
+    if changed then
+        for _, def in ipairs(BARS) do
+            local bar = self.bars[def.key]
+            local state = self.state and self.state[def.id]
+            if bar and state then pcall(bar.SetAlpha, bar, state.alpha or 0) end
+        end
         publishAlpha(self)
     end
 end
@@ -611,12 +818,14 @@ app:RegisterComponent({
         self.bars = self.bars or {}
         self.skins = self.skins or {}
         self.sampleOwned = false
+        -- One state per managed host instead of one shared fade: moving onto
+        -- another bar settles the previous one and wakes only the new one.
+        self.state = {}
+        for _, def in ipairs(BARS) do hostState(self, def.id) end
+        self.alphas = nil
         self.alpha = 0
-        self.target = 0
-        self.lastOver = 0
         self.pending = nil
         self.geometry = nil
-        self.publishedAlpha = nil
         self.ticking = true
         self.applyLayout = self.applyLayout or function()
             if self.running then apply(self) end
@@ -667,6 +876,10 @@ app:RegisterComponent({
         -- The backing panels follow this published value; returning to 1 here
         -- keeps them useful if only the bars are switched off.
         self.alpha = 1
+        for _, def in ipairs(BARS) do
+            local state = self.state and self.state[def.id]
+            if state then state.alpha, state.target = 1, 1 end
+        end
         publishAlpha(self)
         self.geometry = nil
         for index in ipairs(BARS) do

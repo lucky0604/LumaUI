@@ -14,6 +14,19 @@ local MAX_SUBGROUPS = 8
 local ROWS, COLUMNS = 8, 5
 local BUTTON_WIDTH, BUTTON_HEIGHT = 90, 32
 local COLUMN_STEP, ROW_STEP = BUTTON_WIDTH + 6, BUTTON_HEIGHT + 4
+local DEFAULT_COLUMN_GAP, DEFAULT_ROW_GAP = 6, 4
+-- Live geometry: the stored value wins, 0 keeps the built-in size. The module
+-- upvalues are updated in one place so create, arrange and the grid footprint
+-- never disagree.
+local function applyGeometry()
+    local ui = app.Store:Profile().ui
+    local raid = ui.groupFrames and ui.groupFrames.raid or {}
+    BUTTON_WIDTH = (raid.width or 0) > 0 and raid.width or 90
+    BUTTON_HEIGHT = (raid.height or 0) > 0 and raid.height or 32
+    local gap = (raid.gap or 0) > 0 and raid.gap or nil
+    COLUMN_STEP = BUTTON_WIDTH + (gap or DEFAULT_COLUMN_GAP)
+    ROW_STEP = BUTTON_HEIGHT + (gap and math.max(1, gap - 2) or DEFAULT_ROW_GAP)
+end
 local GRID_WIDTH = COLUMN_STEP * (COLUMNS - 1) + BUTTON_WIDTH
 local GRID_HEIGHT = ROW_STEP * (ROWS - 1) + BUTTON_HEIGHT
 -- Top-left corner of the grid as an offset from UIParent's centre. Columns grow
@@ -267,12 +280,21 @@ end
 -- queue only: SetPoint on a secured button is protected, so a subgroup change
 -- in combat is remembered and replayed once combat ends.
 local function arrange(self, parent)
+    local oldWidth, oldHeight, oldStep, oldRow = BUTTON_WIDTH, BUTTON_HEIGHT, COLUMN_STEP, ROW_STEP
+    applyGeometry()
+    local changed = oldWidth ~= BUTTON_WIDTH or oldHeight ~= BUTTON_HEIGHT
+        or oldStep ~= COLUMN_STEP or oldRow ~= ROW_STEP
     local slots, grouped, columns, rows = computeSlots()
     self.layoutMode = grouped and "subgroups" or "index"
     for index = 1, MAX_UNITS do
         local button = self.frames and self.frames[index]
         local slot = slots[index]
-        if button and slot and (button.lumaColumn ~= slot.column or button.lumaRow ~= slot.row) then
+        if button and changed then
+            button:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+            if button.name then button.name:SetWidth(BUTTON_WIDTH - 36) end
+        end
+        if button and slot and (changed or button.lumaColumn ~= slot.column or button.lumaRow ~= slot.row) then
+            button:ClearAllPoints()
             button:SetPoint("TOPLEFT", parent, "TOPLEFT", slot.column * COLUMN_STEP, -slot.row * ROW_STEP)
             button.lumaColumn, button.lumaRow = slot.column, slot.row
         end
@@ -488,8 +510,10 @@ component = app:RegisterComponent({ id = "raidFrames", label = "raidFrames", def
         end)
     end,
     Refresh = function(self)
-        -- Drawing only: no protected object is created or changed here.
+        -- Drawing only here; a geometry change is replayed through the queue
+        -- because resizing a secure button is protected in combat.
         drawAll(self)
+        app.Queue:Run(BUILD_JOB, rebuild)
     end,
     Disable = function(self)
         for _, button in pairs(self.frames or {}) do

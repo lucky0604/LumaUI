@@ -31,21 +31,121 @@ local function sortAvailable()
     return type(C_Container) == "table" and type(C_Container.SortBags) == "function"
 end
 
-local function collect(query, category)
-    local items, free, total = {}, 0, 0
-    query = query:lower()
-    for bag = 0, Plain(NUM_TOTAL_EQUIPPED_BAG_SLOTS, "number") or 5 do
-        local okSlots, slots = pcall(C_Container.GetContainerNumSlots, bag)
-        slots = okSlots and Plain(slots, "number") or 0
-        local okFree, empty = pcall(C_Container.GetContainerNumFreeSlots, bag)
-        empty = okFree and Plain(empty, "number") or 0
-        total, free = total + slots, free + empty
-        for slot = 1, slots do
-            local item = Items.Read(bag, slot)
-            if item and Items.Matches(item, query, category) then items[#items + 1] = item end
+-- The bag window shows the bags plus any bank this character can view: one
+-- source row under the title switches between them. A bank source keeps the
+-- bank's permission rules — an unknown permission is read-only — and the bag
+-- source stays available as the way back.
+local SOURCE_SPECS = {
+    { id = "bag", label = "bagSourceBags", width = 56 },
+    { id = "character", label = "bankSourceCharacter", width = 92 },
+    { id = "account", label = "bankSourceAccount", width = 92 },
+}
+
+local function bankKindOf(source)
+    local enums = rawget(_G, "Enum")
+    local bank = type(enums) == "table" and enums.BankType or nil
+    if type(bank) ~= "table" then return nil end
+    if source == "character" then return Plain(bank.Character, "number") end
+    if source == "account" then return Plain(bank.Account, "number") end
+    return nil
+end
+
+-- One probe pass per redraw: the bag source is always viewable; each bank
+-- source is the client's own answer about view, permission and tab bags.
+local function probeSources()
+    local states = {
+        bag = { source = "bag", viewable = true, usable = true, bags = bagIDs(), empty = false },
+    }
+    for _, spec in ipairs(SOURCE_SPECS) do
+        if spec.id ~= "bag" then
+            local kind = bankKindOf(spec.id)
+            local legacy = spec.id == "character" and Plain(rawget(_G, "BANK_CONTAINER"), "number") or nil
+            local viewable, usable, bags, empty
+            if kind ~= nil then
+                viewable, usable, bags, empty = app.ContainerModel.BankState(kind, legacy)
+            end
+            states[spec.id] = {
+                source = spec.id, kind = kind,
+                viewable = viewable == true,
+                usable = usable,
+                bags = viewable == true and bags or nil,
+                empty = empty == true,
+            }
         end
     end
-    return items, free, total
+    return states
+end
+
+-- Slots are read once through the shared container model; search and category
+-- filtering use its normalized match, so each physical slot appears once. A
+-- bank source is read-only unless the client confirmed the permission.
+local function collect(state, query, category)
+    local source = (state and state.source) or "bag"
+    local records, free, total = app.ContainerModel.Collect(source, (state and state.bags) or {})
+    if source ~= "bag" and (not state or state.usable ~= true) then
+        for _, record in ipairs(records) do
+            record.item.blocked = L.bankBlocked
+        end
+    end
+    local found = app.ContainerModel.Search(records, query, category)
+    local items = {}
+    for _, record in ipairs(found) do
+        items[#items + 1] = record.item
+    end
+    return items, free, total, found
+end
+
+-- The source chips share the row with the search field and the sort button:
+-- chips repack from the left edge, the search box takes whatever width the
+-- chips and the sort button leave, so one row always fits the window.
+local function layoutSources(self, states)
+    if not self.sources or not self.search then return end
+    local source = self.source or "bag"
+    local x = 22
+    for _, spec in ipairs(SOURCE_SPECS) do
+        local chip = self.sources[spec.id]
+        local state = states[spec.id]
+        local visible
+        if spec.id == "bag" then
+            local anyBank = false
+            for _, other in ipairs(SOURCE_SPECS) do
+                if other.id ~= "bag" and states[other.id] and states[other.id].viewable then anyBank = true end
+            end
+            visible = anyBank or source ~= "bag"
+        else
+            -- The selected bank stays labelled even while the client withholds
+            -- it, so the window never shows foreign content under the old name.
+            visible = state ~= nil and (state.viewable == true or source == spec.id)
+        end
+        chip:ClearAllPoints()
+        chip:SetShown(visible == true)
+        chip:SetSelected(source == spec.id)
+        if visible then
+            chip:SetPoint("TOPLEFT", x, -50)
+            x = x + spec.width + 6
+        end
+    end
+    local searchX = x > 22 and (x + 2) or 22
+    local right = self.canSort and 450 or 542
+    self.search:ClearAllPoints()
+    self.search:SetPoint("TOPLEFT", searchX, -50)
+    self.search:SetSize(right - searchX - (self.canSort and 8 or 0), 28)
+end
+
+-- Dropping on the window, not on a cell, uses the first empty slot of the
+-- active source. A bank the character cannot use refuses the drop.
+local function dropHere(self)
+    if self.closing then return end
+    if not Items.CursorHasItem() then return end
+    local source = self.source or "bag"
+    if source == "bag" then
+        Items.DropFirstFree(bagIDs())
+        return
+    end
+    local state = probeSources()[source]
+    if not state or state.viewable ~= true then app:Print(L.bankClosed); return end
+    if state.usable ~= true then app:Print(L.bankBlocked); return end
+    Items.DropFirstFree(state.bags or {})
 end
 
 -- Split dialog: Ctrl+click on a stack opens a small input (1 .. stack-1) and
@@ -63,6 +163,10 @@ local function confirmSplit()
     dialog.frame:Hide()
     app.Queue:Run("inventory/split", function()
         if type(C_Container) == "table" and type(C_Container.SplitContainerItem) == "function" then
+            -- The slot may have changed while the amount was typed or the
+            -- player was in combat; the physical slot is re-checked before the
+            -- split so the wrong stack is never cut.
+            if not Items.Verify(item) then app:Print(L.itemStale); return end
             C_Container.SplitContainerItem(item.bag, item.slot, count)
         end
     end)
@@ -99,13 +203,19 @@ local function buildSplit()
 end
 
 local function openSplit(item)
-    local count = Plain(item and item.count, "number") or 1
+    if not item then return end
+    if not Items.Verify(item) then app:Print(L.itemStale); return end
+    if item.blocked then app:Print(item.blocked); return end
+    if item.locked then app:Print(L.itemLocked); return end
+    local count = Plain(item.count, "number") or 1
     if count - 1 < 1 then return end
     if InCombatLockdown() then return end
     if not Items.Actions() or type(C_Container.SplitContainerItem) ~= "function" then return end
     buildSplit()
     local dialog = module.split
-    dialog.item = { bag = item.bag, slot = item.slot }
+    -- The full record is kept so the queued action can re-check the slot; the
+    -- confirmation re-verifies against the physical container before splitting.
+    dialog.item = item
     dialog.maximum = count - 1
     dialog.input:SetText("")
     dialog.range:SetFormattedText("1 - %d", dialog.maximum)
@@ -120,24 +230,75 @@ local function refresh(self)
     self.dirty = true
     if not self.frame or not self.frame:IsShown() then return end
     self.dirty = false
-    local items, free, total = collect(self.search:GetText(), self.filter)
+    self.sourceStates = probeSources()
+    local state = self.sourceStates[self.source or "bag"]
+    local items, free, total, found = collect(state, self.search:GetText(), self.filter)
     local pages = math.max(1, math.ceil(#items / PAGE_SIZE))
     self.page = math.max(1, math.min(self.page or 1, pages))
     self.pageLabel:SetFormattedText("%d / %d", self.page, pages)
     self.summary:SetFormattedText(L.slots, free, total)
-    -- Empty state names the cause: no containers at all, no slots, or a filter
-    -- that matched nothing. The wording never claims more than was probed.
-    local emptyText = #items == 0 and total == 0 and L.noContainers or L.empty
+    -- Empty state names the cause: no containers at all, no slots, a filter
+    -- that matched nothing, a bank that cannot be viewed right now, or a bank
+    -- without any tab. The wording never claims more than was probed.
+    local emptyText = L.empty
+    if state and state.source ~= "bag" then
+        if state.viewable ~= true then emptyText = L.bankClosed
+        elseif state.empty == true then emptyText = L.bankNoTabs end
+    elseif total == 0 then
+        emptyText = L.noContainers
+    end
     self.empty:SetText(emptyText)
     self.empty:SetShown(#items == 0)
-    -- Sorting is a bag action, so it follows the client capability on every
-    -- redraw rather than whatever was true when the window first opened.
-    self.canSort = sortAvailable()
+    -- Sorting follows the active source's permission and the client capability
+    -- on every redraw rather than whatever was true when the window opened.
+    if state and state.source ~= "bag" then
+        self.canSort = state.viewable == true and state.usable == true
+            and type(C_Container) == "table" and type(C_Container.SortBank) == "function"
+    else
+        self.canSort = sortAvailable()
+    end
+    layoutSources(self, self.sourceStates)
+    if self.wallet then
+        local money = type(GetMoney) == "function" and Plain(GetMoney(), "number") or nil
+        self.wallet:SetShown(app.WalletPanel ~= nil)
+        local label = money and type(GetMoneyString) == "function" and GetMoneyString(money) or L.walletTitle
+        local pinned = app.Ledger and app.Ledger:PinnedText() or ""
+        self.wallet.text:SetText(pinned ~= "" and (label .. "  " .. pinned) or label)
+    end
     if self.bagRow then self.bagRow:Refresh() end
     self.sort:SetShown(self.canSort)
     for i, button in ipairs(self.buttons) do
         Items.Paint(button, items[(self.page - 1) * PAGE_SIZE + i])
+        if self.sectioned then button:Hide() end
     end
+    if self.sectionView then
+        self.sectionView:SetShown(self.sectioned == true)
+        if self.sectioned then
+            self.sectionView:Set(found, app.Store:Profile().ui.containerCollapsed)
+        end
+    end
+end
+
+function methods:SetSectioned(on)
+    self.sectioned = on == true
+    if self.sectioned and self.frame and not self.sectionView then
+        local view = app.ContainerView:Create(self.frame, 500, 270, function(button, mouse)
+            local item = button.item
+            if not item or self.closing then return end
+            if IsModifiedClick and IsModifiedClick("CHATLINK") then Items.Link(item); return end
+            if mouse == "RightButton" then Items.Use(item) else Items.Pickup(item) end
+        end)
+        view.scroll:SetPoint("TOPLEFT", 22, -130)
+        view.onToggle = function(section)
+            local collapsed = {}
+            for k, v in pairs(app.Store:Profile().ui.containerCollapsed or {}) do collapsed[k] = v end
+            collapsed[section] = (not collapsed[section]) or nil
+            app.Store:Set("ui", "containerCollapsed", collapsed)
+            refresh(self)
+        end
+        self.sectionView = view
+    end
+    refresh(self)
 end
 
 local function redraw(self)
@@ -146,7 +307,7 @@ end
 
 local function build(self)
     local frame = CreateFrame("Frame", "LumaUIInventory", UIParent, "BackdropTemplate")
-    self.frame, self.buttons, self.page = frame, {}, 1
+    self.frame, self.buttons, self.page, self.source = frame, {}, 1, "bag"
     frame:Hide()
     frame:SetSize(564, 452)
     frame:SetFrameStrata("HIGH")
@@ -158,7 +319,22 @@ local function build(self)
     title:SetText(L.bagTitle)
     local close = app.Controls:Button(frame, "×", 28, function() frame:Hide() end)
     close:SetPoint("TOPRIGHT", -12, -12)
-    Items.Search(frame, self, 518, 26, -60, function() refresh(self) end)
+    Items.Search(frame, self, 520, 22, -50, function() refresh(self) end)
+    -- Source chips: the bags plus every bank the client lets this character
+    -- view. Clicking one re-collects from that source's physical containers.
+    self.sources = {}
+    local sourceX = 22
+    for _, spec in ipairs(SOURCE_SPECS) do
+        local chip = app.Controls:Button(frame, L[spec.label], spec.width, function()
+            self.source = spec.id
+            self.page = 1
+            refresh(self)
+        end, { mutedWhenIdle = true, height = 22 })
+        chip.source = spec.id
+        chip:SetPoint("TOPLEFT", sourceX, -50)
+        sourceX = sourceX + spec.width + 6
+        self.sources[spec.id] = chip
+    end
     Items.FilterRow(frame, self, 22, -94, function() refresh(self) end)
     self.empty = app.Theme:Text(frame, 14, true)
     self.empty:SetPoint("CENTER")
@@ -181,19 +357,30 @@ local function build(self)
         button:SetScript("OnDragStart", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
         button:SetScript("OnReceiveDrag", function(self2) if not self.closing then Items.Pickup(self2.item) end end)
     end
-    -- Dropping on the window, not on a cell, uses the first empty slot.
-    frame:SetScript("OnReceiveDrag", function() if not self.closing then Items.DropFirstFree(bagIDs()) end end)
-    frame:SetScript("OnMouseUp", function() if not self.closing then Items.DropFirstFree(bagIDs()) end end)
+    -- Dropping on the window, not on a cell, uses the first empty slot of the
+    -- active source; the source's permission is re-probed per drop.
+    frame:SetScript("OnReceiveDrag", function() dropHere(self) end)
+    frame:SetScript("OnMouseUp", function() dropHere(self) end)
     self.bagRow = Items.BagSlotRow(frame, 22, 84)
     Items.Pager(frame, self, { "BOTTOMLEFT", 22, 58 }, 62, function() redraw(self) end)
     self.summary = app.Theme:Text(frame, 12, true)
     self.summary:SetPoint("BOTTOMRIGHT", -22, 88)
     self.sort = app.Controls:Button(frame, L.sortBags, 92, function()
         if not self.canSort then app:Print(L.itemActionsUnavailable); return end
-        C_Container.SortBags()
+        local state = self.sourceStates and self.sourceStates[self.source or "bag"]
+        if not state or state.source == "bag" then
+            C_Container.SortBags()
+        else
+            pcall(C_Container.SortBank, state.kind)
+        end
         refresh(self)
     end)
-    self.sort:SetPoint("BOTTOMRIGHT", -22, 48)
+    self.sort:SetPoint("TOPRIGHT", -22, -50)
+    -- Footer wallet: live carried gold; clicking opens the ledger. Read-only.
+    self.wallet = app.Controls:Button(frame, "", 150, function()
+        if app.WalletPanel then app.WalletPanel:Toggle() end
+    end)
+    self.wallet:SetPoint("BOTTOMRIGHT", -22, 48)
     local hint = app.Theme:Text(frame, 11, true)
     hint:SetPoint("BOTTOMLEFT", 22, 25)
     hint:SetPoint("BOTTOMRIGHT", -22, 25)

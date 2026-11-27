@@ -20,6 +20,19 @@ Store.defaults = {
     modules = { launcher = true, minimap = true, questTracker = true, questList = false, dataStrip = true, experience = true, topPerformance = false, chat = true, chatTabs = true, chatView = true, tooltip = true, inventory = true, unitFrames = true, partyFrames = true, nameplates = true, actionBars = true },
     ui = { questFilter = "all", questFolds = { groups = {}, quests = {} }, windowScale = 1,
         actionBarScales = { 1, 1, 1 },
+        -- 018 Step 1: per-bar hover policy. Absent means independent hover
+        -- ("only the bar under the pointer wakes"); `always` keeps a bar lit.
+        actionBarHover = {},
+        -- 018 Step 2: the two client tool hosts. "collect" hides the Blizzard
+        -- bar behind the shared tool entry; "client" follows the client. The
+        -- field run confirmed both hosts hide and come back correctly (bag
+        -- slots, micro menu, queue eye, edit mode), so the new screen's
+        -- composition is the default. Each host records its own original
+        -- visibility and is handed back when a write is refused.
+        nativeTools = { bagsBar = "collect", microMenu = "collect" },
+        -- 018 follow-up: per-part switches for the owned unit frames. `bars` is
+        -- never switched off (a health bar is the frame), the other three are.
+        unitParts = { cast = true, auras = true, marks = true },
         clickCast = {}, auraFilter = "all", takeoverUnitFrames = true,
         -- One clock by default. The bottom strip owns it; the minimap panel is
         -- the alternative, and the choice persists per profile. The full strip
@@ -40,7 +53,7 @@ Store.defaults = {
         plateDirect = true, plateNative = "hide",
         -- 012 phase 08: own rune row and player cast bar. The client's runes and
         -- cast bar keep drawing until the own path is explicitly enabled.
-        resourceRunes = "native", playerCastOwned = false,
+        resourceRunes = "native", resourceFragments = "native", resourceStyle = "line", playerCastOwned = false, containerCollapsed = {}, pinnedCurrencies = {},
         -- 012 phase 10/11: own secure action bars. Off by default; the native
         -- bars keep keys, paging and vehicle handling until the own path is
         -- validated in game.
@@ -49,6 +62,7 @@ Store.defaults = {
         -- (button count, rows, size, gap, visibility), applied and restored out
         -- of combat. Empty means "the client's own layout", which is the default.
         actionBarLayout = {},
+        groupFrames = { raid = { width = 0, height = 0, gap = 0 } },
         -- Layout-level native switches for the group frames. Party keeps its
         -- current default; raid stays off until its own validation exists.
         partyTakeover = true, raidTakeover = false,
@@ -71,6 +85,11 @@ Store.defaults = {
         -- client acceptance for the window passes (default push is phase 14).
         chatTakeover = false, meterOfficial = false, questBelowMap = false, stripAvoidRight = false, unitNarrowAvoid = false },
     positions = {},
+    -- 018 Step 3: which default composition a profile was built for. A profile
+    -- without the field predates this screen; Normalize fills it in for any
+    -- profile that is created now, so "already on the new screen" is explicit
+    -- instead of guessed from two equal coordinate values.
+    screenVersion = 2,
 }
 
 local function clone(value)
@@ -141,6 +160,26 @@ function Store:Normalize(input)
     if type(ui.plateDirect) == "boolean" then result.ui.plateDirect = ui.plateDirect end
     if ui.plateNative == "keep" then result.ui.plateNative = "keep" end
     if ui.resourceRunes == "owned" then result.ui.resourceRunes = "owned" end
+    if ui.resourceFragments == "owned" then result.ui.resourceFragments = "owned" end
+    result.ui.resourceStyle = ui.resourceStyle == "arc" and "arc" or "line"
+    -- Container view: collapsed section names (known sections only) and up to
+    -- four pinned currency ids; anything else is dropped.
+    local collapsed, pinned = {}, {}
+    if type(ui.containerCollapsed) == "table" then
+        for _, name in ipairs({ "quest", "equip", "consumable", "mat", "other" }) do
+            if ui.containerCollapsed[name] == true then collapsed[name] = true end
+        end
+    end
+    if type(ui.pinnedCurrencies) == "table" then
+        for _, id in ipairs(ui.pinnedCurrencies) do
+            if finite(id) and id > 0 and id == math.floor(id) and id <= 2147483647 and #pinned < 4 then
+                local dup = false
+                for _, other in ipairs(pinned) do if other == id then dup = true end end
+                if not dup then pinned[#pinned + 1] = id end
+            end
+        end
+    end
+    result.ui.containerCollapsed, result.ui.pinnedCurrencies = collapsed, pinned
     -- Container takeover is a single switch for both windows: one profile that
     -- asked for it must not end up with the bags replaced and the bank native.
     if type(ui.containerTakeover) == "boolean" then
@@ -157,6 +196,36 @@ function Store:Normalize(input)
     result.ui.cooldownGroups = app.CooldownModel:Normalize(ui.cooldownGroups)
     result.ui.ownedBars = app.BarModel:Normalize(ui.ownedBars)
     result.ui.actionBarLayout = app.BarModel:NormalizeLayout(ui.actionBarLayout)
+    result.ui.actionBarHover = app.BarModel:NormalizeHover(ui.actionBarHover)
+    -- The two native tool hosts accept only the two documented modes; anything
+    -- else keeps the new composition's collected state.
+    do
+        local tools = type(ui.nativeTools) == "table" and ui.nativeTools or {}
+        result.ui.nativeTools = {
+            bagsBar = tools.bagsBar == "client" and "client" or "collect",
+            microMenu = tools.microMenu == "client" and "client" or "collect",
+        }
+    end
+    do
+        local parts = type(ui.unitParts) == "table" and ui.unitParts or {}
+        result.ui.unitParts = {
+            cast = parts.cast ~= false,
+            auras = parts.auras ~= false,
+            marks = parts.marks ~= false,
+        }
+    end
+    -- Raid button geometry. 0 keeps the built-in value ("follows client" in the
+    -- settings); anything outside the range is dropped, never clamped silently.
+    local frames = type(ui.groupFrames) == "table" and ui.groupFrames or {}
+    local raid = type(frames.raid) == "table" and frames.raid or {}
+    local function inRange(value, low, high)
+        return finite(value) and value >= low and value <= high and math.floor(value) or 0
+    end
+    result.ui.groupFrames = { raid = {
+        width = inRange(raid.width, 60, 140),
+        height = inRange(raid.height, 20, 48),
+        gap = inRange(raid.gap, 1, 16),
+    } }
     if type(ui.partyTakeover) == "boolean" then result.ui.partyTakeover = ui.partyTakeover end
     if type(ui.raidTakeover) == "boolean" then result.ui.raidTakeover = ui.raidTakeover end
     result.ui.chatWidth = finite(ui.chatWidth) and ui.chatWidth >= 240 and ui.chatWidth <= 600
@@ -219,6 +288,21 @@ function Store:Normalize(input)
                     anchor = app.Geometry and app.Geometry.CleanAnchor(position.anchor) or nil }
             end
         end
+    end
+    -- `screenVersion` records which composition a profile was built for. The
+    -- flag itself is decided by `IsLegacyScreen` from the saved geometry, which
+    -- is the only reliable evidence: an older build stamped the current version
+    -- onto every profile it wrote, so the number cannot be trusted. A copy this
+    -- build created carries an explicit `false` and keeps it.
+    if type(input.legacyScreen) == "boolean" then
+        result.legacyScreen = input.legacyScreen
+    else
+        result.legacyScreen = nil
+    end
+    if type(input.screenVersion) == "number" and input.screenVersion > 0 then
+        result.screenVersion = math.floor(input.screenVersion)
+    else
+        result.screenVersion = nil
     end
     if type(input.takeoverBackup) == "table" then
         local backup = {}
@@ -375,6 +459,26 @@ function Store:Open(character)
             end
             migrations.cooldownGroupsDefault = true
         end
+        -- 018: every group follows the player's Cooldown Manager again. A profile
+        -- that ran `/luma cds import` once was flipped to a manual copy by an
+        -- older build, so it kept drawing that frozen list even after the player
+        -- edited the CDM. The stored order is kept as the fallback for a build
+        -- whose list cannot be read, and an explicit manual edit after this
+        -- migration still turns `auto` off again.
+        migrations.cooldownAuto018 = type(saved.migrations) == "table"
+            and saved.migrations.cooldownAuto018 == true
+        if not migrations.cooldownAuto018 then
+            for _, profile in pairs(profiles) do
+                local ui = type(profile.ui) == "table" and profile.ui or nil
+                local groups = ui and type(ui.cooldownGroups) == "table" and ui.cooldownGroups.groups
+                if type(groups) == "table" then
+                    for _, id in ipairs({ "essential", "utility", "buffs" }) do
+                        if type(groups[id]) == "table" then groups[id].auto = true end
+                    end
+                end
+            end
+            migrations.cooldownAuto018 = true
+        end
         -- 015: one-time takeover switches. Only parts that reached equivalence in
         -- the client belong in TAKEOVER_015 (empty until in-game evidence exists).
         -- Each flip keeps the old value, telling "field absent" from an explicit
@@ -385,7 +489,55 @@ function Store:Open(character)
             for _, profile in pairs(profiles) do self:ApplyTakeover(profile) end
             migrations.takeover015 = true
         end
+        -- The adopted-screen record survives a reload, so a player who restarts
+        -- can still return to the profile their copy came from.
+        local screenReturn
+        if type(saved.screenReturn) == "table" and type(saved.screenReturn.from) == "string"
+            and type(saved.screenReturn.to) == "string" then
+            screenReturn = { from = saved.screenReturn.from, to = saved.screenReturn.to }
+        end
+        -- A profile that predates `screenVersion` and already carries explicit
+        -- geometry is the one the new screen would replace. Mark it once here,
+        -- before any UI reads it, and never flip the flag back: the player's
+        -- decision to keep the old layout is a normal saved value.
+        for _, profile in pairs(profiles) do
+            if profile.legacyScreen and not next(profile.positions) then
+                -- Nothing saved yet: this profile is already on the new screen.
+                profile.legacyScreen = nil
+                profile.screenVersion = self.SCREEN_VERSION
+            end
+        end
+        -- 018: the two native tool hosts move to the collected default. A profile
+        -- written while the default was "follow client" carries that value
+        -- explicitly, so changing the default alone never reaches it. The player
+        -- can still set either host back to "client" and that choice survives.
+        migrations.nativeToolsCollect = type(saved.migrations) == "table"
+            and saved.migrations.nativeToolsCollect == true
+        if not migrations.nativeToolsCollect then
+            for _, profile in pairs(profiles) do
+                local ui = type(profile.ui) == "table" and profile.ui or nil
+                if ui and type(ui.nativeTools) == "table" then
+                    ui.nativeTools.bagsBar = "collect"
+                    ui.nativeTools.microMenu = "collect"
+                end
+            end
+            migrations.nativeToolsCollect = true
+        end
+        -- 018: an earlier build of this same iteration wrote `legacyScreen =
+        -- false` onto every profile on save, including profiles that still carry
+        -- the previous composition's placements. That value is not evidence, so
+        -- it is cleared once here and `IsLegacyScreen` decides from the saved
+        -- geometry instead. A copy created after this migration keeps its `false`.
+        migrations.screenLegacy018 = type(saved.migrations) == "table"
+            and saved.migrations.screenLegacy018 == true
+        if not migrations.screenLegacy018 then
+            for _, profile in pairs(profiles) do
+                if profile.legacyScreen == false then profile.legacyScreen = nil end
+            end
+            migrations.screenLegacy018 = true
+        end
         self.data = { schema = self.schema, profiles = profiles, characters = {}, migrations = migrations }
+        self.data.screenReturn = screenReturn
         if type(saved.characters) == "table" then
             for name, selected in pairs(saved.characters) do
                 if type(name) == "string" and type(selected) == "string" and profiles[selected] then self.data.characters[name] = selected end
@@ -403,6 +555,38 @@ function Store:Open(character)
         end
         self.money = money
         self.data.money = money
+        if type(saved.ledger) == "table" then self.data.ledger = saved.ledger end
+        -- Written reports survive a restart: `/luma cds file` is meant to be read
+        -- from the file after a reload, so dropping them on login would defeat
+        -- the whole point. Only plain text lines are kept, and a slot that is no
+        -- longer a table is discarded rather than copied blindly.
+        if type(saved.reports) == "table" then
+            local reports = {}
+            for key, entry in pairs(saved.reports) do
+                if type(key) == "string" and key:match("^[%a][%w_]*$") and type(entry) == "table"
+                    and type(entry.lines) == "table" then
+                    local lines = {}
+                    for index, line in ipairs(entry.lines) do
+                        if type(line) == "string" then lines[index] = line end
+                    end
+                    reports[key] = {
+                        version = type(entry.version) == "string" and entry.version or nil,
+                        title = type(entry.title) == "string" and entry.title:sub(1, 64) or key,
+                        lines = lines,
+                    }
+                end
+            end
+            self.data.reports = next(reports) and reports or nil
+        end
+        if type(saved.diagnostics) == "table" and type(saved.diagnostics.lines) == "table" then
+            self.data.diagnostics = saved.diagnostics
+        end
+        -- The adopted-screen record survives a reload, so a player who restarts
+        -- can still return to the profile their copy came from.
+        if type(saved.screenReturn) == "table" and type(saved.screenReturn.from) == "string"
+            and type(saved.screenReturn.to) == "string" then
+            self.data.screenReturn = { from = saved.screenReturn.from, to = saved.screenReturn.to }
+        end
         _G.LumaUIDB = self.data
     end
     self.character = character
@@ -422,6 +606,166 @@ function Store:Names()
     table.sort(list)
     return list
 end
+
+-- 018 Step 3: what a profile still owns from before this composition. A profile
+-- written by an older iteration carries its own explicit coordinates, so the new
+-- defaults never reach it; identifying it here is what lets the player try the
+-- new screen without losing the old one.
+--
+-- Only the keys this composition actually owns are reported, and only when the
+-- profile says something explicit for them. A profile with no saved geometry is
+-- already on the new screen and needs no copy.
+Store.SCREEN_VERSION = 2
+Store.LEGACY_KEYS = {
+    "actionBar1", "actionBar2", "actionBar3",
+    "cdGroup_essential", "cdGroup_utility", "cdGroup_buffs",
+    "unit_player", "unit_target", "unit_focus", "unit_pet", "unit_targettarget",
+    "party", "questList", "chat", "chatPlate", "utilityCorner", "damageMeterArea",
+    "bottomBar", "topInfo", "playerCast", "playerResource", "minimap",
+}
+
+-- The composition a profile was built for. `IsLegacyScreen` is the authority: a
+-- profile that still owns placements this screen replaced reports the old
+-- version even when a save stamped the new number onto it.
+function Store:ScreenVersion()
+    if self:IsLegacyScreen() then return 1 end
+    local profile = self:Profile()
+    local value = profile and profile.screenVersion
+    if type(value) == "number" and value > 0 then return value end
+    return self.SCREEN_VERSION
+end
+
+-- The copy the player adopted for this screen, and the profile it came from.
+-- `Store:ReturnToSource()` uses it for the one-click way back; a stale entry
+-- (the source renamed or deleted) is dropped instead of leaving a dead button.
+function Store:ScreenReturn()
+    local record = self.data and self.data.screenReturn
+    if type(record) ~= "table" or type(record.from) ~= "string" then return nil end
+    if not self.data.profiles[record.from] then
+        self.data.screenReturn = nil
+        return nil
+    end
+    return record
+end
+
+function Store:ReturnToSource()
+    local record = self:ScreenReturn()
+    if not record then return false end
+    if self.readonly then return false, app.L.readonly end
+    local ok, problem = self:Select(record.from)
+    if ok then self.data.screenReturn = nil end
+    return ok, problem
+end
+
+-- True while this profile still carries the composition it was written with.
+-- `screenVersion` alone cannot answer that: an older build stamped the current
+-- number onto every profile on each write, so a profile saved by it reads as
+-- "current" while its placements are still the old ones. The stored flag and the
+-- saved geometry are the real evidence, and a profile with no placements at all
+-- is already on this screen.
+function Store:IsLegacyScreen()
+    local profile = self:Profile()
+    if not profile then return false end
+    -- A copy this composition created says so explicitly: it keeps an explicit
+    -- false, which outranks the saved geometry it inherited.
+    if profile.legacyScreen == false then return false end
+    if profile.legacyScreen == true then return true end
+    return next(profile.positions or {}) ~= nil
+end
+
+-- The saved keys of an older profile that this composition would replace. Used
+-- by the overview preview and by `TryNewScreen`; an empty list means the profile
+-- is already on this screen.
+function Store:LegacyKeys()
+    local profile = self:Profile()
+    if not profile then return {} end
+    if not self:IsLegacyScreen() then return {} end
+    local list, seen = {}, {}
+    local function add(id)
+        if seen[id] then return end
+        seen[id] = true
+        list[#list + 1] = id
+    end
+    for _, id in ipairs(self.LEGACY_KEYS) do
+        local position = profile.positions[id]
+        if type(position) == "table" then add(id) end
+    end
+    for id in pairs(profile.positions) do
+        if type(id) == "string" and not seen[id] then
+            -- A key outside the catalog is still the player's own placement;
+            -- it is listed so the preview never claims fewer changes than it
+            -- makes.
+            if id:match("^actionBar[1-3]$") or id:match("^cdGroup_") or id:match("^unit_") then add(id) end
+        end
+    end
+    return list
+end
+
+-- A profile name that cannot collide with an existing one: "Pearl", "Pearl 2"…
+function Store:CopyName(base)
+    base = type(base) == "string" and base:match("^%s*(.-)%s*$") or "Pearl"
+    if not self:ValidName(base) then base = "Pearl" end
+    if not self.data.profiles[base] then return base end
+    for index = 2, 99 do
+        local name = string.format("%s %d", base, index)
+        if self:ValidName(name) and not self.data.profiles[name] then return name end
+    end
+    return nil
+end
+
+-- Creates the copy this composition needs and selects it. Every other profile
+-- value (actions, keybinds, abilities, unrelated windows, the wallet) travels
+-- with the copy; only the keys this screen replaces are dropped, and the old
+-- profile stays untouched so "return to it" is a plain Select.
+--
+-- Returns the copy name, or nil plus the reason it was not created.
+function Store:TryNewScreen(base)
+    if self.readonly then return nil, app.L.readonly end
+    local source = self:Profile()
+    if not source then return nil, app.L.unknownProfile end
+    local name = self:CopyName(base or source.name or "Pearl")
+    if not name then return nil, app.L.invalidName end
+    local copy = clone(source)
+    copy.screenVersion = self.SCREEN_VERSION
+    copy.legacyScreen = false
+    for _, id in ipairs(self:LegacyKeys()) do copy.positions[id] = nil end
+    -- A fresh screen owns no preset snapshot and no per-screen drafts.
+    copy.takeoverBackup = nil
+    self.data.profiles[name] = self:Normalize(copy)
+    self.data.profiles[name].screenVersion = self.SCREEN_VERSION
+    self.data.profiles[name].legacyScreen = false
+    -- Remember where the copy came from, so the overview can offer a one-click
+    -- way back; the record is cleared by ReturnToSource.
+    self.data.screenReturn = { from = self.current, to = name }
+    local ok, problem = self:Select(name)
+    if not ok then
+        self.data.profiles[name] = nil
+        self.data.screenReturn = nil
+        return nil, problem
+    end
+    -- The copy starts on this screen's own composition: the preset writes the
+    -- entries it lists, so the player gets the new layout immediately instead of
+    -- an empty position table.
+    if app.Layout and type(app.Layout.ApplyPreset) == "function" then
+        local preset = self.SCREEN_PRESET
+        if type(preset) == "function" then preset = preset() end
+        if type(preset) == "string" then
+            for _, available in ipairs(app.Layout:Presets()) do
+                if available.id == preset then
+                    app.Layout:ApplyPreset(preset)
+                    -- The preset snapshot belongs to the source profile; the
+                    -- copy is the new baseline and must not "undo" to it.
+                    app.Layout:ClearPresetSnapshot()
+                    break
+                end
+            end
+        end
+    end
+    return name
+end
+
+-- Which layout preset a copy of the current screen adopts.
+Store.SCREEN_PRESET = function() return "pearlCity" end
 
 function Store:Changed()
     app:Publish("PROFILE_CHANGED", self.current)
@@ -489,6 +833,10 @@ function Store:Create(name, copyCurrent)
     if not self:ValidName(name) then return false, app.L.invalidName end
     if self.data.profiles[name] then return false, app.L.exists end
     self.data.profiles[name] = copyCurrent and clone(self:Profile()) or clone(self.defaults)
+    -- An explicit new profile is on the current screen by construction, even
+    -- when it was copied from one that predates it.
+    self.data.profiles[name].screenVersion = self.SCREEN_VERSION
+    self.data.profiles[name].legacyScreen = false
     return self:Select(name)
 end
 

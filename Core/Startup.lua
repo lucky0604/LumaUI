@@ -3,6 +3,8 @@ local events = CreateFrame("Frame")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("PLAYER_MONEY")
+events:RegisterEvent("ACCOUNT_MONEY")
+events:RegisterEvent("ACCOUNT_CHARACTER_CURRENCY_DATA_RECEIVED")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterEvent("PLAYER_REGEN_DISABLED")
 events:RegisterEvent("DISPLAY_SIZE_CHANGED")
@@ -15,12 +17,25 @@ local function command(input)
     if action == "edit" or action == "layout" then app.Unlock:Toggle()
     elseif action == "bags" then
         -- `takeover` is the switch itself; anything else toggles the browser.
-        if rest == "takeover" then
+        if rest == "sections" or rest == "paged" then
+            local inv = app.components.inventory
+            if inv.frame and inv.SetSectioned then
+                inv:SetSectioned(rest == "sections")
+                app:Print(rest == "sections" and app.L.bagViewSections or app.L.bagViewPaged)
+            end
+        elseif rest == "takeover" then
             app.components.inventory:ToggleTakeover()
         else
             app.components.inventory:Toggle()
         end
-    elseif action == "bank" then app.components.bank:Toggle()
+    elseif action == "bank" then
+        local bank = app.components.bank
+        if (rest == "sections" or rest == "paged") and bank.frame and bank.SetSectioned then
+            bank:SetSectioned(rest == "sections")
+            app:Print(rest == "sections" and app.L.bagViewSections or app.L.bagViewPaged)
+        else
+            bank:Toggle()
+        end
     elseif action == "party" then app.components.partyFrames:Diagnose()
     elseif action == "unit" then app.components.unitFrames:Diagnose()
     elseif action == "raid" and app.components.raidFrames then app.components.raidFrames:Diagnose()
@@ -32,12 +47,19 @@ local function command(input)
     elseif action == "ownership" or action == "owner" then
         -- Read-only ownership table: what each control asked for, what is on
         -- screen, and whether the current build has real evidence for it.
-        local lines = app.Ownership:Lines()
-        if #lines == 0 then
-            app:Print(app.L.ownNone)
+        local function report()
+            local lines = app.Ownership:Lines()
+            if #lines == 0 then
+                app:Print(app.L.ownNone)
+            else
+                app:Print(app.L.ownHeader)
+                for _, line in ipairs(lines) do app:Print("  " .. line) end
+            end
+        end
+        if rest == "file" then
+            app:WriteReport("ownership", report, "ownership")
         else
-            app:Print(app.L.ownHeader)
-            for _, line in ipairs(lines) do app:Print("  " .. line) end
+            report()
         end
     elseif action == "hud" then app.Layout:Diagnose()
     elseif action == "cds" and app.components.cooldownGroups then
@@ -62,7 +84,40 @@ local function command(input)
         else
             app:Print(app.L.readonly)
         end
+    elseif action == "wallet" and app.WalletPanel then
+        local verb, arg1, arg2 = (rest or ""):match("^(%S+)%s*(%S*)%s*(.*)$")
+        if verb == "sources" then
+            for id, info in pairs(app.Ledger:Data().sources) do
+                app:Print(string.format("%s  %s  %s%s", id, info.name, info.region, info.group and (" group=" .. info.group) or ""))
+            end
+        elseif verb == "list" then
+            local filter = arg1 ~= "" and (tonumber(arg1) or arg1) or nil
+            for _, row in ipairs(app.Ledger:Rows(filter)) do
+                app:Print(string.format("%s %s %s #%d = %d (%s)", row.source, row.scope, row.name, row.currency, row.qty,
+                    row.seen and tostring(row.seen) or app.L.walletUnknown))
+            end
+        elseif verb == "pin" and tonumber(arg1) then
+            local state = app.Ledger:TogglePin(tonumber(arg1))
+            app:Print(state == nil and app.L.walletPinFailed or (state and app.L.walletPinned or app.L.walletUnpinned))
+        elseif verb == "rename" and arg1 ~= "" then
+            app:Print(app.Ledger:RenameSource(arg1, arg2) and app.L.walletRenamed or app.L.walletRenameFailed)
+        elseif verb == "group" and arg1 ~= "" and arg2 ~= "" then
+            app:Print(app.Ledger:Group(arg1, arg2) and app.L.walletGrouped or app.L.walletGroupFailed)
+        else
+            app.WalletPanel:Toggle()
+        end
+    elseif action == "fragments" then
+        local wanted = app.Store:Profile().ui.resourceFragments ~= "owned"
+        if app.Store:Set("ui", "resourceFragments", wanted and "owned" or "native") then
+            app:Print(wanted and app.L.fragmentsOn or app.L.fragmentsOff)
+            local resource = app.components.playerResource
+            if resource and resource.running then resource:Refresh() end
+        else
+            app:Print(app.L.readonly)
+        end
     elseif action == "bars" and app.components.actionPanel then app.components.actionPanel:Diagnose()
+    elseif action == "tools" and app.components.utilityCorner then
+        app.components.utilityCorner:Command(rest)
     elseif action == "chat" then
         -- Explicit, reversible chat-size trial (010 phase 08). The client's own
         -- chat settings own the real size; this only asks once and can put the
@@ -241,6 +296,14 @@ events:SetScript("OnEvent", function(_, event)
         -- The account money ledger must not depend on the information strip
         -- being enabled, so recording lives in the core startup frame.
         if app.ready and app.Reports then app:Call("startup/money", app.Reports.RecordMoney, app.Reports) end
+    elseif event == "ACCOUNT_MONEY" then
+        if app.ready and app.Ledger then app:Call("ledger/bank", app.Ledger.ReadBankMoney, app.Ledger) end
+    elseif event == "ACCOUNT_CHARACTER_CURRENCY_DATA_RECEIVED" then
+        if app.ready and app.Ledger then
+            app.Ledger.requested = nil
+            app:Call("ledger/warband", app.Ledger.ReadAllWarband, app.Ledger)
+            if app.WalletPanel and app.WalletPanel.frame and app.WalletPanel.frame:IsShown() then app.WalletPanel:Refresh() end
+        end
     elseif event == "PLAYER_REGEN_ENABLED" then
         app.Queue:Flush()
         if app.ready then app.Settings:Update() end

@@ -14,16 +14,30 @@ local _, app = ...
 -- The native personal resource display and the native cast bar stay untouched;
 -- this component only adds the summary rail the mockup shows above the skills.
 
-local RAIL_HEIGHT = 6
-local SECONDARY_HEIGHT = 3
-local SECONDARY_GAP = 2
+local RAIL_HEIGHT = 8
+local SECONDARY_HEIGHT = 10
+local SECONDARY_GAP = 3
 -- 012 phase 08: death knight runes as six own segments. Per-rune recovery is
 -- what a continuous 0..6 rail cannot express, so each rune gets its own small
 -- StatusBar fed by GetRuneCooldown. The native rune row keeps drawing until the
 -- player explicitly chooses the own row (`/luma runes`).
 local RUNE_COUNT = 6
-local RUNE_WIDTH, RUNE_HEIGHT, RUNE_GAP = 11, 7, 2
-local RUNE_GAP_TOP = 2
+local RUNE_WIDTH, RUNE_HEIGHT, RUNE_GAP = 11, 10, 2
+local RUNE_GAP_TOP = 3
+-- 017 phase 05: Vengeance demon hunter soul fragments. The count comes from
+-- C_Spell.GetSpellCastCount(228477) (a hypothesis to verify in the client). It
+-- can be a restricted value, so it goes untouched into one StatusBar; Lua never
+-- compares, adds or stores it. The capacity (6) only places fixed dividers and
+-- is not read from the count.
+-- Optional arc: six short segments on a shallow arc, each placed and rotated
+-- independently. It is drawn only from plain, readable values (rune recovery);
+-- a restricted value keeps the straight row, so the arc never has to compare a
+-- secret to decide how a segment looks.
+local ARC_RADIUS, ARC_SPREAD, ARC_HEIGHT = 40, 0.9, 16
+local FRAGMENT_SPELL = 228477
+local FRAGMENT_SPEC = 581
+local FRAGMENT_CAPACITY = 6
+local FRAGMENT_HEIGHT = 10
 
 local function classToken()
     if type(UnitClass) ~= "function" then return nil end
@@ -111,6 +125,7 @@ local function drawRunes(self)
     if not runes then return 0 end
     if not runesWanted(self) then
         if runes:IsShown() then runes:Hide() end
+        if self.runeArc and self.runeArc:IsShown() then self.runeArc:Hide() end
         stopRuneTicker(self)
         return 0
     end
@@ -140,7 +155,25 @@ local function drawRunes(self)
             end
         end
     end
-    runes:Show()
+    local arc = self.runeArc
+    local useArc = arc ~= nil and app.Store:Profile().ui.resourceStyle == "arc"
+    self.runeStyle = useArc and "arc" or "line"
+    if useArc then
+        for index = 1, RUNE_COUNT do
+            local bar, segment = runes.bars[index], arc.segments[index]
+            local value = bar and bar.value
+            -- The straight bar already holds the plain value; mirror it in the
+            -- segment's colour/alpha instead of reading the source twice.
+            local r, g, b = 1, 1, 1
+            if bar and bar.GetStatusBarColor then r, g, b = bar:GetStatusBarColor() end
+            segment:SetColorTexture(r or 1, g or 1, b or 1, 0.35 + 0.65 * (type(value) == "number" and value or 0))
+        end
+        runes:Hide()
+        arc:Show()
+    else
+        arc:Hide()
+        runes:Show()
+    end
     if recovering and not self.runeTicker and type(C_Timer) == "table"
         and type(C_Timer.NewTicker) == "function" then
         self.runeTicker = C_Timer.NewTicker(0.2, function()
@@ -152,7 +185,56 @@ local function drawRunes(self)
     elseif not recovering then
         stopRuneTicker(self)
     end
-    return RUNE_HEIGHT + RUNE_GAP_TOP
+    return (useArc and ARC_HEIGHT or RUNE_HEIGHT) + RUNE_GAP_TOP
+end
+
+local function specID()
+    local api = _G.C_SpecializationInfo
+    local getIndex = api and api.GetSpecialization or _G.GetSpecialization
+    local getInfo = api and api.GetSpecializationInfo or _G.GetSpecializationInfo
+    if type(getIndex) ~= "function" or type(getInfo) ~= "function" then return nil end
+    local ok, index = pcall(getIndex)
+    index = ok and plain(index, "number") or nil
+    if not index then return nil end
+    local okInfo, id = pcall(getInfo, index)
+    return okInfo and plain(id, "number") or nil
+end
+
+local function fragmentsSupported(self)
+    return (self.classToken or classToken()) == "DEMONHUNTER"
+        and specID() == FRAGMENT_SPEC
+        and type(_G.C_Spell) == "table" and type(_G.C_Spell.GetSpellCastCount) == "function"
+end
+
+local function fragmentsWanted(self)
+    return app.Store:Profile().ui.resourceFragments == "owned" and fragmentsSupported(self)
+end
+
+-- Returns the extra height the row needs (0 when hidden). `nil` from the source
+-- or a refused call means "unavailable" and hides the row; it is never drawn as
+-- an empty row of zero, because 0 is a confirmed answer and nil is not.
+local function drawFragments(self)
+    local row = self.fragments
+    if not row then return 0 end
+    if not fragmentsWanted(self) then
+        if row:IsShown() then row:Hide() end
+        self.fragmentState = self.fragmentState and "off" or nil
+        return 0
+    end
+    local ok, count = pcall(_G.C_Spell.GetSpellCastCount, FRAGMENT_SPELL)
+    if not ok or type(count) == "nil" then
+        row:Hide()
+        self.fragmentState = "unavailable"
+        return 0
+    end
+    row.bar:SetMinMaxValues(0, FRAGMENT_CAPACITY)
+    -- Raw hand-over to the native drawing method; a secret stays a secret.
+    pcall(row.bar.SetValue, row.bar, count)
+    local accent = app.Theme:Accent()
+    row.bar:SetStatusBarColor(accent[1], accent[2], accent[3], 1)
+    row:Show()
+    self.fragmentState = "shown"
+    return FRAGMENT_HEIGHT + SECONDARY_GAP
 end
 
 local function draw(self)
@@ -167,9 +249,10 @@ local function draw(self)
     -- the summary rail is not drawn rather than replacing per-rune recovery.
     -- The own rune row, when chosen, replaces that summary instead.
     if self.secondaryNative then
+        drawFragments(self)
         if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
         local extra = drawRunes(self)
-        local height = extra > 0 and (RAIL_HEIGHT + RUNE_GAP_TOP + RUNE_HEIGHT) or RAIL_HEIGHT
+        local height = extra > 0 and (RAIL_HEIGHT + extra) or RAIL_HEIGHT
         self.railHeight = height
         self.rail:SetHeight(height)
         app.Layout:SetResourceHeight(math.max(11, height))
@@ -179,6 +262,15 @@ local function draw(self)
     -- No rune row on this path: the summary rail is the whole display.
     if self.runes and self.runes:IsShown() then self.runes:Hide() end
     stopRuneTicker(self)
+    local fragmentExtra = drawFragments(self)
+    if fragmentExtra > 0 then
+        if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
+        local height = RAIL_HEIGHT + fragmentExtra
+        self.railHeight = height
+        self.rail:SetHeight(height)
+        app.Layout:SetResourceHeight(math.max(11, height))
+        return
+    end
     local kind = self.secondaryType
     if kind then
         local secondMax = plain(UnitPowerMax("player", kind), "number")
@@ -229,7 +321,9 @@ local function position(self)
     local central = app.Layout:Central()
     local rail = self.rail
     local y = resourceBottom(central)
-    local width = math.max(60, central.content.width)
+    -- One plan decides the width: the rail may not be wider than the block the
+    -- player sees, and an empty or hidden row never carries it.
+    local width = app.Layout:ResourceWidth()
     if not atTarget(rail, 0, y) then
         rail:ClearAllPoints()
         rail:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, y)
@@ -280,6 +374,60 @@ component = app:RegisterComponent({
             end
             runes:Hide()
             rail.runes = runes
+            local arc = CreateFrame("Frame", "LumaUIPlayerRuneArc", rail)
+            arc:SetSize(2 * ARC_RADIUS, ARC_HEIGHT)
+            arc:SetPoint("TOP", rail, "TOP", 0, -(RAIL_HEIGHT + RUNE_GAP_TOP))
+            arc.segments = {}
+            for index = 1, RUNE_COUNT do
+                local segment = arc:CreateTexture(nil, "ARTWORK")
+                segment:SetSize(RUNE_WIDTH, 5)
+                local t = (index - 1) / (RUNE_COUNT - 1) * 2 - 1
+                local angle = t * ARC_SPREAD
+                -- Centre of the arc sits below the row, so the ends curve down.
+                segment:SetPoint("CENTER", arc, "BOTTOM", math.sin(angle) * ARC_RADIUS,
+                    ARC_HEIGHT - 3 - (1 - math.cos(angle)) * ARC_RADIUS)
+                if type(segment.SetRotation) == "function" then pcall(segment.SetRotation, segment, -angle) end
+                segment:SetColorTexture(1, 1, 1, 1)
+                arc.segments[index] = segment
+            end
+            arc:Hide()
+            self.runeArc = arc
+            -- One continuous bar with fixed dividers: the count is handed to it
+            -- raw, the dividers only mark the plain capacity.
+            local fragments = CreateFrame("Frame", "LumaUIPlayerFragments", rail)
+            fragments:SetHeight(FRAGMENT_HEIGHT)
+            fragments:SetPoint("TOPLEFT", 0, -(RAIL_HEIGHT + SECONDARY_GAP))
+            fragments:SetPoint("TOPRIGHT", 0, -(RAIL_HEIGHT + SECONDARY_GAP))
+            fragments.bar = CreateFrame("StatusBar", nil, fragments)
+            fragments.bar:SetAllPoints()
+            fragments.bar:SetStatusBarTexture(app.Theme.media.combatFill)
+            fragments.bar:SetMinMaxValues(0, FRAGMENT_CAPACITY)
+            fragments.bar:SetValue(0)
+            fragments.back = fragments:CreateTexture(nil, "BACKGROUND")
+            fragments.back:SetAllPoints()
+            local base = app.Theme.colors.embedded
+            fragments.back:SetColorTexture(base[1], base[2], base[3], 1)
+            fragments.dividers = {}
+            for index = 1, FRAGMENT_CAPACITY - 1 do
+                local divider = fragments.bar:CreateTexture(nil, "OVERLAY")
+                divider:SetWidth(1)
+                divider:SetPoint("TOP", fragments.bar, "TOPLEFT", 0, 0)
+                divider:SetPoint("BOTTOM", fragments.bar, "BOTTOMLEFT", 0, 0)
+                divider:SetColorTexture(0, 0, 0, 0.85)
+                fragments.dividers[index] = divider
+            end
+            fragments:SetScript("OnSizeChanged", function(box, width)
+                width = plain(width, "number")
+                if not width or width <= 0 then return end
+                for index, divider in ipairs(box.dividers) do
+                    divider:ClearAllPoints()
+                    divider:SetPoint("TOP", box.bar, "TOPLEFT", width * index / FRAGMENT_CAPACITY, 0)
+                    divider:SetPoint("BOTTOM", box.bar, "BOTTOMLEFT", width * index / FRAGMENT_CAPACITY, 0)
+                end
+            end)
+            fragments:Hide()
+            rail.fragments = fragments
+            self.fragments = fragments
             self.rail, self.primary, self.secondary = rail, rail.primary, rail.secondary
             self.runes = runes
         end
@@ -305,6 +453,11 @@ component = app:RegisterComponent({
             position(current)
         end)
         self:Listen("RUNE_POWER_UPDATE", function(current) draw(current) end)
+        -- The first-choice event for the soul fragment count; it only redraws
+        -- the row when it is wanted.
+        self:Listen("SPELL_UPDATE_USES", function(current)
+            if app.Store:Profile().ui.resourceFragments == "owned" then draw(current) end
+        end)
         self:Listen("PLAYER_DEAD", function(current)
             stopRuneTicker(current)
         end)
@@ -322,6 +475,8 @@ component = app:RegisterComponent({
     Disable = function(self)
         stopRuneTicker(self)
         if self.runes then self.runes:Hide() end
+        if self.fragments then self.fragments:Hide() end
+        if self.runeArc then self.runeArc:Hide() end
         if self.rail then self.rail:Hide() end
         if self.primary then self.primary:SetValue(0) end
         if self.secondary then self.secondary:Hide() end
@@ -331,7 +486,8 @@ component = app:RegisterComponent({
 
 function component:Describe()
     if not self.running then return nil end
-    local label = self.secondaryType and app.L.resourceSecondary
+    local label = self.fragmentState == "shown" and "fragments"
+        or self.secondaryType and app.L.resourceSecondary
         or (self.secondaryNative and app.L.resourceNative) or app.L.resourcePrimary
     return string.format("playerResource: rail=%s", label)
 end

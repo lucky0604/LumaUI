@@ -204,6 +204,33 @@ function Model:NormalizeLayout(input)
     return result
 end
 
+-- Per-bar hover policy (018 Step 1). `hover` is the default every build gets:
+-- only the bar the pointer is on wakes. `always` keeps one bar awake while the
+-- rest of the stack stays quiet. The value is read, never written, by the hover
+-- scheduler; nothing about a pointer position is persisted.
+Model.HOVER_MODES = { hover = true, always = true }
+
+function Model:NormalizeHover(input)
+    local result = {}
+    if type(input) ~= "table" then return result end
+    for key, value in pairs(input) do
+        -- Only catalogued hosts and known modes survive: a damaged save cannot
+        -- invent a bar or a mode the scheduler has no branch for.
+        if type(key) == "string" and self.HOVER_MODES[value] and self:Native(key) then
+            result[key] = value
+        end
+    end
+    return result
+end
+
+-- The effective mode for one host. An absent profile value means independent
+-- hover, which is also what an old profile written before this field gets.
+function Model:HoverMode(key)
+    local list = app.Store and app.Store:Profile().ui.actionBarHover
+    local mode = type(list) == "table" and list[key] or nil
+    return self.HOVER_MODES[mode] and mode or "hover"
+end
+
 -- Button capacity per row for `buttons` buttons in `rows` rows: every row gets
 -- floor(buttons/rows), and the first `buttons % rows` rows get one more. 8 two
 -- rows is 4+4; 7 five rows is 2+2+1+1+1.

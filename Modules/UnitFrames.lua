@@ -56,7 +56,13 @@ local component
 -- resizing a secure unit button is a protected change, and events fire during
 -- combat, so the height only moves through the queued job below.
 local function partAllowed(frame, id)
-    return not frame.partsFilter or frame.partsFilter[id] == true
+    if not frame.partsFilter or frame.partsFilter[id] ~= true then return false end
+    -- Per-part switches: a part the player turned off is not drawn and does not
+    -- take a row in the frame height, so the frame closes up instead of leaving
+    -- a gap where the aura row used to be.
+    local off = app.Store and app.Store:Profile().ui.unitParts
+    if type(off) == "table" and off[id] == false and id ~= "bars" then return false end
+    return true
 end
 
 local function drawFrame(frame)

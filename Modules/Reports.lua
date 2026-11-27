@@ -125,7 +125,17 @@ end
 function Reports:RecordMoney()
     local amount = plain(type(GetMoney) == "function" and GetMoney() or nil, "number")
     local character = app.Store.character
-    if amount and character then app.Store:SetMoney(character, amount) end
+    if amount and character then
+        app.Store:SetMoney(character, amount)
+        if app.Ledger then
+            local guid = type(UnitGUID) == "function" and UnitGUID("player") or nil
+            local id = app.Ledger:Identity(guid, character)
+            if id then
+                app.Ledger:Record("c", id, character, 0, amount)
+                app.Ledger:ReadCurrencies(character, guid)
+            end
+        end
+    end
 end
 
 function Reports:ShowMoney(owner)

@@ -22,64 +22,32 @@ local function bankTypes()
     return list
 end
 
-local function probe(fn, kind)
-    if type(C_Bank) ~= "table" or type(C_Bank[fn]) ~= "function" then return nil end
-    local ok, value = pcall(C_Bank[fn], kind)
-    if not ok then return nil end
-    return Plain(value, "boolean")
-end
-
-local function canView(kind) return probe("CanViewBank", kind) end
-local function canUse(kind) return probe("CanUseBank", kind) end
-
-local function slotsOf(bag)
-    if type(C_Container) ~= "table" or type(C_Container.GetContainerNumSlots) ~= "function" then return 0 end
-    local ok, slots = pcall(C_Container.GetContainerNumSlots, bag)
-    return ok and Plain(slots, "number") or 0
-end
-
--- Purchased tab ids for one bank type. Returns nil when the client has no tab
--- API at all, {} when the API answered with no tabs.
-local function tabBags(kind)
-    if type(C_Bank) ~= "table" or type(C_Bank.FetchPurchasedBankTabIDs) ~= "function" then return nil end
-    local ok, tabs = pcall(C_Bank.FetchPurchasedBankTabIDs, kind)
-    if not ok or type(tabs) ~= "table" then return nil end
-    local bags = {}
-    for _, bag in ipairs(tabs) do
-        local id = Plain(bag, "number")
-        if id and slotsOf(id) > 0 then bags[#bags + 1] = id end
-    end
-    return bags
-end
-
--- One bank type's readable state. `usable` is nil when the client cannot say;
--- actions then go ahead and the client itself refuses, as it did before.
+-- One bank type's readable state, resolved by the shared container model:
+-- view, permission, tab bags and the legacy fallback. `usable` is nil when the
+-- client cannot say — an unknown permission is read-only, so every action,
+-- including sorting and dropping, needs a confirmed `true`.
 local function stateOf(spec)
-    local state = { kind = spec.kind, key = spec.key, label = spec.label, viewable = canView(spec.kind) }
-    state.usable = canUse(spec.kind)
-    if state.viewable ~= true then return state end
-    local tabs = tabBags(spec.kind)
-    if tabs == nil and spec.key == "character" and Plain(BANK_CONTAINER, "number") then
-        -- Legacy builds: the character bank is one container, no tab list.
-        tabs = slotsOf(BANK_CONTAINER) > 0 and { BANK_CONTAINER } or {}
-    end
-    state.bags = tabs
-    state.empty = tabs ~= nil and #tabs == 0
-    return state
+    local legacy = spec.key == "character" and Plain(BANK_CONTAINER, "number") or nil
+    local viewable, usable, bags, empty = app.ContainerModel.BankState(spec.kind, legacy)
+    return {
+        kind = spec.kind, key = spec.key, label = spec.label,
+        viewable = viewable == true,
+        usable = usable,
+        bags = bags,
+        empty = empty == true,
+    }
 end
 
 local function collect(state, query, category, tab)
-    local items = {}
+    local bags = {}
     for index, bag in ipairs(state.bags or {}) do
-        if tab == nil or tab == index then
-        for slot = 1, slotsOf(bag) do
-            local item = Items.Read(bag, slot)
-            if item and Items.Matches(item, query, category) then
-                if state.usable == false then item.blocked = L.bankBlocked end
-                items[#items + 1] = item
-            end
-        end
-        end
+        if tab == nil or tab == index then bags[#bags + 1] = bag end
+    end
+    local records = app.ContainerModel.Collect("bank", bags)
+    local items = {}
+    for _, record in ipairs(app.ContainerModel.Search(records, query, category)) do
+        if state.usable ~= true then record.item.blocked = L.bankBlocked end
+        items[#items + 1] = record.item
     end
     return items
 end
@@ -135,8 +103,9 @@ local function refresh(self)
     sourceChips(self)
     if not active then tabChips(self, nil) end
     -- Sorting is the client's own bank sort for this bank type, and only when
-    -- the type may be acted on and the call exists.
-    self.canSort = active ~= nil and active.usable ~= false and type(C_Container) == "table"
+    -- the type is confirmed usable and the call exists. An unknown permission
+    -- is read-only, exactly like a refused one.
+    self.canSort = active ~= nil and active.usable == true and type(C_Container) == "table"
         and type(C_Container.SortBank) == "function"
     if self.sortButton then self.sortButton:SetShown(self.canSort) end
     local items, note
@@ -155,15 +124,68 @@ local function refresh(self)
     self.page = math.max(1, math.min(self.page or 1, pages))
     self.pageLabel:SetFormattedText("%d / %d", self.page, pages)
     -- The corner note names the active degradation: a closed bank, no tabs, or
-    -- browse-only permissions. Nothing is silently omitted.
-    if active and active.usable == false and not note then note = L.bankBlocked end
+    -- browse-only permissions (a refused and an unknown permission alike).
+    -- Nothing is silently omitted.
+    if active and active.usable ~= true and not note then note = L.bankBlocked end
     self.empty:SetShown(#items == 0)
     self.empty:SetText(#items == 0 and (note or L.empty) or "")
     self.note:SetShown(note ~= nil and not self.empty:IsShown())
     self.note:SetText(note or "")
+    -- Footer wallet: the account bank's deposited money, read fresh. A refusal
+    -- or a non-number answer stays unread; only a confirmed number (zero
+    -- included) is shown as money.
+    if self.wallet then
+        self.wallet:SetShown(app.WalletPanel ~= nil)
+        local enum = type(Enum) == "table" and Enum.BankType or nil
+        local kind = type(enum) == "table" and Plain(enum.Account, "number") or nil
+        local money
+        if kind ~= nil and type(C_Bank) == "table" and type(C_Bank.FetchDepositedMoney) == "function" then
+            local ok, value = pcall(C_Bank.FetchDepositedMoney, kind)
+            money = ok and Plain(value, "number") or nil
+        end
+        local label = money and type(GetMoneyString) == "function" and GetMoneyString(money) or L.walletTitle
+        local pinned = app.Ledger and app.Ledger:PinnedText() or ""
+        self.wallet.text:SetText(pinned ~= "" and (label .. "  " .. pinned) or label)
+    end
     for i, button in ipairs(self.buttons) do
         Items.Paint(button, items[(self.page - 1) * PAGE_SIZE + i])
+        if self.sectioned then button:Hide() end
     end
+    if self.sectionView then
+        self.sectionView:SetShown(self.sectioned == true)
+        if self.sectioned then
+            -- Same filtered items as the paged grid, grouped by category; the
+            -- operation target stays each item's physical bank slot.
+            local records = {}
+            for _, item in ipairs(items) do
+                records[#records + 1] = { key = app.ContainerModel.Key("bank", item.bag, item.slot),
+                    source = "bank", bag = item.bag, slot = item.slot, item = item, category = Items.Category(item.link) }
+            end
+            self.sectionView:Set(records, app.Store:Profile().ui.containerCollapsed)
+        end
+    end
+end
+
+function methods:SetSectioned(on)
+    self.sectioned = on == true
+    if self.sectioned and self.frame and not self.sectionView then
+        local view = app.ContainerView:Create(self.frame, 460, 270, function(button, mouse)
+            local item = button.item
+            if not item or self.closing then return end
+            if IsModifiedClick and IsModifiedClick("CHATLINK") then Items.Link(item); return end
+            if mouse == "RightButton" then Items.Use(item) else Items.Pickup(item) end
+        end)
+        view.scroll:SetPoint("TOPLEFT", 22, -172)
+        view.onToggle = function(section)
+            local collapsed = {}
+            for k, v in pairs(app.Store:Profile().ui.containerCollapsed or {}) do collapsed[k] = v end
+            collapsed[section] = (not collapsed[section]) or nil
+            app.Store:Set("ui", "containerCollapsed", collapsed)
+            refresh(self)
+        end
+        self.sectionView = view
+    end
+    refresh(self)
 end
 
 local function redraw(self) refresh(self) end
@@ -219,6 +241,12 @@ local function build(self)
     end)
     self.sortButton:SetPoint("BOTTOMRIGHT", -22, 70)
     self.sortButton:Hide()
+    -- Footer wallet: the account bank's deposited money; clicking opens the
+    -- ledger. Read-only, and an unreadable balance is never shown as zero.
+    self.wallet = app.Controls:Button(frame, "", 150, function()
+        if app.WalletPanel then app.WalletPanel:Toggle() end
+    end)
+    self.wallet:SetPoint("RIGHT", self.sortButton, "LEFT", -8, 0)
     Items.FilterRow(frame, self, 22, -118, function() refresh(self) end)
     self.empty = app.Theme:Text(frame, 14, true)
     self.empty:SetPoint("CENTER")
@@ -238,13 +266,20 @@ local function build(self)
         end)
     end
     -- Dropping on the window puts the item in the first empty slot of the
-    -- active bank type (the client enforces what that bank accepts).
+    -- active tab set (the client enforces what that bank accepts). A bank the
+    -- character cannot use refuses the drop; the permission is re-probed per
+    -- drop instead of trusted from the last redraw.
     local function dropHere()
         if self.closing then return end
+        if not Items.CursorHasItem() then return end
         local state = activeState(self)
-        if state and state.bags and state.usable ~= false then
-            Items.DropFirstFree(state.bags)
+        if not state or state.viewable ~= true then app:Print(L.bankClosed); return end
+        if state.usable ~= true then app:Print(L.bankBlocked); return end
+        local bags = {}
+        for index, bag in ipairs(state.bags or {}) do
+            if self.tab == nil or self.tab == index then bags[#bags + 1] = bag end
         end
+        Items.DropFirstFree(bags)
     end
     frame:SetScript("OnReceiveDrag", dropHere)
     frame:SetScript("OnMouseUp", dropHere)
@@ -294,7 +329,8 @@ local function nativeBankFrame()
 end
 
 function module:TakeoverOn()
-    return self.running == true and self.frame ~= nil and app.Store:Profile().ui.containerTakeover == true
+    return self.running == true and self.frame ~= nil and self.buildFailed ~= true
+        and app.Store:Profile().ui.containerTakeover == true
 end
 
 function module:SuppressNative(active)

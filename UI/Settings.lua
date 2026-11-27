@@ -89,6 +89,29 @@ function SettingsUI:BuildOverview(page)
     local function set(key, value) self:Result(app.Store:Set("appearance", key, value)) end
     local hint = note(body, L.generalHint, 0, 462)
     local y = -noteHeight(hint, 26)
+    -- 018 Step 3: the profile this character uses may still carry the geometry
+    -- of the previous composition. Offer a copy on the new screen, and a way
+    -- back once it was adopted; both buttons exist only when they can act.
+    local tryScreen = settingsControl(page, Controls:Button(body, L.screenTry, 220, function()
+        local name, problem = app.Store:TryNewScreen()
+        if name then
+            self:Result(true, string.format(L.screenAdopted, name))
+        else
+            self:Result(false, problem or L.readonly)
+        end
+        self:Update()
+    end))
+    tryScreen:SetPoint("TOPLEFT", 0, y)
+    local backScreen = settingsControl(page, Controls:Button(body, L.screenBack, 220, function()
+        local ok, problem = app.Store:ReturnToSource()
+        self:Result(ok, ok and L.screenReturned or (problem or L.readonly))
+        self:Update()
+    end))
+    backScreen:SetPoint("TOPLEFT", 230, y)
+    page.screenTry, page.screenBack = tryScreen, backScreen
+    page.screenLabel = note(body, "", 0, 462)
+    page.screenLabel:SetPoint("TOPLEFT", 0, y - 34)
+    y = y - 34 - noteHeight(page.screenLabel, 30) - 12
     section(body, L.sectionSize, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
@@ -176,9 +199,26 @@ function SettingsUI:BuildOverview(page)
         end
         body:SetHeight(math.max(420, -extensionTop + 34 + unclaimed * 38))
         for _, control in ipairs(updates) do control:Update() end
+        -- The two screen buttons follow the profile, not a one-time session
+        -- flag: a legacy profile offers the copy, an adopted one the way back,
+        -- and neither shows when it would do nothing.
+        local legacy = app.Store:IsLegacyScreen()
+        local back = app.Store:ScreenReturn()
+        local readonly = app.Store.readonly
+        tryScreen:SetShown(legacy and not readonly)
+        backScreen:SetShown(back ~= nil and not readonly)
+        tryScreen:SetEnabled(not readonly)
+        backScreen:SetEnabled(not readonly)
+        if legacy then
+            local keys = app.Store:LegacyKeys()
+            page.screenLabel:SetText(string.format(L.screenLegacyHint, #keys))
+        elseif back then
+            page.screenLabel:SetText(string.format(L.screenAdoptedHint, back.from))
+        else
+            page.screenLabel:SetText("")
+        end
         local summary = self:ModuleSummary()
         page.statusLabel:SetText(summary)
-        local readonly = app.Store.readonly
         for _, control in ipairs(page.settings or {}) do
             if control.SetEnabled then control:SetEnabled(not readonly) end
         end
@@ -493,6 +533,7 @@ function SettingsUI:Build()
         if self.frame then self.frame:SetAlpha(0) end
         if self.profileInput then self.profileInput:ClearFocus() end
         if app.Controls then app.Controls:ClearFocus() end
+        self:HideSearchResults()
         self.confirmDelete, self.confirmReset = nil, nil
     end)
     UISpecialFrames[#UISpecialFrames + 1] = "LumaUISettings"
@@ -506,9 +547,6 @@ function SettingsUI:Build()
     version:SetPoint("LEFT", title, "RIGHT", 8, 0)
     version:SetText(app.version)
     self.versionLabel = version
-    local subtitle = note(frame, L.subtitle, -36, 660)
-    subtitle:ClearAllPoints()
-    subtitle:SetPoint("TOPLEFT", theme:Space("lg") + 6, -36)
     local close = Controls:Button(frame, "×", 30, function() self:Close() end)
     close:SetPoint("TOPRIGHT", -14, -12)
     self.closeButton = close
@@ -527,6 +565,8 @@ function SettingsUI:Build()
     unlock:SetPoint("TOPRIGHT", escape, "TOPLEFT", -6, 0)
     unlock.pulse = true
     self.unlockButton = unlock
+    self:BuildSearch(frame)
+    self:WatchDisplay()
     self.rule = app.Theme:Rule(frame)
     self.rule:SetPoint("TOPLEFT", theme:Space("lg") + 6, -62)
     self.rule:SetSize(708, 2)
@@ -544,17 +584,64 @@ function SettingsUI:Build()
     navScroll:SetScrollChild(navBody)
     self.navScroll, self.navBody = navScroll, navBody
     self.navigation = {}
+    self.navLabels = {}
+    -- Page order stays a flat list of page ids (overview, every module, profiles);
+    -- the group headings are real fold buttons and never become pages. Each group
+    -- remembers whether it is open; entering a page opens only its own group, so
+    -- the list never jumps under the pointer.
     self.navOrder = { "overview" }
-    for _, entry in ipairs(self.registry) do self.navOrder[#self.navOrder + 1] = entry.id end
-    self.navOrder[#self.navOrder + 1] = "profiles"
+    self.navFold = self.navFold or {}
     local labels = { overview = L.overview, profiles = L.profiles }
     for _, entry in ipairs(self.registry) do labels[entry.id] = L[entry.label] end
-    for i, key in ipairs(self.navOrder) do
+    self.navGroups_ = self.navGroups_
+        or (function()
+            local map = {}
+            for _, group in ipairs(self.navGroups) do map[group.id] = true end
+            return map
+        end)()
+    local rowY = 0
+    local function addPage(key)
         local button = Controls:Navigation(navBody, labels[key], 170, function() self:Select(key) end)
-        button:SetPoint("TOPLEFT", 0, -(i - 1) * 32)
+        button:SetPoint("TOPLEFT", 0, -rowY)
         self.navigation[key] = button
+        rowY = rowY + 30
     end
-    navBody:SetSize(170, #self.navOrder * 32 + 4)
+    -- Groups are plain captions, not folds. A collapsed group left the player
+    -- with a column of headings and a large empty panel, and one extra click to
+    -- reach every page; the whole list fits without folding.
+    local folds = {}
+    local function addGroup(id, labelKey)
+        local heading = app.Type:Text(navBody, "micro")
+        heading:SetPoint("TOPLEFT", 10, -(rowY + 10))
+        heading:SetText(L[labelKey])
+        heading.key = id
+        heading.pages = {}
+        self.navLabels[#self.navLabels + 1] = heading
+        folds[id] = heading
+        rowY = rowY + 26
+    end
+    -- Kept as a no-op hook so page selection never has to special-case folding.
+    local function expandOwn() end
+    addPage("overview")
+    for _, group in ipairs(self.navGroups) do
+        addGroup(group.id, group.label)
+        for _, entry in ipairs(self.registry) do
+            if entry.group == group.id then
+                self.navOrder[#self.navOrder + 1] = entry.id
+                folds[group.id].pages[#folds[group.id].pages + 1] = entry.id
+                addPage(entry.id)
+            end
+        end
+    end
+    -- Profiles and diagnostics are not module groups: they act on the whole
+    -- profile, so they live at the bottom of the navigation on their own row.
+    self.navOrder[#self.navOrder + 1] = "diagnostics"
+    addPage("diagnostics")
+    self.navOrder[#self.navOrder + 1] = "profiles"
+    addPage("profiles")
+    self.navFolds = folds
+    self.navExpandOwn = expandOwn
+    navBody:SetSize(170, rowY + 4)
     navScroll:UpdateRange()
     self.footer = note(frame, "", -541, 708)
     self.footer:ClearAllPoints()
@@ -598,6 +685,14 @@ function SettingsUI:Select(key)
         app.Controls:ClearFocus()
     end
     for name, current in pairs(self.pages) do current:SetShown(name == self.active) end
+    -- The group that owns the page opens; every other group keeps the state the
+    -- player left it in. Groups cannot jump under the pointer this way.
+    if self.navExpandOwn then self.navExpandOwn(self) end
+    if self.navigation then
+        for key, button in pairs(self.navigation) do
+            if button.SetSelected then button:SetSelected(key == self.active) end
+        end
+    end
     if page and previous ~= page and self.frame and self.frame:IsShown() then
         page:SetAlpha(0)
         app.Transitions:Animate(page, "page", {
@@ -652,6 +747,7 @@ end
 function SettingsUI:Open(page)
     if not self.frame then self:Build() end
     local frame = self.frame
+    self:FitToScreen()
     self.wantsOpen = true
     if page then self:Select(page) end
     if not frame:IsShown() then

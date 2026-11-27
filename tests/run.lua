@@ -2822,8 +2822,9 @@ test("unit main frames share the health baseline and keep it during part changes
         return frame.point[5] + frame:GetHeight() / 2 - 15
     end
     -- The health top aligns with the applied main skill row: in this fixture the
-    -- utility row ends at 172 above the screen bottom, i.e. -368 from centre.
-    eq(math.abs(healthTop(player) + 368) < 0.01, true)
+    -- utility row ends at 372.8 above the screen bottom (the first row hangs from
+    -- the 0.31 main line), i.e. -167.2 from centre.
+    eq(math.abs(healthTop(player) + 167.2) < 0.01, true)
     eq(math.abs(healthTop(target) - healthTop(player)) < 0.01, true)
     -- Fallback cooldown block is 300 UI units: centre = 150 + 5.76 + 90.
     eq(player.point[4], -245.76)
@@ -3405,7 +3406,8 @@ test("inventory filter chips group items by item class", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     -- Seed the class ids before the first render: the browser caches the class
     -- id per item id, so the first collect would otherwise pin the fallback.
-    H.itemClasses[123], H.itemClasses[456], H.itemClasses[789] = 2, 0, 11
+    H.itemClasses[123], H.itemClasses[456], H.itemClasses[789] = 2, 0, 12
+    H.itemClasses[555] = 11  -- Quiver: Enum.ItemClass 11 is not a quest item
     SlashCmdList.LUMAUI("bags")
     local inventory = app.components.inventory
     -- One item id per bag: 123 weapon (equip), 456 consumable, 789 quest item
@@ -3443,6 +3445,9 @@ test("inventory filter chips group items by item class", function()
     eq(shownBags()[1], 2)
     H.Click(inventory.filters[6])  -- Other: the unknown class id
     eq(shownBags()[1], 3)
+    -- Class 12 is the quest item, class 11 (quiver) falls to "other".
+    eq(app.Items.Category("|Hitem:789|h[Quest]|h"), "quest")
+    eq(app.Items.Category("|Hitem:555|h[Quiver]|h"), "other")
     -- Empty results keep the existing empty state.
     H.Click(inventory.filters[4])  -- Materials: none in the bags
     eq(inventory.empty:IsShown(), true)
@@ -5294,8 +5299,11 @@ test("the settings navigation is the overview, one page per module and the profi
     eq(settings.navigation.modules, nil)
     eq(settings.navigation.general, nil)
     eq(settings.navOrder[1], "overview")
+    -- 018 Step 4.1: profiles and diagnostics close the navigation, modules in
+    -- between; the page count is modules + overview + profiles + diagnostics.
     eq(settings.navOrder[#settings.navOrder], "profiles")
-    eq(#settings.navOrder, #settings.registry + 2)
+    eq(settings.navOrder[#settings.navOrder - 1], "diagnostics")
+    eq(#settings.navOrder, #settings.registry + 3)
     for index, entry in ipairs(settings.registry) do
         eq(settings.navOrder[index + 1], entry.id)
         eq(settings.navigation[entry.id] ~= nil, true)
@@ -5960,7 +5968,8 @@ test("the hud report shows the applied skill top the rail follows", function()
     H.messages = {}
     app.Layout:Diagnose()
     local text = table.concat(H.messages, "\n")
-    eq(text:find("cooldown: bottom=104 top=222", 1, true) ~= nil, true)
+    eq(text:find("cooldown: bottom=217 top=335", 1, true) ~= nil, true)
+    eq(text:find("mainLine: planned=335 (69% from top) applied=335", 1, true) ~= nil, true)
     eq(#app.errors, 0)
 end)
 
@@ -8071,6 +8080,386 @@ test("the bar ownership report reads the client without touching anything", func
     -- The report is read-only: no panel was created and no bar state changed.
     eq(panel.panels == nil or next(panel.panels) == nil, true)
     eq(_G.MainActionBar:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+-- A reset must clear one bar's override and leave the others alone. The bug this
+-- guards against cloned the whole Store, so every other slot's saved override
+-- silently disappeared on the same click.
+test("resetting one action bar keeps the other bars' overrides", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("ui", "actionBarLayout", { [2] = { buttons = 8, visible = "combat" },
+        [3] = { buttons = 6, visible = "always" } })
+    app.Store:Set("ui", "actionBarScales", { 1, 0.8, 1.25 })
+    app.Store:Set("modules", "actionBars", true)
+    app.Settings:Toggle("actionBars")
+    local page = app.Settings.pages.actionBars
+    app.Settings:SelectObject("actionBars", "actionBar2")
+    page.barReset.scripts.OnClick(page.barReset, "LeftButton")
+    eq(app.Store:Profile().ui.actionBarLayout[2], nil)
+    eq(app.Store:Profile().ui.actionBarLayout[3].buttons, 6)
+    eq(app.Store:Profile().ui.actionBarScales[1], 1)
+    eq(app.Store:Profile().ui.actionBarScales[2], 1)
+    eq(app.Store:Profile().ui.actionBarScales[3], 1.25)
+    app.Settings:Toggle(false)
+    eq(#app.errors, 0)
+end)
+
+-- 018 Step 3: an old profile keeps its explicit geometry until the player asks
+-- for the new screen. Trying builds a copy, never edits the original, and the
+-- way back is a plain profile switch that survives a reload.
+local function legacyProfile()
+    return {
+        profiles = { Default = {
+            -- The 017 field values: a moved action bar, the three cooldown groups,
+            -- unit pair offsets and the wide chat.
+            positions = {
+                actionBar1 = { x = -72, y = -340 }, actionBar2 = { x = -72, y = -264 },
+                actionBar3 = { x = 100, y = -44 }, cdGroup_essential = { x = 16, y = -124 },
+                unit_player = { x = -420, y = -60 }, unit_target = { x = 420, y = -60 },
+                chat = { x = -700, y = -400 },
+            },
+            ui = { chatWidth = 560, chatHeight = 300, questBelowMap = false },
+        } },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true, cooldownGroupsDefault = true, takeover015 = true },
+    }
+end
+
+-- The field case: a profile saved by an older build already carries
+-- `screenVersion = 2` because normalization stamped it on every write, yet its
+-- placements are the 017 ones. It must still be offered the trial.
+test("a profile with old placements is legacy even after it was re-saved", function()
+    local app = H.Load({
+        profiles = { Default = {
+            screenVersion = 2,
+            positions = { actionBar1 = { x = -72, y = -340 }, cdGroup_essential = { x = 16, y = -124 } },
+        } },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true, cooldownGroupsDefault = true, takeover015 = true },
+    })
+    H.Fire("PLAYER_LOGIN")
+    eq(app.Store:IsLegacyScreen(), true)
+    eq(#app.Store:LegacyKeys(), 2)
+    -- Writing an unrelated setting must not make it look current.
+    app.Store:Set("appearance", "hudOpacity", 0.7)
+    eq(app.Store:IsLegacyScreen(), true)
+    -- The trial copy is current and no longer offers a second copy of itself.
+    eq(app.Store:TryNewScreen() ~= nil, true)
+    eq(app.Store:IsLegacyScreen(), false)
+    eq(#app.errors, 0)
+end)
+
+test("an old profile is identified before any default is materialized", function()
+    local app = H.Load(legacyProfile()); H.Fire("PLAYER_LOGIN")
+    eq(app.Store:IsLegacyScreen(), true)
+    eq(app.Store:ScreenVersion(), 1)
+    local keys = app.Store:LegacyKeys()
+    eq(#keys, 7)
+    local seen = {}
+    for _, id in ipairs(keys) do seen[id] = true end
+    eq(seen.actionBar1, true)
+    eq(seen.cdGroup_essential, true)
+    eq(seen.chat, true)
+    -- Nothing was moved by opening the database: the explicit coordinates are
+    -- still what the layout reads.
+    eq(app.Store:Profile().positions.actionBar1.x, -72)
+    eq(app.Store:Profile().ui.chatWidth, 560)
+    -- A profile created now is not legacy, and has nothing to preview.
+    app.Store:Create("Fresh", false)
+    eq(app.Store:IsLegacyScreen(), false)
+    eq(#app.Store:LegacyKeys(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("trying the new screen copies the profile and keeps the original", function()
+    local app = H.Load(legacyProfile()); H.Fire("PLAYER_LOGIN")
+    local store = app.Store
+    local source = store:Profile()
+    local name, problem = store:TryNewScreen()
+    eq(name ~= nil, true)
+    eq(problem, nil)
+    eq(name, "Pearl")
+    -- The copy is current-screen, the source keeps every value.
+    eq(store:IsLegacyScreen(), false)
+    eq(store:ScreenVersion(), store.SCREEN_VERSION)
+    -- The copy starts from this screen's composition: the entries the preset
+    -- lists are rebuilt, and an entry the preset does not own (the bar the
+    -- player never dragged) stays out of the way instead of keeping the old
+    -- offset.
+    local migrated = store:Profile().positions
+    eq(migrated.unit_player ~= nil, true)
+    eq(migrated.unit_player.x ~= -420, true)
+    eq(migrated.party ~= nil, true)
+    eq(migrated.actionBar1, nil)
+    eq(source.positions.actionBar1.x, -72)
+    eq(store.data.profiles.Default.positions.actionBar1.x, -72)
+    -- The parts this screen does not own travel with the copy.
+    eq(store:Profile().ui.chatWidth, 560)
+    eq(store:Profile().ui.questBelowMap, false)
+    eq(store:Profile().modules.actionBars, true)
+    -- Applying again from the copy never accumulates a third profile: the copy
+    -- is already on this screen and has nothing to migrate.
+    eq(store:TryNewScreen(), "Pearl 2")
+    eq(#store:Names(), 3)
+    -- Back to the source records where the copy came from: the copy itself,
+    -- which is on the new screen already.
+    eq(store:ReturnToSource(), true)
+    eq(store.current, "Pearl")
+    eq(store:Profile().positions.unit_player ~= nil, true)
+    eq(store:ScreenReturn(), nil)
+    -- The untouched `Default` still carries the old profile exactly.
+    store:Select("Default")
+    eq(store:IsLegacyScreen(), true)
+    eq(store:Profile().positions.actionBar1.x, -72)
+    eq(#app.errors, 0)
+end)
+
+test("the adopted screen survives a reload and offers the way back", function()
+    local app = H.Load(legacyProfile()); H.Fire("PLAYER_LOGIN")
+    local name = app.Store:TryNewScreen()
+    eq(name ~= nil, true)
+    -- A deep copy: the next H.Load replaces the global database table, and the
+    -- reload has to see what was on disk when the copy was adopted.
+    local saved = {}
+    for key, value in pairs(LumaUIDB) do saved[key] = value end
+    saved.profiles, saved.characters = {}, {}
+    for profileName, profile in pairs(LumaUIDB.profiles) do
+        local copy = {}
+        for profileKey, profileValue in pairs(profile) do copy[profileKey] = profileValue end
+        saved.profiles[profileName] = copy
+    end
+    for character, selected in pairs(LumaUIDB.characters or {}) do saved.characters[character] = selected end
+    local reloaded = H.Load(saved); H.Fire("PLAYER_LOGIN")
+    eq(reloaded.Store.current, name)
+    eq(reloaded.Store:IsLegacyScreen(), false)
+    local back = reloaded.Store:ScreenReturn()
+    eq(back ~= nil, true)
+    eq(back.from, "Default")
+    eq(reloaded.Store:ReturnToSource(), true)
+    eq(reloaded.Store.current, "Default")
+    -- Back on the untouched source: it still carries the old placements, so it
+    -- is still the profile the trial would copy. That is the point of keeping it.
+    eq(reloaded.Store:IsLegacyScreen(), true)
+    eq(reloaded.Store:Profile().positions.actionBar1.x, -72)
+    -- A deleted source leaves no dead button behind.
+    eq(reloaded.Store:TryNewScreen() ~= nil, true)
+    reloaded.Store:Delete("Default")
+    eq(reloaded.Store:ScreenReturn(), nil)
+    eq(#app.errors, 0)
+end)
+
+test("the overview offers the copy only for a legacy profile", function()
+    local app = H.Load(legacyProfile()); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle()
+    local page = app.Settings.pages.general or app.Settings.pages.overview
+    eq(page ~= nil, true)
+    eq(page.screenTry:IsShown(), true)
+    eq(page.screenBack:IsShown(), false)
+    eq(page.screenLabel:GetText():find("%d", 1) ~= nil, true)
+    -- The button is the writer: pressing it adopts the copy and swaps the rows.
+    page.screenTry.scripts.OnClick(page.screenTry, "LeftButton")
+    eq(app.Store.current, "Pearl")
+    eq(page.screenTry:IsShown(), false)
+    eq(page.screenBack:IsShown(), true)
+    page.screenBack.scripts.OnClick(page.screenBack, "LeftButton")
+    eq(app.Store.current, "Default")
+    eq(page.screenTry:IsShown(), true)
+    eq(page.screenBack:IsShown(), false)
+    -- A read-only database offers neither.
+    app.Store.readonly = true
+    app.Settings:Update()
+    eq(page.screenTry:IsShown(), false)
+    app.Store.readonly = false
+    app.Settings:Toggle(false)
+    eq(#app.errors, 0)
+end)
+
+-- 018 Step 3.2: one plan supplies the resource rail, the unit boundary and the
+-- report. A hidden or empty group may not widen what the player sees.
+test("the resource rail follows the same plan as the unit boundary", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local layout = app.Layout
+    local plan = layout:Plan()
+    eq(plan.content.width, layout:ContentWidth())
+    eq(plan.units.left, -layout:ContentWidth() / 2 - plan.content.gap)
+    -- An empty cooldown stack falls back to the mockup share instead of the
+    -- fallback action width, and the rail never exceeds it.
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer",
+        "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
+        _G[name]:Hide()
+    end
+    app.components.cooldownViewer:Refresh()
+    local railWidth = layout:ResourceWidth()
+    eq(railWidth >= 60, true)
+    eq(railWidth <= math.max(60, layout:ContentWidth()), true)
+    -- A hidden entry is never "actual"; an unreadable one is "unknown".
+    local entry = plan.entries.actionBar2
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2:SetSize(524, 40)
+    bar2:Hide()
+    layout:Register("actionBar2", bar2, 0, 0, "bar 2")
+    plan = layout:Plan()
+    eq(plan.entries.actionBar2.state, "reserved")
+    bar2:Show()
+    plan = layout:Plan()
+    eq(plan.entries.actionBar2.state, "actual")
+    bar2.GetWidth = function() error("unreadable") end
+    plan = layout:Plan()
+    eq(plan.entries.actionBar2.state, "unknown")
+    eq(#app.errors, 0)
+end)
+
+-- The plan keeps the centre on the screen axis and the skill line at the same
+-- fraction of the viewport on every supported size and scale.
+test("the layout plan holds the axis and the main line at three sizes", function()
+    local last
+    for _, size in ipairs({ { 1920, 1080 }, { 2560, 1440 }, { 1280, 800 } }) do
+        for _, scale in ipairs({ 1, 1.25 }) do
+            local app = H.Load(); H.Fire("PLAYER_LOGIN")
+            last = app
+            UIParent.width, UIParent.height = size[1], size[2]
+            UIParent:SetScale(scale)
+            app.Layout:ApplyAll()
+            local plan = app.Layout:Plan()
+            eq(plan.screen.width, size[1])
+            eq(plan.screen.height, size[2])
+            -- Centre deviation within 1% of the width on both sides.
+            local tolerance = size[1] * 0.01
+            eq(math.abs(plan.units.left + plan.units.right) <= tolerance, true)
+            eq(math.abs(plan.content.left + plan.content.right) <= tolerance, true)
+            -- Main line within 2% of the height of its documented fraction.
+            local expected = size[2] * app.Layout.mainLineRatio
+            eq(math.abs(app.Layout:MainLine() - expected) <= size[2] * 0.02, true)
+            -- The rail never exceeds the block the player sees.
+            eq(app.Layout:ResourceWidth() <= math.max(60, app.Layout:ContentWidth()) + 0.01, true)
+        end
+    end
+    UIParent:SetScale(1)
+    eq(#last.errors, 0)
+end)
+
+test("/luma hud marks every sample as actual, reserved or unknown", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.messages = {}
+    app.Layout:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    -- The stage under the pointer is a plan entry with a state, not a guess.
+    eq(text:find("plan=actual", 1, true) ~= nil, true)
+    eq(text:find(app.L.hudHeader, 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+-- A Cooldown Manager viewer is an Edit Mode system: its `Hide` is the override
+-- that re-derives visibility and can put the frame straight back. The adapter
+-- must use the recorded `HideBase`, exactly as the client does for an external
+-- hide — the field report said `hide-refused` while the viewer stayed on screen.
+test("a cooldown viewer is hidden through its base method", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("ui", "cooldownGroups", { owned = true, hideBuffViewers = true, groups = {} })
+    app:Reconcile()
+    local viewer = _G.EssentialCooldownViewer
+    local baseHides, overrideHides = 0, 0
+    viewer.HideBase = function(self) baseHides = baseHides + 1; self.shown = false end
+    viewer.Hide = function(self) overrideHides = overrideHides + 1 end
+    local cds = app.components.cooldownGroups
+    cds:SuppressNativeViewer("essential", false)
+    local ok, reason = cds:SuppressNativeViewer("essential", true)
+    eq(ok, true)
+    eq(reason, nil)
+    eq(baseHides, 1)
+    eq(overrideHides, 0)
+    eq(viewer:IsShown(), false)
+    -- A base method that refuses still reports, and the group is not claimed.
+    viewer.shown = true
+    viewer.HideBase = function() end
+    cds:SuppressNativeViewer("essential", false)
+    local refused, why = cds:SuppressNativeViewer("essential", true)
+    eq(refused, false)
+    eq(why, "hide-refused")
+    eq(#app.errors, 0)
+end)
+
+-- One block, one implementation. The own cooldown groups and the native viewer
+-- placer were both on by default and both drew the centre, which is exactly the
+-- "two HUDs stacked" the field report showed.
+test("the own cooldown groups take the centre and the viewer placer steps aside", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local groups = app.components.cooldownGroups
+    local viewer = app.components.cooldownViewer
+    eq(groups.running, true)
+    eq(viewer.running, true)
+    -- The stock fixture keeps the client's viewers on purpose; the shipped
+    -- default draws the own groups, and that is the case that used to stack two.
+    app.Store:Set("ui", "cooldownGroups", { owned = true, hideBuffViewers = true, groups = {} })
+    app:Reconcile()
+    viewer:Refresh()
+    -- The placer hands back anything it placed and reports why.
+    eq(viewer.yielded, true)
+    eq(_G.EssentialCooldownViewer.lumaCooldownViewerOriginal, nil)
+    -- With the own groups switched off the placer owns the centre again.
+    app.Store:Set("ui", "cooldownGroups", { owned = false, groups = {} })
+    app:Reconcile()
+    viewer:Refresh()
+    eq(viewer.yielded, nil)
+    eq(#viewer.placedRows > 0, true)
+    eq(#app.errors, 0)
+end)
+
+-- The chat frame cannot be copied out of, so the long reports also land in the
+-- saved file. One key per report, newest wins, and a read-only database refuses.
+test("/luma cds file and /luma ownership file write the same text to the saved file", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.messages = {}
+    SlashCmdList.LUMAUI("ownership file")
+    local saved = LumaUIDB.reports and LumaUIDB.reports.ownership
+    eq(saved ~= nil, true)
+    eq(type(saved.lines), "table")
+    eq(#saved.lines > 0, true)
+    -- The lines are the report itself, not the confirmation.
+    eq(table.concat(saved.lines, "\n"):find(app.L.ownHeader, 1, true) ~= nil, true)
+    eq(H.messages[1]:find("LumaUIDB.reports.ownership", 1, true) ~= nil, true)
+    -- The cooldown report keeps its own key and does not replace the other one.
+    SlashCmdList.LUMAUI("cds file")
+    eq(LumaUIDB.reports.cooldownGroups ~= nil, true)
+    eq(#LumaUIDB.reports.cooldownGroups.lines > 0, true)
+    eq(table.concat(LumaUIDB.reports.cooldownGroups.lines, "\n"):find("cooldownGroups", 1, true) ~= nil, true)
+    eq(LumaUIDB.reports.ownership ~= nil, true)
+    -- A second run replaces the slot instead of appending.
+    local before = #LumaUIDB.reports.ownership.lines
+    SlashCmdList.LUMAUI("ownership file")
+    eq(#LumaUIDB.reports.ownership.lines, before)
+    -- A read-only database refuses and writes nothing.
+    app.Store.readonly = true
+    LumaUIDB.reports.ownership = nil
+    H.messages = {}
+    SlashCmdList.LUMAUI("ownership file")
+    eq(LumaUIDB.reports.ownership, nil)
+    eq(H.messages[1]:find(app.L.readonly, 1, true) ~= nil, true)
+    app.Store.readonly = false
+    -- The plain commands still print to chat and write nothing.
+    LumaUIDB.reports.cooldownGroups = nil
+    SlashCmdList.LUMAUI("cds")
+    eq(LumaUIDB.reports.cooldownGroups, nil)
+    eq(#app.errors, 0)
+end)
+
+test("the bar report names each managed host and its current fade", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionBars", true)
+    H.messages = {}
+    SlashCmdList.LUMAUI("bars")
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("hover actionBar1", 1, true) ~= nil, true)
+    eq(text:find("hover actionBar2", 1, true) ~= nil, true)
+    eq(text:find("hover actionBar3", 1, true) ~= nil, true)
+    eq(text:find("mode=hover", 1, true) ~= nil, true)
+    eq(text:find("alpha=0.00", 1, true) ~= nil, true)
     eq(#app.errors, 0)
 end)
 
@@ -11200,19 +11589,346 @@ test("action bars stack at the centre and restore on disable", function()
     eq(countdown.fontSize, 10)
     eq(countdown.point, nil)
 
-    _G.MouseIsOver = function() return true end
+    -- The hover reads the host's own rectangle (018 Step 1); `MouseIsOver` is
+    -- not part of this build's API and is never called.
+    MainActionBar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    MainActionBar.IsMouseOver = function() return false end
+    _G.GetCursorPosition = function() return 960, 76 end
     H.Advance(0.35)
     eq(MainActionBar.alpha > 0.5, true)
-    _G.MouseIsOver = function() return false end
+    _G.GetCursorPosition = function() return 960, 900 end
     H.now = H.now + 2
     H.Advance(1.6)
     eq(MainActionBar.alpha < 0.1, true)
-    _G.MouseIsOver = nil
+    _G.GetCursorPosition = nil
 
     app.Store:Set("modules", "actionBars", false)
     eq(MainActionBar.alpha, 1)
     eq(MainActionBar.point, nil)
     eq(countdown.fontSize, 10)
+    eq(#app.errors, 0)
+end)
+
+-- 018 Step 1: one host at a time. The three managed bars keep separate fades,
+-- so moving onto one of them must never light the other two or their backings.
+test("hovering one action bar never lights the other two", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2.actionButtons = { H.NewFrame("MultiBarBottomLeftButton1", bar2) }
+    local bar3 = H.NewFrame("MultiBarBottomRight", UIParent)
+    bar3.actionButtons = { H.NewFrame("MultiBarBottomRightButton1", bar3) }
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionPanel", true)
+    local panels = app.components.actionPanel.panels
+    local panel1, panel2, panel3 = panels[MainActionBar], panels[bar2], panels[bar3]
+    eq(panel1 ~= nil, true)
+    eq(panel2 ~= nil, true)
+    eq(panel3 ~= nil, true)
+    MainActionBar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    bar2.rect = { left = 698, bottom = 100, width = 524, height = 40 }
+    bar3.rect = { left = 698, bottom = 144, width = 524, height = 40 }
+    -- Point at bar 2 only; 1 and 3 are outside the cursor's rectangle.
+    _G.GetCursorPosition = function() return 960, 120 end
+    H.Advance(0.35)
+    local component = app.components.actionBars
+    eq(component.alphas.actionBar2 > 0.9, true)
+    eq(component.alphas.actionBar1, 0)
+    eq(component.alphas.actionBar3, 0)
+    eq(panel2:GetAlpha(), component.alphas.actionBar2)
+    eq(panel1:GetAlpha(), 0)
+    eq(panel3:GetAlpha(), 0)
+    -- Moving across the boundary settles the old bar at once: the grace period
+    -- only applies to leaving the whole stack. One tick already fades in the new
+    -- bar and fades out the old one.
+    _G.GetCursorPosition = function() return 960, 70 end
+    local before = component.alphas.actionBar2
+    H.Advance(0.05)
+    eq(component.alphas.actionBar1 > 0, true)
+    eq(component.alphas.actionBar2 < before, true)
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    eq(component.alphas.actionBar2, 0)
+    eq(panel1:GetAlpha() > 0.9, true)
+    eq(panel2:GetAlpha(), 0)
+    -- A quick sweep through both leaves only the bar under the pointer lit.
+    _G.GetCursorPosition = function() return 960, 150 end
+    H.Advance(0.05)
+    _G.GetCursorPosition = function() return 960, 70 end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    eq(component.alphas.actionBar3, 0)
+    -- Leaving the stack keeps a 0.20 s grace and then settles within 0.20 s.
+    _G.GetCursorPosition = function() return 960, 900 end
+    H.Advance(0.10)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    H.Advance(0.30)
+    eq(component.alphas.actionBar1, 0)
+    eq(panel1:GetAlpha(), 0)
+    _G.GetCursorPosition = nil
+    eq(#app.errors, 0)
+end)
+
+-- GetRect is in the region's own scaled units, so a bar with its own scale keeps
+-- the same hit box in UIParent units. Dividing instead of multiplying made a
+-- 1.25-scaled bar's rectangle 36% too small, and the outer buttons stopped
+-- waking it.
+test("a scaled action bar keeps its hit box in UIParent units", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.actionBars
+    -- Pin UIParent's scale: an earlier case may have left a different one, and
+    -- this test is about the bar's own scale relative to it.
+    UIParent:SetScale(1)
+    app.Store:SetPosition("actionBar1", 0, 0)
+    app.Layout:Apply("actionBar1")
+    -- The bar is drawn at 1.25x its own units, so a 400-unit-wide rect occupies
+    -- 500 UIParent units at scale 1. Set the scale after the layout pass: Apply
+    -- owns the bar's scale and would otherwise reset it.
+    MainActionBar:SetScale(1.25)
+    MainActionBar.rect = { left = 600, bottom = 60, width = 400, height = 40 }
+    -- The hover path asks the client's own predicate first only when it answers
+    -- true; a false answer must fall through to the rectangle.
+    MainActionBar.IsMouseOver = function() return false end
+    -- Cursor inside the drawn rectangle but outside the un-scaled one.
+    _G.GetCursorPosition = function() return 1050, 90 end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    -- Outside the real edge: the rect spans 600..1000 in bar units, which is
+    -- 750..1250 in UIParent units at 1.25. Leaving the stack keeps its 0.2 s
+    -- grace, then the 0.2 s fade.
+    H.now = H.now + 2
+    _G.GetCursorPosition = function() return 1300, 90 end
+    H.Advance(0.6)
+    eq(component.alphas.actionBar1, 0)
+    _G.GetCursorPosition = nil
+    eq(#app.errors, 0)
+end)
+
+-- The hit box is the host's own rectangle: gaps, the chat panel, the bottom
+-- strip and the settings window never summon a bar.
+test("gaps and other windows do not summon the action bars", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.actionBars
+    MainActionBar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    -- Left of the stack, inside the old 22-unit padding the removed area had.
+    _G.GetCursorPosition = function() return 660, 76 end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1, 0)
+    -- Below the bar (the bottom strip) and far above it.
+    _G.GetCursorPosition = function() return 960, 20 end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1, 0)
+    -- Chat overlapping the stack keeps the bars asleep while it has the cursor.
+    _G.GetCursorPosition = function() return 960, 76 end
+    _G.GetMouseFocus = function() return ChatFrame1 end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1, 0)
+    -- The same point without chat in front wakes the bar it belongs to.
+    _G.GetMouseFocus = function() return MainActionBar end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    -- A LumaUI window drawn in front of the stack (here the bottom strip) owns
+    -- the pixel: pointing at it does not summon the bar underneath.
+    local strip = app.Layout.entries.dataStrip and app.Layout.entries.dataStrip.frame
+    if strip then
+        strip:Show()
+        _G.GetMouseFocus = function() return strip end
+        H.now = H.now + 2
+        H.Advance(0.35)
+        eq(component.alphas.actionBar1, 0)
+    end
+    -- A child of the bar (a button) counts, and so does a spell flyout, which
+    -- the client parents to the button that opened it.
+    local button = MainActionBar.actionButtons[1]
+    _G.GetMouseFocus = function() return button end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    local flyout = H.NewFrame("SpellFlyout", button)
+    _G.GetMouseFocus = function() return flyout end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    _G.GetCursorPosition, _G.GetMouseFocus = nil, nil
+    eq(#app.errors, 0)
+end)
+
+-- The per-bar policy is read, never persisted from a pointer position: "always"
+-- keeps one bar lit while the others stay independent.
+test("per-bar hover policy keeps only the chosen bar awake", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2.actionButtons = { H.NewFrame("MultiBarBottomLeftButton1", bar2) }
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.actionBars
+    eq(app.Store:Set("ui", "actionBarHover", { actionBar2 = "always" }), true)
+    H.Advance(0.35)
+    eq(component.alphas.actionBar2 > 0.9, true)
+    eq(component.alphas.actionBar1, 0)
+    -- An unknown key or mode is dropped instead of reaching the scheduler.
+    eq(app.Store:Set("ui", "actionBarHover", { actionBar2 = "always", actionBar1 = "sometimes", nope = "always" }), true)
+    local stored = app.Store:Profile().ui.actionBarHover
+    eq(stored.actionBar2, "always")
+    eq(stored.actionBar1, nil)
+    eq(stored.nope, nil)
+    -- Back to independent hover: the next pass settles the bar.
+    app.Store:Set("ui", "actionBarHover", {})
+    H.now = H.now + 2
+    H.Advance(0.35)
+    eq(component.alphas.actionBar2, 0)
+    eq(#app.errors, 0)
+end)
+
+-- Leaving the whole stack keeps its grace; entering the edit mode shows the
+-- manageables; "always" and reduced motion settle without a pointer.
+test("the hover scheduler follows the edit mode and reduced motion", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2.actionButtons = { H.NewFrame("MultiBarBottomLeftButton1", bar2) }
+    local bar3 = H.NewFrame("MultiBarBottomRight", UIParent)
+    bar3.actionButtons = { H.NewFrame("MultiBarBottomRightButton1", bar3) }
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.actionBars
+    for _, bar in ipairs({ MainActionBar, bar2, bar3 }) do
+        bar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    end
+    -- Edit Mode shows every managed bar so the player can pick one, and closing
+    -- it re-evaluates from the same pointer position.
+    _G.GetCursorPosition = function() return 10, 10 end
+    EditModeManagerFrame:Show()
+    H.Advance(0.35)
+    for _, id in ipairs({ "actionBar1", "actionBar2", "actionBar3" }) do
+        eq(component.alphas[id] > 0.9, true)
+    end
+    EditModeManagerFrame:Hide()
+    H.Advance(0.35)
+    for _, id in ipairs({ "actionBar1", "actionBar2", "actionBar3" }) do
+        eq(component.alphas[id], 0)
+    end
+    -- LumaUI's own position editor is the second edit mode: it reveals the same
+    -- manageable bars without the client's Edit Mode frame.
+    app.Layout.editing = true
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    app.Layout.editing = false
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1, 0)
+    -- Reduced motion writes the target in one pass instead of stepping.
+    app.Store:Set("appearance", "reduceMotion", true)
+    _G.GetCursorPosition = function() return 960, 70 end
+    H.Advance(0.05)
+    eq(component.alphas.actionBar1, 1)
+    app.Store:Set("appearance", "reduceMotion", false)
+    _G.GetCursorPosition = nil
+    -- A bar the client does not draw keeps its layout entry and its anchors:
+    -- bars 2 and 3 ship hidden in the client XML and become visible through the
+    -- client's own setting, so they must already be movable and placed.
+    bar2:Hide()
+    component:Refresh()
+    eq(bar2:IsShown(), false)
+    eq(app.Layout.entries.actionBar2.hidden, nil)
+    eq(app.Layout.entries.actionBar2.allowHiddenMove, true)
+    eq(app.Ownership:Get("actionBars.actionBar2").active, "owned")
+    -- A layout pass never writes alpha on a bar the client hides, and never
+    -- force-shows it. The fade itself owns alpha once the bar is drawn.
+    local previousAlpha = bar2.alpha
+    component:Refresh()
+    eq(bar2.alpha, previousAlpha)
+    eq(bar2:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+-- UI scale, a bar dragged off its default spot and a bar the client hides all
+-- keep their own answer instead of falling back to the shared centre rectangle.
+test("the hover hit box follows UI scale and a dragged bar", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    local button2 = H.NewFrame("MultiBarBottomLeftButton1", bar2)
+    bar2.actionButtons = { button2 }
+    H.Fire("PLAYER_LOGIN")
+    local component = app.components.actionBars
+    -- UIParent scale 2: the cursor readback is physical, so 1920 physical
+    -- pixels is x=960 in UIParent units.
+    UIParent:SetScale(2)
+    MainActionBar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    _G.GetCursorPosition = function() return 1920, 152 end
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    UIParent:SetScale(1)
+    -- The player dragged bar 2 away: its own rectangle decides, not the centre.
+    app.Store:SetPosition("actionBar2", -600, 300)
+    component:Refresh()
+    eq(app.Layout.entries.actionBar2.detached, true)
+    bar2.rect = { left = 200, bottom = 600, width = 300, height = 40 }
+    _G.GetCursorPosition = function() return 960, 70 end
+    H.now = H.now + 2
+    H.Advance(0.35)
+    eq(component.alphas.actionBar1 > 0.9, true)
+    eq(component.alphas.actionBar2, 0)
+    _G.GetCursorPosition = function() return 350, 620 end
+    H.now = H.now + 2
+    H.Advance(0.35)
+    eq(component.alphas.actionBar2 > 0.9, true)
+    eq(component.alphas.actionBar1, 0)
+    _G.GetCursorPosition = nil
+    eq(#app.errors, 0)
+end)
+
+-- Stopping the component returns every bar to the client and publishes one
+-- value per host, so the backings stay useful when only the fade is off.
+test("stopping the action bars restores every host and its own alpha", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local bar2 = H.NewFrame("MultiBarBottomLeft", UIParent)
+    bar2.actionButtons = { H.NewFrame("MultiBarBottomLeftButton1", bar2) }
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "actionPanel", true)
+    local component = app.components.actionBars
+    local panels = app.components.actionPanel.panels
+    MainActionBar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    _G.GetCursorPosition = function() return 960, 70 end
+    H.Advance(0.35)
+    eq(MainActionBar.alpha > 0.9, true)
+    eq(bar2.alpha, 0)
+    app.Store:Set("modules", "actionBars", false)
+    eq(MainActionBar.alpha, 1)
+    eq(bar2.alpha, 1)
+    eq(panels[MainActionBar]:GetAlpha(), 1)
+    eq(panels[bar2]:GetAlpha(), 1)
+    eq(component.ticker, nil)
+    -- Bars 5–8 never joined the fade, so their backings are opaque too.
+    local other = H.NewFrame("MultiBar5", UIParent)
+    H.Fire("EDIT_MODE_LAYOUTS_UPDATED")
+    local otherPanel = app.components.actionPanel.panels[other]
+    eq(otherPanel ~= nil, true)
+    eq(otherPanel:GetAlpha(), 1)
+    _G.GetCursorPosition = nil
     eq(#app.errors, 0)
 end)
 
@@ -11318,17 +12034,18 @@ test("the cooldown manager viewers are stacked above the measured action area an
     H.Fire("PLAYER_LOGIN")
     local component = app.components.cooldownViewer
     eq(component.running, true)
-    -- Bottom to top: skill rows hug the action area (bottom 56, main bar 40 and
-    -- an 8 unit gap put the first row at 104). A viewer the player hid is
+    -- Bottom to top: the first skill row hangs from the 0.31 main line (its top
+    -- is 334.8 on a 1080 screen, bottom 304.8 for a 30 unit row), whatever the
+    -- action bars below do. A viewer the player hid is
     -- skipped instead of being forced back on screen.
     eq(essential.point[1], "BOTTOM")
     eq(essential.point[2], UIParent)
     eq(essential.point[4], 0)
-    eq(essential.point[5], 104)
+    eq(essential.point[5], 304.8)
     eq(utility.point, nil)
     eq(utility:IsShown(), false)
-    eq(_G.BuffBarCooldownViewer.point[5], 155)
-    eq(buffs.point[5], 193)
+    eq(_G.BuffBarCooldownViewer.point[5], 355.8)
+    eq(buffs.point[5], 393.8)
     eq(component.placedRows[1].id, "essential")
     eq(component.placedRows[2].id, "buffBar")
     eq(component.placedRows[3].id, "buffIcon")
@@ -11369,7 +12086,7 @@ test("central geometry measures the managed action area and exposes unit boundar
     eq(central.action.height, 136)
     eq(central.action.bottom, 56)
     eq(central.action.top, 192)
-    eq(central.cooldown.bottom, 200)
+    eq(central.cooldown.bottom, 304.8)
     -- The visible cooldown block owns the unit boundary; the fixture viewers
     -- report 300 UI units, not the 524-wide bars.
     eq(central.content.width, 300)
@@ -11385,15 +12102,15 @@ test("central geometry measures the managed action area and exposes unit boundar
     utility:SetSize(280, 40)
     local rows = app.Layout:CentralRows({
         { frame = essential, id = "essential" }, { frame = utility, id = "utility" } })
-    eq(rows.rows[1].bottom, 200)
-    eq(rows.rows[1].top, 250)
-    eq(rows.rows[2].bottom, 258)
+    eq(rows.rows[1].bottom, 284.8)
+    eq(rows.rows[1].top, 334.8)
+    eq(rows.rows[2].bottom, 342.8)
     eq(rows.mainRow, rows.rows[1])
     eq(rows.mainRow.id, "essential")
-    eq(rows.cooldown.top, 298)
-    eq(rows.units.rowTop, 298)
-    eq(rows.units.rowTopY, -242)
-    eq(rows.units.rowCenterY, -315)
+    eq(rows.cooldown.top, 382.8)
+    eq(rows.units.rowTop, 382.8)
+    eq(rows.units.rowTopY, -157.2)
+    eq(rows.units.rowCenterY, -230.2)
     -- The widest visible row matches the fixture block, so the boundary stays
     -- put and no extra central change is published.
     eq(rows.content.width, 300)
@@ -11655,7 +12372,7 @@ test("fifteen essential icons stay two centred rows instead of dropping skills",
     eq(viewer.icons[9].point[4], 136)
     eq(viewer.icons[10].point[4], -85)
     eq(viewer.icons[15].point[4], 85)
-    eq(viewer.icons[10].point[5], 153)
+    eq(viewer.icons[10].point[5], 303.8)
     for index = 1, 15 do eq(viewer.icons[index].point[1], "CENTER") end
     app.Store:Set("modules", "cooldownViewer", false)
     for index = 1, 15 do _G["FifteenIcon" .. index] = nil end
@@ -11796,7 +12513,7 @@ test("tracked buff icons are centred in one row of equal-sized slots", function(
         eq(viewer.icons[index].point[1], "CENTER")
         eq(viewer.icons[index].point[2], UIParent)
         eq(viewer.icons[index].point[4], x)
-        eq(viewer.icons[index].point[5], 119)
+        eq(viewer.icons[index].point[5], 269.8)
     end
     -- The slot plan is the block the unit frames flank; the mockup floor still
     -- applies because four 30 unit icons are narrower than it.
@@ -11824,8 +12541,8 @@ test("a tenth essential icon wraps into a centred continuation row", function()
     -- The tenth icon is alone on the row above and is centred on the same axis.
     -- The essential row uses a 4 unit row gap: 104 + 34 + 15.
     eq(viewer.icons[10].point[4], 0)
-    eq(viewer.icons[10].point[5], 153)
-    eq(viewer.icons[1].point[5], 119)
+    eq(viewer.icons[10].point[5], 303.8)
+    eq(viewer.icons[1].point[5], 269.8)
     app.Store:Set("modules", "cooldownViewer", false)
     for index = 1, 10 do _G["EssentialIcon" .. index] = nil end
     eq(#app.errors, 0)
@@ -12067,9 +12784,9 @@ test("the resource rail anchors above the measured skill block, not its bottom",
     _G.EssentialCooldownViewer:SetSize(275, 118)
     H.Fire("PLAYER_LOGIN")
     local central = app.Layout:Central()
-    eq(central.cooldown.bottom, 104)
-    eq(central.cooldown.top, 222)
-    eq(app.components.playerResource.rail.point[5], 228)
+    eq(central.cooldown.bottom, 216.8)
+    eq(central.cooldown.top, 334.8)
+    eq(app.components.playerResource.rail.point[5], 340.8)
     eq(#app.errors, 0)
 end)
 
@@ -12081,13 +12798,13 @@ test("a same-width height change moves the resource rail", function()
     local viewer = _G.EssentialCooldownViewer
     viewer:SetSize(275, 30)
     H.Fire("PLAYER_LOGIN")
-    eq(app.components.playerResource.rail.point[5], 140)
+    eq(app.components.playerResource.rail.point[5], 340.8)
     -- The width never changes; only the row gets taller. The notification must
     -- follow the top edge, not just the block width.
     viewer:SetHeight(118)
     app.components.cooldownViewer:Refresh()
     eq(app.Layout:Central().content.width, 275)
-    eq(app.components.playerResource.rail.point[5], 228)
+    eq(app.components.playerResource.rail.point[5], 340.8)
     eq(#app.errors, 0)
 end)
 
@@ -12124,7 +12841,7 @@ test("a refused main viewer keeps the rail above the rows that were placed", fun
     essential.rect = nil
     app.Layout:ClearAppliedRows()
     app.components.playerResource:Refresh()
-    eq(app.components.playerResource.rail.point[5], 110)
+    eq(app.components.playerResource.rail.point[5], 222.8)
     essential.SetPoint = original
     app.components.playerResource.rail.point = nil
     eq(#app.errors, 1)
@@ -12138,9 +12855,9 @@ test("disabling the cooldown stack returns the rail to the reserved baseline", f
     _G.EssentialCooldownViewer:SetSize(275, 118)
     H.Fire("PLAYER_LOGIN")
     local rail = app.components.playerResource.rail
-    eq(rail.point[5], 228)
+    eq(rail.point[5], 340.8)
     app.Store:Set("modules", "cooldownViewer", false)
-    eq(rail.point[5], 110)
+    eq(rail.point[5], 314.8)
     eq(#app.errors, 0)
 end)
 
@@ -12199,7 +12916,7 @@ test("death knight runes stay native instead of a continuous second rail", funct
     eq(component.secondaryNative, "runes")
     eq(component.secondaryType, nil)
     eq(component.rail.secondary:IsShown(), false)
-    eq(component.rail:GetHeight(), 6)
+    eq(component.rail:GetHeight(), 8)
     eq(component:Describe():find(app.L.resourceNative, 1, true) ~= nil, true)
     H.messages = {}
     component:Diagnose()
@@ -12228,7 +12945,7 @@ test("the main health top follows the applied skill row", function()
     -- The essential row ends at 222; the frame top carries the 15 unit name row
     -- above a health bar whose top edge is collinear with the skill block.
     local healthTop = player.point[5] + player:GetHeight() / 2 - 15
-    eq(math.abs(healthTop - (222 - 540)) < 0.01, true)
+    eq(math.abs(healthTop - (334.8 - 540)) < 0.01, true)
     -- With no applied viewer row the mockup fraction is the baseline again.
     app.Store:Set("modules", "cooldownViewer", false)
     local fallback = player.point[5] + player:GetHeight() / 2 - 15
@@ -12248,7 +12965,7 @@ test("the player resource rail follows the central block and passes values throu
     -- A class with no readable second resource hides the second rail.
     eq(component.secondaryType, nil)
     eq(rail.secondary:IsShown(), false)
-    eq(rail:GetHeight(), 6)
+    eq(rail:GetHeight(), 8)
     -- Geometry follows the same central measurement every other HUD part reads.
     component:Refresh()
     local central = app.Layout:Central()
@@ -12271,7 +12988,7 @@ test("a class resource gets a second rail only when the client reports it", func
     component:Refresh()
     eq(component.secondaryType, 4)
     eq(rail.secondary:IsShown(), true)
-    eq(rail:GetHeight(), 11)
+    eq(rail:GetHeight(), 21)
     eq(rail.primary.value, 60)
     eq(rail.primary.maximum, 100)
     eq(rail.secondary.value, 3)
@@ -12386,13 +13103,13 @@ end)
 test("the action area baseline moves both the bars and the cooldown stack", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local essential = _G.EssentialCooldownViewer
-    eq(essential.point[5], 104)
+    eq(essential.point[5], 304.8)
     app.Store:Set("modules", "actionBars", true)
     eq(MainActionBar.point[5], 56)
-    eq(essential.point[5], 104)
+    eq(essential.point[5], 304.8)
     eq(app.Layout:SetActionAreaBottom(80), true)
     eq(MainActionBar.point[5], 80)
-    eq(essential.point[5], 128)
+    eq(essential.point[5], 304.8)
     eq(app.Layout:SetActionAreaBottom(80), false)
     -- In combat both components queue; the latest shared baseline wins and
     -- each keeps its own key instead of one overwriting the other.
@@ -12403,11 +13120,11 @@ test("the action area baseline moves both the bars and the cooldown stack", func
     eq(app.Queue:Count(), 2)
     H.Combat(false)
     eq(MainActionBar.point[5], 100)
-    eq(essential.point[5], 148)
+    eq(essential.point[5], 304.8)
     -- Switching only the bars off leaves the cooldown stack on the new area.
     app.Store:Set("modules", "actionBars", false)
     eq(app.components.cooldownViewer.running, true)
-    eq(essential.point[5], 148)
+    eq(essential.point[5], 304.8)
     app.Store:Set("modules", "cooldownViewer", false)
     eq(essential.point, nil)
     eq(#app.errors, 0)
@@ -12421,9 +13138,10 @@ test("bars fade in from the measured rectangle and the panel shares their alpha"
     eq(panel:IsShown(), true)
     eq(MainActionBar.alpha, 0)
     eq(panel:GetAlpha(), 0)
-    -- UIParent centre is 960,540 in the fixture; -480 is inside the area whose
-    -- bottom is 56 above the screen bottom (centre offset -484).
-    _G.GetCursorPosition = function() return 960, 60 end
+    -- The host's own rectangle is the hit box. UIParent is 1920x1080 in the
+    -- fixture, so the main bar sits at the bottom centre.
+    MainActionBar.rect = { left = 698, bottom = 56, width = 524, height = 40 }
+    _G.GetCursorPosition = function() return 960, 76 end
     H.Advance(0.35)
     eq(MainActionBar.alpha > 0.5, true)
     eq(panel:GetAlpha(), MainActionBar.alpha)
@@ -12448,7 +13166,7 @@ test("empty, hidden and alpha-zero cooldown viewers collapse their rows", functi
     _G.BuffIconCooldownViewer:SetHeight(1)
     H.Fire("PLAYER_LOGIN")
     local component = app.components.cooldownViewer
-    eq(_G.EssentialCooldownViewer.point[5], 104)
+    eq(_G.EssentialCooldownViewer.point[5], 304.8)
     eq(_G.UtilityCooldownViewer.point, nil)
     eq(_G.BuffBarCooldownViewer.point, nil)
     eq(_G.BuffIconCooldownViewer.point, nil)
@@ -12469,12 +13187,12 @@ test("a cooldown viewer that loads after login joins the next layout pass", func
     H.Fire("PLAYER_LOGIN")
     local component = app.components.cooldownViewer
     eq(component.running, true)
-    eq(_G.EssentialCooldownViewer.point[5], 104)
+    eq(_G.EssentialCooldownViewer.point[5], 304.8)
     local utility = H.NewFrame("UtilityCooldownViewer", UIParent)
     utility:SetSize(280, 28)
     H.Fire("PLAYER_ENTERING_WORLD")
     eq(utility.point[1], "BOTTOM")
-    eq(utility.point[5], 142)
+    eq(utility.point[5], 342.8)
     app.Store:Set("modules", "cooldownViewer", false)
     eq(utility.point, nil)
     eq(#app.errors, 0)
@@ -12495,7 +13213,7 @@ test("one refused cooldown viewer keeps its anchor and the stack continues", fun
     eq(essential.point[4], 33)
     eq(essential.point[5], 44)
     -- The refused row collapses, so the next viewer takes its place.
-    eq(_G.UtilityCooldownViewer.point[5], 104)
+    eq(_G.UtilityCooldownViewer.point[5], 304.8)
     eq(#app.errors, 1)
     eq(app.errors[1].context:find("cooldownViewer", 1, true) ~= nil, true)
     app.Store:Set("modules", "cooldownViewer", false)
@@ -12719,7 +13437,7 @@ test("moving the action bar away leaves the central HUD stack in place", functio
     app:Reconcile()
     local essential = _G.EssentialCooldownViewer
     local before = essential.point[5]
-    eq(before, 104)
+    eq(before, 304.8)
     eq(#app.Layout:Central().action.rows, 1)
     -- Detach the only measured bar: the reserved stack keeps its height, so the
     -- cooldown block must not fall to the bottom strip with the buttons.
@@ -13622,8 +14340,8 @@ test("own rune row follows per-rune recovery and reserves its lane", function()
     eq(resource.runes.bars[2].value, 1)
     -- The reserved lane follows the taller row instead of drawing into the
     -- buff row above it.
-    eq(resource.rail:GetHeight(), 15)
-    eq(app.Layout.resourceHeight, 15)
+    eq(resource.rail:GetHeight(), 21)
+    eq(app.Layout.resourceHeight, 21)
     -- A restricted rune shows an empty segment rather than a full one.
     _G.GetRuneCooldown = function() return H.Secret(0), H.Secret(10), H.Secret(false) end
     H.Fire("RUNE_POWER_UPDATE")
@@ -13753,20 +14471,300 @@ test("chat size persists per profile and restores the client size", function()
     eq(#app.errors, 0)
 end)
 
-test("the utility corner is its own panel over the meter reserve", function()
+test("the utility corner is one reachable entry with the shared menu", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local corner = app.components.utilityCorner
     eq(corner.running, true)
     eq(corner.frame:IsShown(), true)
-    eq(corner.frame.buttons.settings ~= nil, true)
-    eq(corner.frame.buttons.menu ~= nil, true)
+    eq(corner.frame.buttons.tools ~= nil, true)
+    -- At least 24 x 24 UI, and no five narrow text keys any more.
+    eq(corner.frame.width >= 24, true)
+    eq(corner.frame.height >= 24, true)
+    eq(corner.frame.buttons.settings, nil)
+    eq(corner.frame.buttons.menu, nil)
     -- Its own rectangle is a layout entry, not a moved native button.
     eq(app.Layout.entries.utilityCorner ~= nil, true)
     local sample = app.Layout:Sample("utility")
     eq(sample ~= nil, true)
     eq(sample.owner, "utilityCorner")
+    -- The one shared menu carries every low-frequency entry and the way back to
+    -- the native row.
+    local button = corner.frame.buttons.tools
+    button.scripts.OnClick(button, "LeftButton")
+    local menu = app.ToolMenu.Frame()
+    eq(menu:IsShown(), true)
+    for _, key in ipairs({ "settings", "bags", "character", "layout", "calendar", "map", "menu" }) do
+        eq(menu.buttons[key] ~= nil, true)
+    end
+    eq(menu.nativeButton ~= nil, true)
+    -- The minimap's own drawer entry is the same menu; with the tool corner on
+    -- screen it steps aside instead of offering a second one.
+    local minimap = app.components.minimap
+    eq(minimap.drawerToggle:IsShown(), false)
     app.Store:Set("modules", "utilityCorner", false)
     eq(corner.frame:IsShown(), false)
+    eq(menu:IsShown(), false)
+    eq(minimap.drawerToggle:IsShown(), true)
+    minimap.drawerToggle.scripts.OnClick(minimap.drawerToggle, "LeftButton")
+    eq(menu:IsShown(), true)
+    menu:Hide()
+    eq(#app.errors, 0)
+end)
+
+-- 018 Step 2: two independent native hosts. Collected by default, verified by
+-- readback, handed back on refusal, foreign parent, Edit Mode, combat deferral
+-- and component stop. The queue eye and MicroMenuContainer are never targets.
+local function nativeToolsScene()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local container = H.NewFrame("MicroMenuContainer", UIParent)
+    container:SetSize(1, 1)
+    local micro = H.NewFrame("MicroMenu", container)
+    local bags = H.NewFrame("BagsBar", UIParent)
+    local queue = H.NewFrame("QueueStatusButton", UIParent)
+    H.Fire("PLAYER_LOGIN")
+    -- The shipped default follows the client until the in-game gate passes; the
+    -- adapter tests opt into the collected state explicitly.
+    app.Store:Set("ui", "nativeTools", { bagsBar = "collect", microMenu = "collect" })
+    app.components.utilityCorner:Refresh()
+    return app, bags, micro, container, queue
+end
+
+test("both native tool hosts are collected by default and can follow the client", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local container = H.NewFrame("MicroMenuContainer", UIParent)
+    local micro = H.NewFrame("MicroMenu", container)
+    local bags = H.NewFrame("BagsBar", UIParent)
+    H.Fire("PLAYER_LOGIN")
+    app.components.utilityCorner:Refresh()
+    -- The field run confirmed both hosts, so the new screen collects them.
+    eq(app.Store:Profile().ui.nativeTools.bagsBar, "collect")
+    eq(app.Store:Profile().ui.nativeTools.microMenu, "collect")
+    eq(bags:IsShown(), false)
+    eq(micro:IsShown(), false)
+    eq(app.components.utilityCorner.hostStatus.bagsBar, "collected")
+    eq(app.Ownership:Get("utilityCorner.bagsBar").active, "owned")
+    -- An unknown stored value falls back to the shipped default, and an explicit
+    -- "client" is honoured per host.
+    app.Store:Set("ui", "nativeTools", { bagsBar = "sometimes", microMenu = "client" })
+    eq(app.Store:Profile().ui.nativeTools.bagsBar, "collect")
+    eq(app.Store:Profile().ui.nativeTools.microMenu, "client")
+    app.components.utilityCorner:Refresh()
+    eq(bags:IsShown(), false)
+    eq(micro:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("the tool entry collects both native tool hosts and can bring them back", function()
+    local app, bags, micro, container, queue = nativeToolsScene()
+    local corner = app.components.utilityCorner
+    eq(bags:IsShown(), false)
+    eq(micro:IsShown(), false)
+    -- The anchor container and the queue eye keep their own frames and state.
+    eq(container:IsShown(), true)
+    eq(queue:IsShown(), true)
+    eq(container:GetParent(), UIParent)
+    eq(corner.hostStatus.bagsBar, "collected")
+    eq(corner.hostStatus.microMenu, "collected")
+    eq(app.Ownership:Get("utilityCorner.bagsBar").active, "owned")
+    eq(app.Ownership:Get("utilityCorner.microMenu").active, "owned")
+    -- The menu's single entry temporarily shows the real native row in place.
+    eq(corner:ToggleNative(), true)
+    eq(bags:IsShown(), true)
+    eq(micro:IsShown(), true)
+    eq(corner.hostStatus.bagsBar, "expanded")
+    eq(corner:ToggleNative(), true)
+    eq(bags:IsShown(), false)
+    eq(micro:IsShown(), false)
+    -- Each host can follow the client on its own; the other stays collected.
+    eq(corner:SetHost("bagsBar", "client"), true)
+    eq(bags:IsShown(), true)
+    eq(micro:IsShown(), false)
+    eq(app.Ownership:Get("utilityCorner.bagsBar").active, "native")
+    eq(app.Ownership:Get("utilityCorner.bagsBar").reason, "client-intent")
+    eq(corner:SetHost("bagsBar", "collect"), true)
+    eq(bags:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("a refused or foreign-parented tool host stays native and is reported", function()
+    local app, bags, micro = nativeToolsScene()
+    local corner = app.components.utilityCorner
+    -- A host the build refuses to hide: the readback still says shown, so the
+    -- host is handed back and the state is native, never "collected".
+    eq(corner:SetHost("bagsBar", "client"), true)
+    eq(bags:IsShown(), true)
+    bags.Hide = function() end
+    corner:SetHost("bagsBar", "collect")
+    eq(bags:IsShown(), true)
+    eq(corner.hostStatus.bagsBar, "refused")
+    eq(app.Ownership:Get("utilityCorner.bagsBar").active, "native")
+    eq(app.Ownership:Get("utilityCorner.bagsBar").reason, "refused")
+    eq(micro:IsShown(), false)
+    -- Reparented by another addon: never written, explained instead.
+    bags.Hide = nil
+    local other = H.NewFrame(nil, UIParent)
+    bags:SetParent(other)
+    corner:Refresh()
+    eq(bags:IsShown(), true)
+    eq(corner.hostStatus.bagsBar, "foreign-parent")
+    eq(app.Ownership:Get("utilityCorner.bagsBar").reason, "foreign-parent")
+    -- A host the client already hid is never force-shown by a restore.
+    micro:Hide()
+    corner:Refresh()
+    eq(micro:IsShown(), false)
+    eq(corner.hostStatus.microMenu, "collected")
+    -- Diagnostics name both hosts and the intent.
+    H.messages = {}
+    corner:Diagnose()
+    local text = table.concat(H.messages, "\n")
+    eq(text:find("bagsBar", 1, true) ~= nil, true)
+    eq(text:find("microMenu", 1, true) ~= nil, true)
+    eq(text:find("intent=collect", 1, true) ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("edit mode and combat defer the native host changes", function()
+    local app, bags, micro = nativeToolsScene()
+    local corner = app.components.utilityCorner
+    -- Edit Mode needs both hosts: they come back while it is open and are
+    -- collected again once it closes.
+    EditModeManagerFrame:Show()
+    corner:Refresh()
+    eq(bags:IsShown(), true)
+    eq(micro:IsShown(), true)
+    eq(corner.hostStatus.microMenu, "edit-mode")
+    EditModeManagerFrame:Hide()
+    corner:Refresh()
+    eq(bags:IsShown(), false)
+    eq(micro:IsShown(), false)
+    -- Combat: expansion is refused, and a queued host change applies only after
+    -- combat ends through the shared queue.
+    H.Combat(true)
+    eq(corner:ToggleNative(), false)
+    eq(bags:IsShown(), false)
+    -- The profile write is allowed; only the native write waits for combat.
+    eq(corner:SetHost("bagsBar", "client"), true)
+    eq(bags:IsShown(), false)
+    local queued = app.Queue:Count()
+    eq(queued > 0, true)
+    H.Combat(false)
+    eq(app.Queue:Count(), 0)
+    eq(bags:IsShown(), true)
+    -- Stopping the component hands both hosts back with their own state.
+    app.Store:Set("modules", "utilityCorner", false)
+    eq(corner.running, false)
+    eq(bags:IsShown(), true)
+    eq(micro:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+-- 018 follow-up: the groups are captions, not folds. A collapsed group left a
+-- column of headings and a large empty area, so every page stays reachable.
+test("the settings navigation lists every page without folding", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle("actionBars")
+    local headings = settings.navFolds
+    eq(headings.combat ~= nil, true)
+    eq(headings.world ~= nil, true)
+    eq(headings.windows ~= nil, true)
+    -- Every module page is visible at once, whichever page is open.
+    for _, entry in ipairs(settings.registry) do
+        eq(settings.navigation[entry.id]:IsShown(), true)
+    end
+    settings:Select("chat")
+    for _, entry in ipairs(settings.registry) do
+        eq(settings.navigation[entry.id]:IsShown(), true)
+    end
+    -- A heading is a caption: it has no page id and cannot become active.
+    eq(settings.navigation.combat, nil)
+    eq(headings.combat.folded, nil)
+    -- Profiles and diagnostics close the list and are always present.
+    eq(settings.navigation.profiles:IsShown(), true)
+    eq(settings.navigation.diagnostics:IsShown(), true)
+    eq(#settings.navLabels, 3)
+    settings:Toggle(false)
+    eq(#app.errors, 0)
+end)
+
+test("a page with a single object hides its selector", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    -- Chat has no selectable object, so there is nothing to choose between.
+    app.Settings:Toggle("chat")
+    local page = app.Settings.pages.chat
+    eq(page.selector, nil)
+    -- Action bars have twelve objects: exactly one selector, no header buttons.
+    app.Settings:Toggle("actionBars")
+    local bars = app.Settings.pages.actionBars
+    eq(bars.selector ~= nil, true)
+    eq(#bars.navObjects, 12)
+    eq(#bars.tabs, 0)
+    app.Settings:Toggle(false)
+    eq(#app.errors, 0)
+end)
+
+-- A host that inherits the client's EditMode system template replaces `Hide`
+-- with an override that breaks its snapping. The adapter must call the recorded
+-- `HideBase`; the plain grid (`MicroMenu`) has no such override.
+test("an edit-mode system host is hidden through its base method", function()
+    local app = H.Load({
+        profiles = { Default = {} },
+        migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
+            actionBars = true },
+    })
+    local container = H.NewFrame("MicroMenuContainer", UIParent)
+    local micro = H.NewFrame("MicroMenu", container)
+    local bags = H.NewFrame("BagsBar", UIParent)
+    local baseHides, overrideHides = 0, 0
+    bags.HideBase = function(self)
+        baseHides = baseHides + 1
+        self.shown = false
+        if self.scripts.OnHide then self.scripts.OnHide(self) end
+    end
+    bags.Hide = function(self)
+        overrideHides = overrideHides + 1
+        self.shown = false
+    end
+    local microHides = 0
+    micro.Hide = function(self)
+        microHides = microHides + 1
+        self.shown = false
+    end
+    H.Fire("PLAYER_LOGIN")
+    app.Store:Set("ui", "nativeTools", { bagsBar = "collect", microMenu = "collect" })
+    app.components.utilityCorner:Refresh()
+    eq(baseHides, 1)
+    eq(overrideHides, 0)
+    eq(microHides, 1)
+    -- Bringing them back uses plain Show for both.
+    eq(app.components.utilityCorner:ToggleNative(), true)
+    eq(bags:IsShown(), true)
+    eq(micro:IsShown(), true)
+    eq(baseHides, 1)
+    eq(#app.errors, 0)
+end)
+
+test("the tool page exposes one switch per native host and the shared entry", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("minimap")
+    local page = app.Settings.pages.minimap
+    eq(page.fields.bagsBar ~= nil, true)
+    eq(page.fields.microMenu ~= nil, true)
+    eq(page.fields.bagsBar.scripts ~= nil or page.nativeTools ~= nil, true)
+    -- Flipping the bag host to "follow client" writes the profile value the
+    -- component reads, not a private UI state; the other host keeps its own.
+    page.nativeTools.bags.scripts.OnClick(page.nativeTools.bags, "LeftButton")
+    eq(app.Store:Profile().ui.nativeTools.bagsBar, "client")
+    eq(app.Store:Profile().ui.nativeTools.microMenu, "collect")
+    app.Settings:Toggle(false)
     eq(#app.errors, 0)
 end)
 
@@ -13825,18 +14823,23 @@ test("absorb and heal prediction start at the fill edge and take restricted valu
     eq(#app.errors, 0)
 end)
 
-test("the minimap drawer opens LumaUI entries and leaves native buttons", function()
+test("the minimap drawer entry opens the shared tool menu and leaves native buttons", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     local minimap = app.components.minimap
-    eq(minimap.drawer ~= nil, true)
-    eq(minimap.drawer:IsShown(), false)
-    minimap.drawer:Show()
-    eq(minimap.drawer:IsShown(), true)
-    eq(#minimap.drawerButtons, 6)
+    eq(minimap.drawerToggle ~= nil, true)
+    -- With the tool corner on screen the minimap entry steps aside; turning the
+    -- corner off keeps a reachable way into the same menu.
+    eq(minimap.drawerToggle:IsShown(), false)
+    app.Store:Set("modules", "utilityCorner", false)
+    eq(minimap.drawerToggle:IsShown(), true)
+    minimap.drawerToggle.scripts.OnClick(minimap.drawerToggle, "LeftButton")
+    local menu = app.ToolMenu.Frame()
+    eq(menu:IsShown(), true)
+    eq(menu.buttons.calendar ~= nil, true)
     eq(GameTimeFrame:IsShown(), true)
-    -- Calendar stays the client's own frame; the drawer only calls its toggle.
+    -- Calendar stays the client's own frame; the menu only calls its toggle.
     app.Store:Set("modules", "minimap", false)
-    eq(minimap.drawer:IsShown(), false)
+    eq(menu:IsShown(), false)
     eq(#app.errors, 0)
 end)
 
@@ -13931,7 +14934,12 @@ test("the Central HUD editor switches the own groups on and imports the client o
     eq(asked.category, 0)
     eq(asked.allowUnlearned, false)
     eq(#app.Store:Profile().ui.cooldownGroups.groups.essential.order, 1)
-    eq(essential.empty:IsShown(), false)
+    -- The stored list is kept, but an `auto` group draws from the provider, so the
+    -- block stays empty in this fixture (the provider answers no cooldowns).
+    eq(essential.empty:IsShown(), true)
+    -- Importing is the "follow the client" state, so the group stops being a
+    -- frozen copy: `auto` goes back on and the next render reads the provider.
+    eq(app.Store:Profile().ui.cooldownGroups.groups.essential.auto, true)
     -- An imported group still draws nothing until the mode switch is on.
     eq(cds.containers.essential.frame:IsShown(), false)
     editor.owned.scripts.OnClick(editor.owned, "LeftButton")
@@ -14678,7 +15686,10 @@ test("the action bar page selects a real bar and its controls reach the client",
     app.Store:Set("modules", "actionBars", true)
     app.Settings:Toggle("actionBars")
     local page = app.Settings.pages.actionBars
-    eq(#page.tabs, 8)
+    -- 018 Step 4.1: one dropdown, not twelve header buttons.
+    eq(#page.tabs, 0)
+    eq(page.selector ~= nil, true)
+    eq(#page.navObjects, 12)
     -- Object first: the page starts on bar 1 and follows an explicit selection.
     eq(page.selected, "actionBar1")
     app.Settings:SelectObject("actionBars", "actionBar6")
@@ -15101,6 +16112,912 @@ test("unit frames report each drawn part's display owner", function()
         end
     end
     eq(count > 0, true)
+    eq(#app.errors, 0)
+end)
+
+-- ==== 017 Phase 01: settings shell ====
+test("017 settings: navigation groups, fixed header and short pages without a rail", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle("actionBars")
+    -- Group headings exist and are never pages. There are three module groups;
+    -- the profiles/diagnostics rows are not a group any more.
+    eq(#settings.navLabels, 3)
+    eq(settings.navigation.combat, nil)
+    local seen = {}
+    for _, entry in ipairs(settings.registry) do
+        eq(entry.group == "combat" or entry.group == "world" or entry.group == "windows", true)
+        seen[entry.id] = true
+    end
+    eq(seen.actionBars and seen.groups and seen.containers and seen.tooltip, true)
+    -- The header holds the heading, the status, the object row and the actions;
+    -- the form scrolls underneath it.
+    local page = settings.pages.actionBars
+    eq(page.header ~= nil, true)
+    eq(page.heading.parent, page.header)
+    eq(page.locate.parent, page.header)
+    eq(page.selector.parent, page.header)
+    eq(page.scroll.parent, page)
+    eq(#page.navObjects, 12)
+    -- Bar 1 and bar 6 are both reachable directly from the one selector.
+    settings:SelectObject("actionBars", page.navObjects[6].id)
+    eq(settings:SelectedBar("actionBars").id, 6)
+    settings:SelectObject("actionBars", page.navObjects[1].id)
+    eq(settings:SelectedBar("actionBars").id, 1)
+    -- A page whose content fits has no rail and no hit area.
+    settings:Select("tooltip")
+    local short = settings.pages.tooltip
+    eq(short.scroll.rangeMax, 0)
+    eq(short.scroll.bar:IsShown(), false)
+    eq(short.scroll.bar.mouseEnabled, false)
+    eq(short.scroll:GetVerticalScroll(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("017 settings: each object keeps its own scroll position", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle("actionBars")
+    local page = settings.pages.actionBars
+    -- The harness does not measure content, so give the page a range.
+    page.scroll.rangeMax = 300
+    settings:SelectObject("actionBars", page.navObjects[2].id)
+    page.scroll:ScrollTo(120)
+    eq(page.scroll:GetVerticalScroll(), 120)
+    settings:SelectObject("actionBars", page.navObjects[3].id)
+    eq(page.scroll:GetVerticalScroll(), 0)
+    page.scroll.rangeMax = 300
+    settings:SelectObject("actionBars", page.navObjects[2].id)
+    page.scroll.rangeMax = 300
+    eq(page.scroll:GetVerticalScroll() <= 120, true)
+    eq(#app.errors, 0)
+end)
+
+test("017 settings: search finds real fields by label and alias", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle()
+    local function first(query)
+        local results = settings:Search(query)
+        return results[1] and results[1].entry
+    end
+    -- Aliases in both languages reach the matching page or field.
+    eq(first("符文").page, "resources")
+    eq(first("rune").page, "resources")
+    eq(first("小队").page, "groups")
+    eq(first("技能尺寸").page, "cooldowns")
+    eq(first("技能尺寸").field, "size")
+    eq(first("按钮").page, "actionBars")
+    eq(#settings:Search(""), 0)
+    eq(#settings:Search("zzzz-nothing"), 0)
+    -- Picking a result opens the page, selects the object and focuses the field.
+    local result = settings:Search("技能尺寸")[1]
+    settings:OpenResult(result)
+    eq(settings.active, "cooldowns")
+    eq(settings.pages.cooldowns.fields.size ~= nil, true)
+    -- An entry for an object this run does not have reports it and still opens the page.
+    settings:RegisterSearch({ page = "actionBars", object = 99, field = "buttons", label = "actionBarButtons", alias = "ghostbar" })
+    local ghost = settings:Search("ghostbar")[1]
+    settings:OpenResult(ghost)
+    eq(settings.active, "actionBars")
+    -- Typing in the box drives the result panel and Esc clears it.
+    settings.searchInput:SetText("符文")
+    settings.searchInput.scripts.OnTextChanged(settings.searchInput)
+    eq(settings.searchPanel:IsShown(), true)
+    eq(settings.searchRows[1]:IsShown(), true)
+    settings.searchInput.scripts.OnEscapePressed(settings.searchInput)
+    eq(settings.searchPanel:IsShown(), false)
+    -- Searching never writes the profile.
+    eq(#app.errors, 0)
+end)
+
+test("017 settings: the window scales down to fit a small screen", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle()
+    eq(settings.fitScale <= 1, true)
+    local width, height = UIParent.GetWidth, UIParent.GetHeight
+    UIParent.GetWidth = function() return 700 end
+    UIParent.GetHeight = function() return 400 end
+    H.Fire("DISPLAY_SIZE_CHANGED")
+    eq(settings.frame:GetScale() < 1, true)
+    eq(settings.frame:GetScale() >= 0.5, true)
+    UIParent.GetWidth, UIParent.GetHeight = width, height
+    H.Fire("DISPLAY_SIZE_CHANGED")
+    eq(settings.frame:GetScale(), 1)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 02: bar 1 offers only working settings and 0 reads as follows client", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle("actionBars")
+    local page = settings.pages.actionBars
+    settings:SelectObject("actionBars", "actionBar1")
+    settings:Update()
+    eq(page.barControls.buttons:IsShown(), false)
+    eq(page.barControls.gap:IsShown(), false)
+    eq(page.barVisibility[1]:IsShown(), false)
+    eq(page.barScale:IsShown(), true)
+    eq(page.barLimits:IsShown(), true)
+    settings:SelectObject("actionBars", "petBar")
+    settings:Update()
+    eq(page.barControls.buttons:IsShown(), false)
+    eq(page.barScale:IsShown(), false)
+    eq(page.barLimits:IsShown(), true)
+    settings:SelectObject("actionBars", "actionBar6")
+    settings:Update()
+    eq(page.barControls.buttons:IsShown(), true)
+    eq(page.barControls.size:IsShown(), true)
+    eq(page.barVisibility[1]:IsShown(), true)
+    eq(page.barLimits:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 02: raid size and spacing are stored, bounded and applied to the grid", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle("groups")
+    local page = settings.pages.groups
+    settings:SelectObject("groups", "raidFrames")
+    settings:Update()
+    eq(page.groupControls.width:IsShown(), true)
+    eq(page.groupHint:IsShown(), false)
+    local frames = app.Store.Clone(app.Store:Profile().ui.groupFrames)
+    frames.raid.width, frames.raid.height, frames.raid.gap = 100, 30, 8
+    app.Store:Set("ui", "groupFrames", frames)
+    local raid = app.Store:Profile().ui.groupFrames.raid
+    eq(raid.width, 100); eq(raid.height, 30); eq(raid.gap, 8)
+    frames.raid.width, frames.raid.height = 9999, -3
+    app.Store:Set("ui", "groupFrames", frames)
+    raid = app.Store:Profile().ui.groupFrames.raid
+    eq(raid.width, 0); eq(raid.height, 0)
+    settings:SelectObject("groups", "party")
+    settings:Update()
+    eq(page.groupControls.width:IsShown(), false)
+    eq(page.groupHint:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 02: raid geometry changes resize buttons and grid, 0 restores the default", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local savedExists = UnitExists
+    _G.UnitExists = function(unit)
+        local n = tonumber(unit:match("^raid(%d+)$"))
+        return n ~= nil and n <= 10
+    end
+    H.inRaid = true
+    H.raidSubgroups = {}
+    for index = 1, 10 do H.raidSubgroups[index] = math.floor((index - 1) / 5) + 1 end
+    app.Store:Set("modules", "raidFrames", true)
+    local raid = app.components.raidFrames
+    local w0, h0 = raid.container:GetWidth(), raid.container:GetHeight()
+    local button = raid.frames[1]
+    eq(button:GetWidth(), 90)
+    app.Store:Set("ui", "groupFrames", { raid = { width = 120, height = 40, gap = 10 } })
+    raid:Refresh()
+    H.Advance(1)
+    eq(button:GetWidth(), 120); eq(button:GetHeight(), 40)
+    eq(raid.container:GetWidth() > w0 and raid.container:GetHeight() > h0, true)
+    app.Store:Set("ui", "groupFrames", { raid = { width = 0, height = 0, gap = 0 } })
+    raid:Refresh()
+    H.Advance(1)
+    eq(button:GetWidth(), 90)
+    eq(raid.container:GetWidth(), w0)
+    _G.UnitExists = savedExists
+    H.inRaid = false
+    H.raidSubgroups = nil
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 03: the main skill line is 0.31 of the viewport height and ignores the bars", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local layout = app.Layout
+    eq(math.abs(layout:MainLine() - 334.8) < 0.01, true)
+    local before = layout:Central().cooldown.bottom
+    layout:SetActionAreaBottom(200)
+    eq(layout:Central().cooldown.bottom, before)
+    layout:SetActionAreaBottom(0)
+    eq(layout:Central().cooldown.bottom, before)
+    UIParent:SetSize(1600, 900)
+    eq(math.abs(layout:MainLine() - 279) < 0.01, true)
+    eq(math.abs(layout:MainLineBottom(40) - 239) < 0.01, true)
+    -- An unreadable row height falls back to a typical icon row, never to 0.
+    eq(math.abs(layout:MainLineBottom(nil) - (279 - 26)) < 0.01, true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 03: the own essential block hangs from the main line, not from the bars", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for id = 1, 4 do SlashCmdList.LUMAUI("cds add " .. id) end
+    SlashCmdList.LUMAUI("cds owned")
+    local container = cds.containers.essential
+    local function topFromBottom()
+        return (container.frame.point[5] + container.plan.height / 2) + 540
+    end
+    eq(math.abs(topFromBottom() - app.Layout:MainLine()) < 0.5, true)
+    app.Layout:SetActionAreaBottom(300)
+    cds:Refresh()
+    eq(math.abs(topFromBottom() - app.Layout:MainLine()) < 0.5, true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 03: the own cast bar centres on the 77% line and ignores the bars", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local cast = app.components.playerCast
+    eq(cast.running, true)
+    local function fromBottom() return cast.bar.point[5] + 540 end
+    eq(math.abs(fromBottom() - 248.4) < 0.5, true)
+    app.Layout:SetActionAreaBottom(260)
+    cast:Refresh()
+    eq(math.abs(fromBottom() - 248.4) < 0.5, true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 04: the editor preview draws the selected group's real plan and follows the draft", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080); H.Fire("PLAYER_LOGIN")
+    local cds = app.components.cooldownGroups
+    _G.C_Spell.GetSpellInfo = function(id) return { name = "S" .. id, iconID = 1000 + id } end
+    _G.C_Spell.GetSpellCooldown = function() return { startTime = 0, duration = 0, isEnabled = true } end
+    _G.C_Spell.GetSpellCharges = function() return nil end
+    for id = 1, 5 do SlashCmdList.LUMAUI("cds add " .. id) end
+    SlashCmdList.LUMAUI("cds owned")
+    local settings = app.Settings
+    settings:Toggle("cooldowns")
+    settings:SelectObject("cooldowns", "cdGroup_essential")
+    settings:Update()
+    local editor = settings.hudEditor
+    eq(editor.preview:IsShown(), true)
+    local shown = 0
+    for _, cell in ipairs(editor.previewCells) do if cell:IsShown() then shown = shown + 1 end end
+    eq(shown, 5)
+    -- A smaller per-row capacity in the draft wraps the preview before Apply.
+    cds:SetDraft("essential", "max", 2)
+    settings:Update()
+    local first, third = editor.previewCells[1], editor.previewCells[3]
+    eq(first.point[5] ~= third.point[5], true)
+    cds:CancelDraft()
+    settings:Update()
+    eq(editor.previewCells[1].point[5], editor.previewCells[3].point[5])
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 04: the native cast bar moves to the cast line out of combat and is handed back", function()
+    local app = H.Load(); UIParent:SetSize(1920, 1080)
+    local native = H.NewFrame("PlayerCastingBarFrame", UIParent)
+    native:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 270)
+    H.Fire("PLAYER_LOGIN")
+    local cast = app.components.playerCast
+    local function centre() return select(5, native:GetPoint(1)) or native.point[5] end
+    eq(math.abs(centre() - (248.4 - 540)) < 0.5, true)
+    eq(cast.nativeMoved, true)
+    -- Switching to the own bar returns the client's anchor.
+    app.Store:Set("ui", "playerCastOwned", true)
+    cast:Refresh()
+    eq(native.point[1], "BOTTOM")
+    eq(native.point[5], 270)
+    -- In combat nothing is written.
+    H.combat = true
+    app.Store:Set("ui", "playerCastOwned", false)
+    cast:Refresh()
+    eq(native.point[1], "BOTTOM")
+    H.combat = false
+    H.Fire("PLAYER_REGEN_ENABLED")
+    eq(cast.nativeMoved, true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 05: Vengeance soul fragments pass the raw count to one bar and hide when unavailable", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local savedClass, savedCount = _G.UnitClass, _G.C_Spell.GetSpellCastCount
+    local savedSpec = _G.C_SpecializationInfo
+    _G.UnitClass = function() return "Demon Hunter", "DEMONHUNTER", 12 end
+    _G.C_SpecializationInfo = {
+        GetSpecialization = function() return 2 end,
+        GetSpecializationInfo = function() return 581 end,
+    }
+    local count = 3
+    _G.C_Spell.GetSpellCastCount = function() return count end
+    app.Store:Set("modules", "playerResource", true)
+    local resource = app.components.playerResource
+    -- Off by default: nothing is drawn until the player chooses it.
+    eq(resource.fragments:IsShown(), false)
+    app.Store:Set("ui", "resourceFragments", "owned")
+    resource:Refresh()
+    eq(resource.fragments:IsShown(), true)
+    eq(resource.fragments.bar.value, 3)
+    eq(resource.rail:GetHeight(), 21)
+    -- A restricted count is handed over untouched: no arithmetic, no compare.
+    local secret = H.Secret(4)
+    count = secret
+    H.Fire("SPELL_UPDATE_USES", 228477, 228477)
+    eq(resource.fragments.bar.value, secret)
+    -- 0 is a confirmed answer; nil is not available and hides the row.
+    count = 0
+    H.Fire("SPELL_UPDATE_USES", 228477, 228477)
+    eq(resource.fragments:IsShown(), true)
+    eq(resource.fragments.bar.value, 0)
+    count = nil
+    H.Fire("SPELL_UPDATE_USES", 228477, 228477)
+    eq(resource.fragments:IsShown(), false)
+    eq(resource.fragmentState, "unavailable")
+    -- Another spec never shows it.
+    count = 2
+    _G.C_SpecializationInfo.GetSpecializationInfo = function() return 577 end
+    H.Fire("PLAYER_SPECIALIZATION_CHANGED", "player")
+    eq(resource.fragments:IsShown(), false)
+    _G.UnitClass, _G.C_Spell.GetSpellCastCount, _G.C_SpecializationInfo = savedClass, savedCount, savedSpec
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 05: the resources page toggles the two own rows without hiding native displays", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    settings:Toggle("resources")
+    local page = settings.pages.resources
+    eq(page.resourceToggles ~= nil, true)
+    SlashCmdList.LUMAUI("fragments")
+    eq(app.Store:Profile().ui.resourceFragments, "owned")
+    SlashCmdList.LUMAUI("fragments")
+    eq(app.Store:Profile().ui.resourceFragments, "native")
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 05: the rune arc mirrors the plain rune state and falls back to the line", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.unitInfo.player.class = "DEATHKNIGHT"
+    H.runes = {
+        { start = 0, duration = 10, ready = false },
+        { start = 0, duration = 10, ready = true },
+    }
+    _G.GetRuneCooldown = function(index)
+        local rune = H.runes[index]
+        if not rune then return 0, 0, true end
+        return rune.start, rune.duration, rune.ready
+    end
+    H.now = 2.5
+    app.Store:Set("ui", "resourceRunes", "owned")
+    app:Reconcile()
+    local resource = app.components.playerResource
+    eq(resource.runes:IsShown(), true)
+    eq(resource.runeArc:IsShown(), false)
+    app.Store:Set("ui", "resourceStyle", "arc")
+    resource:Refresh()
+    eq(resource.runeStyle, "arc")
+    eq(resource.runeArc:IsShown(), true)
+    eq(resource.runes:IsShown(), false)
+    eq(resource.rail:GetHeight(), 27)
+    -- Segments are independent and rotated along the arc.
+    eq(resource.runeArc.segments[1].rotation ~= resource.runeArc.segments[6].rotation, true)
+    -- Turning the arc off returns the straight row.
+    app.Store:Set("ui", "resourceStyle", "line")
+    resource:Refresh()
+    eq(resource.runes:IsShown(), true)
+    eq(resource.runeArc:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 07: container model keeps every physical slot once", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local Model = app.ContainerModel
+    H.itemClasses[10], H.itemClasses[11], H.itemClasses[12], H.itemClasses[13] = 2, 11, 12, 5
+    local ids = { 10, 11, 12, 13 }
+    C_Container.GetContainerNumSlots = function(bag) return bag <= 1 and 70 or 0 end
+    C_Container.GetContainerItemInfo = function(bag, slot)
+        if slot % 5 == 0 then return nil end
+        local id = ids[(slot % 4) + 1]
+        return { hyperlink = "|Hitem:" .. id .. "|h[Thing " .. id .. "]|h", itemName = "Thing " .. id,
+            itemID = id, stackCount = 1, iconFileID = 1, quality = 1, isLocked = false }
+    end
+    local records, free, total = Model.Collect("bag", { 0, 1 })
+    eq(total, 140)
+    eq(#records + free, 140)
+    eq(#records > 100, true)
+    local seen = {}
+    for _, record in ipairs(records) do
+        eq(seen[record.key], nil)
+        seen[record.key] = true
+    end
+    -- Sections partition the records; quiver (11) is not a quest item.
+    local sections, count = Model.Group(records), 0
+    for _, section in ipairs(sections) do count = count + #section.items end
+    eq(count, #records)
+    for _, record in ipairs(records) do
+        if record.item.itemID == 11 then eq(record.category, "other") end
+        if record.item.itemID == 12 then eq(record.category, "quest") end
+    end
+    -- Search is normalized and never drops or duplicates a slot.
+    eq(#Model.Search(records, "  THING 12 "), #Model.Search(records, "thing 12"))
+    eq(#Model.Search(records, ""), #records)
+    eq(#Model.Search(records, "", "quest") + #Model.Search(records, "", "equip")
+        + #Model.Search(records, "", "mat") + #Model.Search(records, "", "other"), #records)
+    -- Dirty merging collapses repeated marks.
+    local dirty = Model.NewDirty()
+    Model.Mark(dirty, 1); Model.Mark(dirty, 1); Model.Mark(dirty, 0)
+    local taken = Model.Take(dirty)
+    eq(#taken.bags, 2)
+    eq(#Model.Take(dirty).bags, 0)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: ledger records, exports, imports bounded snapshots and counts shared balances once", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local Ledger = app.Ledger
+    GetServerTime = function() return 1000 end
+    app.Reports:RecordMoney()
+    eq(#Ledger:Money() >= 1, true)
+    -- Confirmed zero differs from unread.
+    eq(Ledger:Record("c", "n:A-R", "A", 1, 0, 1000), true)
+    eq(Ledger:Record("c", "n:A-R", "A", 2, nil, 1000), false)
+    local sum = Ledger:Total(1)
+    eq(sum, 0)
+    Ledger:Record("c", "n:B-R", "B", 1, 50, 1000)
+    Ledger:Record("w", "bank", "Warband", 1, 700, 1000)
+    local char, warband = Ledger:Total(1)
+    eq(char, 50)
+    eq(warband, 700)
+    -- Export carries only the own ledger; preview parses before any write.
+    local text = Ledger:Export()
+    eq(text:sub(1, 13), "LUMA-WALLET/1")
+    local plan = Ledger:Preview(text)
+    eq(plan ~= nil, true)
+    eq(plan.added, #plan.rows)
+    eq(Ledger:Commit(plan), true)
+    local again = Ledger:Preview(text)
+    eq(again.added, 0)
+    eq(again.unchanged, #again.rows)
+    -- Imported rows are never forwarded.
+    eq(select(2, Ledger:Export():gsub("\nR\t", "")), select(2, text:gsub("\nR\t", "")))
+    -- Errors and oversize write nothing; stale values do not win.
+    local before = Ledger:SourceCount()
+    eq(Ledger:Preview("load('x')"), nil)
+    eq(Ledger:Preview(text .. string.rep("x", 300000)), nil)
+    eq(Ledger:Preview("LUMA-WALLET/1\nS\tz\tEU\tZed\nR\tc\tbad name\tN\t1\t5\t1\n"), nil)
+    eq(Ledger:SourceCount(), before)
+    local old = Ledger:Preview((text:gsub("\t1000\n", "\t10\n")))
+    eq(old.stale > 0, true)
+    Ledger:Commit(old)
+    eq(Ledger:Total(1) , 50 + 50)
+    -- Grouping two same-region sources merges their warband row.
+    local _, w1 = Ledger:Total(1)
+    Ledger:Group("local", plan.sourceID)
+    local _, w2 = Ledger:Total(1)
+    eq(w1, 1400)
+    eq(w2, 700)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: wallet panel previews before writing and currencies keep unread apart from zero", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    GetServerTime = function() return 2000 end
+    H.currencies = {
+        { name = "Hdr", isHeader = true },
+        { name = "Valor", currencyID = 1191, isHeader = false },
+        { name = "Gone", currencyID = 1500, isHeader = false },
+        { name = "Zero", currencyID = 1600, isHeader = false },
+    }
+    C_CurrencyInfo.GetCurrencyInfo = function(id)
+        if id == 1191 then return { quantity = 1200 } end
+        if id == 1600 then return { quantity = 0 } end
+    end
+    eq(app.Ledger:ReadCurrencies("Me-Realm", "Player-1-ABC"), 2)
+    eq(app.Ledger:Total(1191), 1200)
+    eq(app.Ledger:Total(1600), 0)
+    eq(app.Ledger:Total(1500), 0)
+    local count = 0
+    for _, row in pairs(app.Ledger:Data().rows) do if row.currency == 1500 then count = count + 1 end end
+    eq(count, 0)
+    SlashCmdList.LUMAUI("wallet")
+    local panel = app.WalletPanel
+    eq(panel.frame:IsShown(), true)
+    panel:Export()
+    local text = panel.box:GetText()
+    eq(text:sub(1, 13), "LUMA-WALLET/1")
+    -- First press only previews; nothing is written until the second.
+    panel.box:SetText(text:gsub("S\tlocal", "S\tother"))
+    local before = app.Ledger:SourceCount()
+    panel:Import()
+    eq(app.Ledger:SourceCount(), before)
+    panel:Import()
+    eq(app.Ledger:SourceCount(), before + 1)
+    panel.box:SetText("junk")
+    panel:Import()
+    eq(app.Ledger:SourceCount(), before + 1)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: warband reads keep unreadable apart from zero and bank gold stays separate", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    GetServerTime = function() return 3000 end
+    local asked = 0
+    C_CurrencyInfo.IsAccountCharacterCurrencyDataReady = function() return false end
+    C_CurrencyInfo.RequestCurrencyDataForAccountCharacters = function() asked = asked + 1 end
+    C_CurrencyInfo.FetchCurrencyDataFromAccountCharacters = function()
+        return { { characterGUID = "Player-9-A", fullCharacterName = "Alt-R", quantity = 0 },
+                 { characterGUID = "Player-9-B", fullCharacterName = "Bob-R", quantity = H.Secret and H.Secret(5) or 5 } }
+    end
+    app.Ledger:RequestWarband(); app.Ledger:RequestWarband()
+    eq(asked, 1)
+    local n = app.Ledger:ReadWarband(1191)
+    eq(n >= 1, true)
+    eq(app.Ledger:Data().rows["local|c|g:Player-9-A|1191"].qty, 0)
+    _G.C_Bank = { FetchDepositedMoney = function() return 12345 end }
+    Enum.BankType = Enum.BankType or {}
+    Enum.BankType.Account = 2
+    eq(app.Ledger:ReadBankMoney(), true)
+    local _, warband = app.Ledger:Total(0)
+    eq(warband, 12345)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: opening the wallet requests warband data and the received event reads known currencies", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    GetServerTime = function() return 4000 end
+    local asked, ready = 0, false
+    C_CurrencyInfo.IsAccountCharacterCurrencyDataReady = function() return ready end
+    C_CurrencyInfo.RequestCurrencyDataForAccountCharacters = function() asked = asked + 1 end
+    C_CurrencyInfo.FetchCurrencyDataFromAccountCharacters = function()
+        return { { characterGUID = "Player-7-A", fullCharacterName = "Alt-R", quantity = 9 } }
+    end
+    app.Ledger:Record("c", "n:Me-R", "Me", 1191, 5, 4000)
+    SlashCmdList.LUMAUI("wallet")
+    eq(asked, 1)
+    H.Fire("ACCOUNT_CHARACTER_CURRENCY_DATA_RECEIVED")
+    eq(app.Ledger:Data().rows["local|c|g:Player-7-A|1191"].qty, 9)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: wallet slash commands rename and group sources", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    GetServerTime = function() return 5000 end
+    local plan = app.Ledger:Preview("LUMA-WALLET/1\nS\tzed\tUS\tZed\nR\tw\tbank\tBank\t0\t10\t5\n")
+    app.Ledger:Commit(plan)
+    local data = app.Ledger:Data()
+    data.sources["local"].region = "US"
+    SlashCmdList.LUMAUI("wallet rename imp:zed Friend")
+    eq(data.sources["imp:zed"].name, "Friend")
+    SlashCmdList.LUMAUI("wallet group local imp:zed")
+    eq(data.sources["local"].group, data.sources["imp:zed"].group)
+    eq(app.Ledger:Group("local", "missing"), false)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: the bag footer shows carried gold and opens the ledger", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("bags")
+    local inventory = app.components.inventory
+    eq(inventory.wallet:IsShown(), true)
+    H.Click(inventory.wallet)
+    eq(app.WalletPanel.frame:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 07: container view settings normalize collapsed sections and pinned currencies", function()
+    local app = H.Load()
+    local out = app.Store:Normalize({ ui = { containerCollapsed = { quest = true, bogus = true, mat = "x" },
+        pinnedCurrencies = { 1191, 1191, -3, 1.5, 7, 8, 9, 10, 11 } } })
+    eq(out.ui.containerCollapsed.quest, true)
+    eq(out.ui.containerCollapsed.bogus, nil)
+    eq(out.ui.containerCollapsed.mat, nil)
+    eq(#out.ui.pinnedCurrencies, 4)
+    eq(out.ui.pinnedCurrencies[2], 7)
+end)
+
+test("017 phase 09: pinned currencies toggle, cap at four and show only answered ids", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    C_CurrencyInfo.GetCurrencyInfo = function(id) if id == 1191 then return { quantity = 0 } end end
+    SlashCmdList.LUMAUI("wallet pin 1191")
+    SlashCmdList.LUMAUI("wallet pin 1500")
+    eq(app.Ledger:PinnedText(), "1191: 0")
+    eq(app.Ledger:TogglePin(1500), false)
+    for id = 1, 4 do app.Ledger:TogglePin(id) end
+    eq(app.Ledger:TogglePin(99), nil)
+    eq(#app.Store:Profile().ui.pinnedCurrencies, 4)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 07: nameless slots request item data once and stay in the list", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local asked = {}
+    C_Item.RequestLoadItemDataByID = function(id) asked[#asked + 1] = id end
+    C_Container.GetContainerNumSlots = function(bag) return bag == 0 and 2 or 0 end
+    C_Container.GetContainerItemInfo = function(bag, slot) return { itemID = 4242, stackCount = 1, iconFileID = 1, quality = 1 } end
+    local records = app.ContainerModel.Collect("bag", { 0 })
+    eq(#records, 2)
+    app.ContainerModel.Collect("bag", { 0 })
+    eq(#asked, 1)
+    eq(asked[1], 4242)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: ledger rows filter by currency and source", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Ledger:Record("c", "n:A-R", "A", 1, 5, 10)
+    app.Ledger:Record("c", "n:A-R", "A", 2, 0, 10)
+    eq(#app.Ledger:Rows(), 3)
+    eq(#app.Ledger:Rows(2), 1)
+    eq(#app.Ledger:Rows("local"), 3)
+    eq(#app.Ledger:Rows("none"), 0)
+    SlashCmdList.LUMAUI("wallet list 1")
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: sectioned rows are virtualized and collapse without losing counts", function()
+    local app = H.Load()
+    local M = app.ContainerModel
+    local sections = { { id = "quest", items = { 1, 2, 3 } }, { id = "mat", items = { 4, 5, 6, 7, 8, 9, 10 } } }
+    local rows = M.Rows(sections, nil, 4)
+    eq(#rows, 1 + 1 + 1 + 2)
+    eq(rows[1].kind, "header")
+    eq(rows[4].first, 1)
+    eq(rows[5].last, 7)
+    local folded = M.Rows(sections, { mat = true }, 4)
+    eq(#folded, 3)
+    eq(folded[3].count, 7)
+    eq(folded[3].collapsed, true)
+    local a, b = M.Visible(rows, 40, 80, 100)
+    eq(a, 3)
+    eq(b, 5)
+end)
+
+test("017 phase 08: the sectioned bag view draws only visible rows and collapses a section", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.itemClasses[10], H.itemClasses[12] = 2, 12
+    SlashCmdList.LUMAUI("bags")
+    C_Container.GetContainerNumSlots = function(bag) return bag == 0 and 150 or 0 end
+    C_Container.GetContainerItemInfo = function(bag, slot)
+        local id = slot % 2 == 0 and 10 or 12
+        return { hyperlink = "|Hitem:" .. id .. "|h[T" .. slot .. "]|h", itemName = "T" .. slot, itemID = id,
+            stackCount = 1, iconFileID = 1, quality = 1, isLocked = false }
+    end
+    local inv = app.components.inventory
+    SlashCmdList.LUMAUI("bags sections")
+    local view = inv.sectionView
+    eq(inv.sectioned, true)
+    eq(view.scroll:IsShown(), true)
+    -- 150 items in two sections: far fewer cells than slots are drawn.
+    eq(view.drawnCells < 150, true)
+    eq(view.drawnCells > 0, true)
+    local before = #view.rows
+    view.onToggle("quest")
+    eq(app.Store:Profile().ui.containerCollapsed.quest, true)
+    eq(#inv.sectionView.rows < before, true)
+    SlashCmdList.LUMAUI("bags paged")
+    eq(inv.sectioned, false)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: the bank can use the sectioned view and return to paged", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bank = app.components.bank
+    H.bankView = { [Enum.BankType.Character] = true }
+    H.bankTabs = { [Enum.BankType.Character] = { -1 } }
+    app.Store:Set("modules", "bank", true)
+    H.Fire("BANKFRAME_OPENED")
+    SlashCmdList.LUMAUI("bank sections")
+    eq(bank.sectioned, true)
+    eq(bank.sectionView ~= nil, true)
+    SlashCmdList.LUMAUI("bank paged")
+    eq(bank.sectioned, false)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: the wallet panel filter narrows the list by currency id", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Ledger:Record("c", "n:A-R", "Alpha", 1191, 5, 10)
+    app.Ledger:Record("c", "n:A-R", "Alpha", 1600, 7, 10)
+    SlashCmdList.LUMAUI("wallet")
+    local panel = app.WalletPanel
+    panel.filterBox:SetText("1191")
+    panel:Refresh()
+    eq(panel.list.text:find("#1191", 1, true) ~= nil, true)
+    eq(panel.list.text:find("#1600", 1, true), nil)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 09: the wallet panel renames and groups the selected source", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    GetServerTime = function() return 6000 end
+    app.Ledger:Commit(app.Ledger:Preview("LUMA-WALLET/1\nS\tzed\tUS\tZed\nR\tw\tbank\tBank\t0\t10\t5\n"))
+    app.Ledger:Data().sources["local"].region = "US"
+    SlashCmdList.LUMAUI("wallet")
+    local panel = app.WalletPanel
+    panel:NextSource(); panel:NextSource()
+    eq(panel.selected, "local")
+    panel:NextSource()
+    eq(panel.selected, "imp:zed")
+    panel.nameBox:SetText("Friend")
+    panel:RenameSource()
+    eq(app.Ledger:Data().sources["imp:zed"].name, "Friend")
+    panel:GroupSource()
+    eq(app.Ledger:Data().sources["imp:zed"].group ~= nil, true)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: BankState resolves view, permission, tab bags and the legacy fallback", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local M = app.ContainerModel
+    local K = Enum.BankType.Character
+    -- A bank that cannot be viewed answers before any bag probing.
+    H.bankView = {}
+    local viewable, usable, bags, empty = M.BankState(K, -1)
+    eq(viewable, false)
+    eq(bags, nil)
+    eq(empty, false)
+    -- Purchased tabs become the bag list; slotless ones fall out of it.
+    H.bankView = { [K] = true }
+    H.bankUsable = { [K] = true }
+    H.bankTabs = { [K] = { 6, 7, 8 } }
+    H.bankSlots[6] = { [1] = { itemID = 1 } }
+    H.bankSlots[7] = { [1] = { itemID = 2 }, [2] = { itemID = 3 } }
+    H.bankSlots[8] = {}
+    viewable, usable, bags, empty = M.BankState(K, -1)
+    eq(viewable, true)
+    eq(usable, true)
+    eq(#bags, 2)
+    eq(bags[1], 6)
+    eq(bags[2], 7)
+    eq(empty, false)
+    -- With no tab API answer the legacy container carries the bank.
+    H.bankTabs = false
+    H.bankSlots[-1] = { [1] = { itemID = 4 } }
+    viewable, usable, bags, empty = M.BankState(K, -1)
+    eq(bags ~= nil and bags[1] or nil, -1)
+    eq(empty, false)
+    -- An answered tab list with no purchased tabs is empty, not legacy.
+    H.bankTabs = { [K] = {} }
+    viewable, usable, bags, empty = M.BankState(K, -1)
+    eq(#bags, 0)
+    eq(empty, true)
+    -- A withdrawn write permission stays visible as browse-only.
+    H.bankUsable = { [K] = false }
+    H.bankTabs = { [K] = { 6 } }
+    viewable, usable, bags, empty = M.BankState(K, -1)
+    eq(viewable, true)
+    eq(usable, false)
+    eq(#bags, 1)
+    -- Without C_Bank nothing is claimed about the bank at all.
+    local saved = rawget(_G, "C_Bank")
+    _G.C_Bank = nil
+    viewable, usable, bags, empty = M.BankState(K, -1)
+    eq(viewable, nil)
+    eq(bags, nil)
+    _G.C_Bank = saved
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: the bag window's source chips follow bank view and permission", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local C, A = Enum.BankType.Character, Enum.BankType.Account
+    H.bankTabs = { [C] = { 6 }, [A] = { 7 } }
+    H.bankSlots[6] = { [1] = { itemID = 501, link = "|Hitem:501|h[Bank item]|h" } }
+    H.bankSlots[7] = { [1] = { itemID = 502, link = "|Hitem:502|h[Warband item]|h" } }
+    SlashCmdList.LUMAUI("bags")
+    local inventory = app.components.inventory
+    -- Both banks viewable: every source is offered and the bags stay active.
+    eq(inventory.source, "bag")
+    eq(inventory.sources.bag:IsShown(), true)
+    eq(inventory.sources.character:IsShown(), true)
+    eq(inventory.sources.account:IsShown(), true)
+    eq(inventory.buttons[1].item.bag, 0)
+    -- The account bank re-collects from its own tab containers.
+    H.Click(inventory.sources.account)
+    eq(inventory.source, "account")
+    eq(inventory.buttons[1].item.bag, 7)
+    eq(inventory.buttons[1].item.blocked, nil)
+    -- A bank without tabs says so instead of a generic empty state.
+    H.bankTabs[A] = {}
+    H.Click(inventory.sources.account)
+    eq(inventory.empty:IsShown(), true)
+    eq(inventory.empty:GetText(), app.L.bankNoTabs)
+    -- Withdrawing the view keeps the selected chip labelled and refuses the
+    -- content; the bag chip is the way back and never switches silently.
+    H.bankView = {}
+    inventory:Refresh()
+    eq(inventory.sources.account:IsShown(), true)
+    eq(inventory.sources.character:IsShown(), false)
+    eq(inventory.sources.bag:IsShown(), true)
+    eq(inventory.empty:IsShown(), true)
+    eq(inventory.empty:GetText(), app.L.bankClosed)
+    H.Click(inventory.sources.bag)
+    eq(inventory.source, "bag")
+    eq(inventory.buttons[1].item.bag, 0)
+    -- No viewable bank at all: only the bags remain, no source chips.
+    eq(inventory.sources.bag:IsShown(), false)
+    eq(inventory.sources.account:IsShown(), false)
+    -- Browse-only permission: the slot is read-only and sorting is not offered.
+    H.bankView = { [A] = true }
+    H.bankTabs[A] = { 7 }
+    H.bankUsable = { [A] = false }
+    C_Container.SortBank = function() end
+    inventory:Refresh()
+    H.Click(inventory.sources.account)
+    eq(inventory.buttons[1].item.bag, 7)
+    eq(inventory.buttons[1].item.blocked, app.L.bankBlocked)
+    eq(inventory.sort:IsShown(), false)
+    local before = #H.messages
+    H.calls.pickup = nil
+    inventory.buttons[1].scripts.OnClick(inventory.buttons[1], "LeftButton")
+    eq(#H.messages, before + 1)
+    eq(H.calls.pickup, nil)
+    -- An unknown permission is read-only exactly like a refused one.
+    _G.C_Bank.CanUseBank = nil
+    inventory:Refresh()
+    eq(inventory.buttons[1].item.blocked, app.L.bankBlocked)
+    eq(inventory.sort:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: the bank footer shows deposited money and opens the ledger", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    H.warbandMoney = 12345
+    app.Store:Set("modules", "bank", true)
+    local bank = app.components.bank
+    bank:Refresh()
+    eq(bank.wallet:IsShown(), true)
+    eq(bank.wallet.text:GetText():find("12345c", 1, true) ~= nil, true)
+    H.Click(bank.wallet)
+    eq(app.WalletPanel.frame:IsShown(), true)
+    -- A balance the client will not answer stays unread instead of a zero.
+    _G.C_Bank.FetchDepositedMoney = function() error("unread") end
+    bank:Refresh()
+    local text = bank.wallet.text:GetText()
+    eq(text:find(app.L.walletTitle, 1, true) ~= nil, true)
+    eq(text:find("0c", 1, true), nil)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: a slot that changed since it was drawn refuses the click", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("bags")
+    local inventory = app.components.inventory
+    local button = inventory.buttons[1]
+    eq(button.item.itemID, 123)
+    -- The physical slot holds something else now: the painted record is stale.
+    C_Container.GetContainerItemInfo = function()
+        return { hyperlink = "|Hitem:777|h[Other]|h", itemName = "Other", itemID = 777,
+            stackCount = 2, iconFileID = 1, quality = 1, isLocked = false }
+    end
+    local before = #H.messages
+    H.calls.pickup = nil
+    button.scripts.OnClick(button, "LeftButton")
+    eq(#H.messages, before + 1)
+    eq(H.messages[#H.messages]:find(app.L.itemStale, 1, true) ~= nil, true)
+    eq(H.calls.pickup, nil)
+    eq(#app.errors, 0)
+end)
+
+test("017 phase 08: the queued split re-verifies the slot before cutting the stack", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    SlashCmdList.LUMAUI("bags")
+    local inventory = app.components.inventory
+    local button = inventory.buttons[1]  -- the stub stack of 2 in bag 0 slot 1
+    H.ctrlDown = true
+    button.scripts.OnClick(button, "LeftButton")
+    H.ctrlDown = false
+    eq(inventory.split.frame:IsShown(), true)
+    inventory.split.input:SetText("1")
+    H.Combat(true)
+    inventory.split.confirm.scripts.OnClick(inventory.split.confirm)
+    eq(app.Queue:Count(), 1)
+    eq(H.calls.split, nil)
+    -- The slot changed while the split waited for combat to end.
+    C_Container.GetContainerItemInfo = function()
+        return { hyperlink = "|Hitem:777|h[Other]|h", itemName = "Other", itemID = 777,
+            stackCount = 5, iconFileID = 1, quality = 1, isLocked = false }
+    end
+    H.Combat(false)
+    eq(app.Queue:Count(), 0)
+    eq(H.calls.split, nil)
+    local found = false
+    for _, text in ipairs(H.messages) do
+        if text:find(app.L.itemStale, 1, true) then found = true end
+    end
+    eq(found, true)
     eq(#app.errors, 0)
 end)
 

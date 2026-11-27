@@ -261,7 +261,7 @@ function Frame:CreateAnimationGroup()
     end
     return group
 end
-for _, name in ipairs({ "SetClampedToScreen", "SetMovable", "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetJustifyV", "SetStatusBarTexture", "SetOrientation", "SetValueStep", "SetObeyStepOnDrag", "SetThumbTexture", "SetAutoFocus", "SetMaxLetters", "RegisterForClicks", "SetBagItem", "SetTextInsets" }) do Frame[name] = noop end
+for _, name in ipairs({ "SetClampedToScreen", "SetMovable", "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetJustifyV", "SetStatusBarTexture", "SetOrientation", "SetValueStep", "SetObeyStepOnDrag", "SetThumbTexture", "SetAutoFocus", "SetMaxLetters", "SetMultiLine", "SetMaxBytes", "SetFontObject", "RegisterForClicks", "SetBagItem", "SetTextInsets" }) do Frame[name] = noop end
 function Frame:SetJustifyH(value) self.justifyH = value end
 function Frame:GetJustifyH() return self.justifyH or "CENTER" end
 function Frame:SetTextColor(r, g, b, a) self.textColor = { r, g, b, a } end

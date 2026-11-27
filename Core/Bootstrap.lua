@@ -54,6 +54,21 @@ function app:WriteDiagnostics()
             self:Print("")
         end
         self.Layout:Diagnose()
+        -- The two reports a reader most often needs next to the geometry: which
+        -- control draws what, and the cooldown handover state. One dump then
+        -- answers "two HUDs?" without three separate copies.
+        self:Print("")
+        local ownership = self.Ownership and self.Ownership:Lines() or {}
+        if #ownership == 0 then
+            self:Print(self.L.ownNone)
+        else
+            self:Print(self.L.ownHeader)
+            for _, line in ipairs(ownership) do self:Print("  " .. line) end
+        end
+        local cooldowns = self.components and self.components.cooldownGroups
+        if cooldowns and cooldowns.running and type(cooldowns.Diagnose) == "function" then
+            self:Call("dump/cooldowns", cooldowns.Diagnose, cooldowns)
+        end
         -- The plate inventory uses the same wording as `/luma plates`, so a
         -- dump and a chat report can be compared line by line (010 phase 06).
         local plates = self.components and self.components.nameplates
@@ -63,6 +78,27 @@ function app:WriteDiagnostics()
     end)
     store.data.diagnostics = { version = self.version, lines = lines }
     self:Print(self.L.diagnosticsSaved)
+end
+
+-- Writes one collected report into SavedVariables so it can be copied out of the
+-- file instead of the chat frame. `key` names the slot under
+-- `LumaUIDB.reports`, so several reports can be kept side by side and the newest
+-- of each replaces the old one. SavedVariables flush on /reload or logout, which
+-- the confirmation names, and a newer-schema database is never written.
+function app:WriteReport(key, callback, title)
+    local store = self.Store
+    if not store or type(store.data) ~= "table" then self:Print(self.L.notReady); return false end
+    if store.readonly then self:Print(self.L.readonly); return false end
+    if type(key) ~= "string" or key == "" then return false end
+    local lines = self:Collect(callback)
+    store.data.reports = type(store.data.reports) == "table" and store.data.reports or {}
+    store.data.reports[key] = {
+        version = self.version,
+        title = title or key,
+        lines = lines,
+    }
+    self:Print(string.format(self.L.reportSaved, key))
+    return true
 end
 
 function app:Report(context, message)

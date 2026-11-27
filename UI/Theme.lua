@@ -267,7 +267,9 @@ end
 
 function Theme:Text(parent, size, muted)
     local text = parent:CreateFontString(nil, "OVERLAY")
-    local font = GameFontNormal:GetFont()
+    -- One resolved face for every string: GameFontNormal's face is only the
+    -- last-resort fallback inside Type:Face().
+    local font = app.Type and app.Type:Face() or GameFontNormal:GetFont()
     text:SetFont(font, size or 13, "")
     local color = self.colors[muted and "muted" or "text"]
     text:SetTextColor(color[1], color[2], color[3])

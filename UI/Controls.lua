@@ -294,6 +294,62 @@ function Controls:Tab(parent, text, width, callback, options)
     return button
 end
 
+-- Dropdown: one button showing the current choice, one popup list of the
+-- others. Used where a page has more objects than a tab row can hold. The popup
+-- belongs to the button, closes on a pick, on Escape-style `Close`, and when its
+-- owner hides, so it never outlives the page.
+function Controls:Dropdown(parent, width, onSelect, options)
+    options = options or {}
+    local drop
+    drop = self:Button(parent, "", width or 220, function() drop:Toggle() end, options)
+    drop.text:ClearAllPoints()
+    drop.text:SetPoint("LEFT", 12, 0)
+    drop.text:SetPoint("RIGHT", -24, 0)
+    local arrow = app.Theme:Text(drop, 11, true)
+    arrow:SetPoint("RIGHT", -10, 0)
+    arrow:SetText("v")
+    local popup = CreateFrame("Frame", nil, drop, "BackdropTemplate")
+    popup:SetFrameStrata("FULLSCREEN_DIALOG")
+    popup:SetPoint("TOPLEFT", drop, "BOTTOMLEFT", 0, -2)
+    popup:EnableMouse(true)
+    app.Surface:Plate(popup, "card")
+    popup:Hide()
+    drop.popup, drop.rows, drop.items = popup, {}, {}
+    function drop:Close() popup:Hide() end
+    function drop:Toggle()
+        if popup:IsShown() then popup:Hide() else popup:Show() end
+    end
+    -- items: { { id =, label = }, ... }; selected: the id shown on the button.
+    function drop:SetItems(items, selected)
+        self.items, self.selected = items, selected
+        local shownLabel
+        for index, item in ipairs(items) do
+            local row = self.rows[index]
+            if not row then
+                row = Controls:Button(popup, "", (width or 220) - 8, function(button)
+                    popup:Hide()
+                    if onSelect and button.itemID ~= nil then onSelect(button.itemID) end
+                end, { flat = true, height = 26 })
+                row.text:ClearAllPoints()
+                row.text:SetPoint("LEFT", 10, 0)
+                self.rows[index] = row
+            end
+            row.itemID = item.id
+            row.text:SetText(item.label)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 4, -4 - (index - 1) * 26)
+            row:SetSelected(item.id == selected)
+            row:Show()
+            if item.id == selected then shownLabel = item.label end
+        end
+        for index = #items + 1, #self.rows do self.rows[index]:Hide() end
+        popup:SetSize((width or 220), #items * 26 + 8)
+        self.text:SetText(shownLabel or "")
+    end
+    drop:SetScript("OnHide", function() popup:Hide() end)
+    return drop
+end
+
 -- Switch row: label left, a real track and thumb on the right, plus the old
 -- value and runtime-status fields the settings page still reads.
 function Controls:Toggle(parent, text, y, getter, setter, options)
@@ -382,7 +438,7 @@ function Controls:Input(parent, width, options)
     input:SetSize(width or 200, options.height or 28)
     input:SetAutoFocus(false)
     input:SetMaxLetters(options.maxLetters or 120)
-    input:SetFont(GameFontNormal:GetFont(), options.size or 12, "")
+    input:SetFont(app.Type and app.Type:Face() or GameFontNormal:GetFont(), options.size or 12, "")
     if type(input.SetTextInsets) == "function" then input:SetTextInsets(8, 8, 0, 0) end
     input.state = newState()
     input.ring = newRing(input)
@@ -465,7 +521,7 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     value:SetJustifyH("RIGHT")
     label:SetPoint("TOPRIGHT", value, "TOPLEFT", -8, 0)
     label:SetWordWrap(false)
-    local slider = CreateFrame("Slider", nil, row, "BackdropTemplate")
+    local slider = CreateFrame("Slider", nil, row)
     slider:SetPoint("TOPLEFT", 0, -30)
     slider:SetSize(width, 8)
     slider:SetOrientation("HORIZONTAL")
@@ -473,12 +529,64 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     slider:SetValueStep(step)
     slider:SetObeyStepOnDrag(true)
     slider:EnableMouseWheel(true)
-    app.Theme:PaintSurface(slider, "embedded")
+    -- Prism-style rail: a dark capsule track, a thin accent fill and a round
+    -- thumb that hugs the value. The native thumb texture is kept but made
+    -- invisible so hit testing and the client's own drag maths stay untouched.
+    slider.track = slider:CreateTexture(nil, "ARTWORK")
+    slider.track:SetColorTexture(1, 1, 1, 1)
+    slider.track:SetHeight(4)
+    slider.track:SetPoint("LEFT", slider, "LEFT", 8, 0)
+    slider.track:SetPoint("RIGHT", slider, "RIGHT", -8, 0)
+    slider.fill = slider:CreateTexture(nil, "ARTWORK", nil, 1)
+    slider.fill:SetColorTexture(1, 1, 1, 1)
+    slider.fill:SetHeight(4)
+    slider.fill:SetPoint("LEFT", slider.track, "LEFT", 0, 0)
     local thumb = slider:CreateTexture(nil, "OVERLAY")
-    thumb:SetSize(12, 20)
-    local color = accent()
-    thumb:SetColorTexture(color[1], color[2], color[3])
+    thumb:SetSize(14, 14)
+    thumb:SetColorTexture(1, 1, 1, 1)
+    -- A round thumb from the client's own portrait mask when the widget exposes
+    -- masks; a plain white square otherwise, so a build without them keeps a
+    -- working control.
+    local function round(region)
+        if type(slider.CreateMaskTexture) ~= "function" then return end
+        local ok, mask = pcall(slider.CreateMaskTexture, slider)
+        if not ok or not mask or not region.AddMaskTexture then return end
+        mask:SetAllPoints(region)
+        mask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask",
+            "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+        region:AddMaskTexture(mask)
+    end
+    round(thumb)
     slider:SetThumbTexture(thumb)
+    local thumbGlow = slider:CreateTexture(nil, "OVERLAY", nil, 2)
+    thumbGlow:SetSize(22, 22)
+    thumbGlow:SetColorTexture(1, 1, 1, 1)
+    round(thumbGlow)
+    local hover, dragging = false, false
+    -- One paint for track, fill, thumb and glow, driven by the slider's own
+    -- value so the fill always matches the handle the client drags.
+    local function paint()
+        local colour = accent()
+        local floor = app.Theme.colors.raised
+        slider.track:SetColorTexture(floor[1] * 0.55, floor[2] * 0.55, floor[3] * 0.55, 1)
+        local rangeLow, rangeHigh = low, high
+        if type(slider.GetMinMaxValues) == "function" then rangeLow, rangeHigh = slider:GetMinMaxValues() end
+        local current = type(slider.GetValue) == "function" and slider:GetValue() or rangeLow
+        local fraction = (rangeHigh and rangeHigh > rangeLow)
+            and math.max(0, math.min(1, (current - rangeLow) / (rangeHigh - rangeLow))) or 0
+        local span = (slider:GetWidth() or width) - 16
+        local length = math.max(0, span * fraction)
+        slider.fill:SetWidth(math.max(0.01, length))
+        slider.fill:ClearAllPoints()
+        slider.fill:SetPoint("LEFT", slider.track, "LEFT", 0, 0)
+        local enabled = not row.disabled
+        local brightness = enabled and 1 or 0.4
+        slider.fill:SetColorTexture(colour[1] * brightness, colour[2] * brightness, colour[3] * brightness, 1)
+        thumb:SetColorTexture(0.97 * brightness, 0.96 * brightness, brightness, 1)
+        thumbGlow:SetColorTexture(colour[1], colour[2], colour[3],
+            enabled and ((hover or dragging) and 0.22 or 0.08) or 0.03)
+    end
+    slider.Paint = paint
     local pending
     -- Percent is only the default because most ranges here are opacities. A
     -- count or a pixel size must not read "2600%": `options.format` receives the
@@ -502,6 +610,7 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     slider:SetScript("OnValueChanged", function(self, number)
         local snapped = snap(number)
         format(snapped)
+        if paint then paint() end
         if row.updating then return end
         pending = snapped
         if not self.dragging then commit() end
@@ -509,28 +618,32 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     slider:SetScript("OnMouseDown", function(self)
         if row.disabled then return end
         self.dragging = true
+        dragging = true
         Controls:ClearFocus()
+        paint()
     end)
     slider:SetScript("OnMouseUp", function(self)
         self.dragging = false
+        dragging = false
+        paint()
         commit()
     end)
+    slider:SetScript("OnEnter", function() hover = true; paint() end)
+    slider:SetScript("OnLeave", function() hover = false; if not dragging then paint() end end)
+    slider:SetScript("OnSizeChanged", function() paint() end)
     slider:SetScript("OnMouseWheel", function(self, delta)
         if row.disabled then return end
         -- One wheel step is a coarse change: SetValue fires OnValueChanged,
         -- which commits exactly once because the slider is not being dragged.
         self:SetValue(snap((self:GetValue() or getter()) + delta * step))
     end)
-    function slider:Refresh()
-        local c = accent()
-        thumb:SetColorTexture(c[1], c[2], c[3])
-    end
+    function slider:Refresh() paint() end
     function row:Update()
         row.updating = true
         local current = getter()
         slider:SetValue(current)
         format(current)
-        slider:Refresh()
+        paint()
         row.updating = false
     end
     function row:SetEnabled(enabled)
@@ -538,9 +651,11 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
         if row.disabled then
             pending = nil
             slider.dragging = false
+            dragging = false
         end
         if type(slider.EnableMouse) == "function" then slider:EnableMouse(not row.disabled) end
         slider:SetAlpha(row.disabled and 0.55 or 1)
+        paint()
     end
     function row:IsEnabled()
         return row.disabled ~= true
@@ -616,6 +731,20 @@ function Controls:Scroll(parent, width, height)
         updating = false
         self:SetVerticalScroll(target)
     end
+    -- The header above a module page changes height with the object row, so the
+    -- viewport and its rail are resized together.
+    function scroll:SetViewHeight(height)
+        self:SetHeight(height)
+        bar:SetHeight(height)
+        self:UpdateRange()
+    end
+    function scroll:ScrollTo(value)
+        value = math.max(self.rangeMin or 0, math.min(self.rangeMax or 0, value or 0))
+        updating = true
+        bar:SetValue(value)
+        updating = false
+        self:SetVerticalScroll(value)
+    end
     function scroll:UpdateRange()
         local child = self:GetScrollChild()
         local content = child and child:GetHeight() or 0
@@ -629,8 +758,17 @@ function Controls:Scroll(parent, width, height)
         bar:SetValue(target)
         updating = false
         if current ~= target then self:SetVerticalScroll(target) end
-        local ratio = content > 0 and math.min(1, view / content) or 1
-        thumb:SetHeight(math.min(view, math.max(16, math.floor((view - 2) * ratio))))
+        -- A page that fits has nothing to scroll: no rail, no hit area, and the
+        -- content sits at its top instead of a full-height thumb.
+        local scrollable = maxScroll > 0
+        self.scrollable = scrollable
+        bar:SetShown(scrollable)
+        bar:EnableMouse(scrollable)
+        thumb:SetShown(scrollable)
+        if scrollable then
+            local ratio = content > 0 and math.min(1, view / content) or 1
+            thumb:SetHeight(math.min(view, math.max(16, math.floor((view - 2) * ratio))))
+        end
     end
     return scroll
 end

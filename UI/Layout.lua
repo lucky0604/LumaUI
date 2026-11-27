@@ -547,6 +547,31 @@ function Layout:SetActionAreaBottom(bottom)
     return true
 end
 
+-- The shared main skill line. Pearl keeps the first skill row's top edge at
+-- ~69% of the viewport height from the top (0.31 from the bottom), independent
+-- of how many action bars stand below. The conversion from the screen to
+-- UIParent bottom coordinates happens here, once; every consumer reads it.
+Layout.mainLineRatio = 0.31
+Layout.mainLineFallbackRow = 26
+function Layout:MainLine()
+    local _, height = uiSize()
+    return height * self.mainLineRatio
+end
+
+-- The player cast bar's centre line: ~77% of the viewport height from the top.
+Layout.castLineRatio = 0.23
+function Layout:CastLine()
+    local _, height = uiSize()
+    return height * self.castLineRatio
+end
+
+-- Bottom edge of the first skill row for a given row height.
+function Layout:MainLineBottom(rowHeight)
+    rowHeight = plainNumber(rowHeight)
+    if not rowHeight or rowHeight <= 0 then rowHeight = self.mainLineFallbackRow end
+    return math.max(0, self:MainLine() - rowHeight)
+end
+
 -- One measurement of the managed action area. `action.rows` follows the actual
 -- stack (present bars only); when no bar can be measured the three fallback rows
 -- are explicit estimates. `content.width` is the visible cooldown block the unit
@@ -623,6 +648,17 @@ function Layout:Central()
         anchor = { x = 0 },
         estimated = estimated,
     }
+    do
+        -- The skill block does not follow the bars: its first row hangs from the
+        -- main line. The last applied first row gives the height; before any
+        -- row exists a typical icon row is used.
+        local applied = self.appliedRows
+        local first = applied and applied.rows and applied.rows[1]
+        local lineBottom = self:MainLineBottom(first and first.height)
+        central.cooldown.bottom = lineBottom
+        central.cooldown.top = lineBottom
+        central.anchor.line = self:MainLine()
+    end
     central.action.bottomY = bottom - screenHeight / 2
     central.action.topY = top - screenHeight / 2
     central.cooldown.bottomY = central.cooldown.bottom - screenHeight / 2
@@ -704,6 +740,17 @@ function Layout:CentralRows(entries)
             }
             y = y + height + self.cooldownGap
         end
+    end
+    -- Hang the whole stack from the main line: the first row's top edge sits on
+    -- it whatever its height, and later rows keep their relative offsets.
+    if rows[1] then
+        local delta = self:MainLine() - rows[1].top
+        if math.abs(delta) > 0.001 then
+            for _, row in ipairs(rows) do
+                row.bottom, row.top, row.center = row.bottom + delta, row.top + delta, row.center + delta
+            end
+        end
+        central.cooldown.bottom = rows[1].bottom
     end
     central.rows = rows
     central.cooldown.top = #rows > 0 and rows[#rows].top or central.cooldown.bottom
@@ -815,6 +862,64 @@ function Layout:CentralOffset(id, side)
     end
     local boundary = central.content.width / 2 + (central.content.gap or self.centralGap)
     return (side or 1) * (boundary / scale + width / 2)
+end
+
+-- 018 Step 3.2: one layout plan per pass. Inputs: the readable viewport, the
+-- measured own/main rows and the action area. Output: the actual, reserved and
+-- unknown rectangles by id, the main line and the two side boundaries. Every
+-- consumer (resource rail, unit pair, cast bar, preset preview, report) reads
+-- this instead of deriving its own copy, so a single measurement decides both
+-- the width of the resource rail and the distance between the health bars.
+--
+-- A group whose frame is hidden, detached from the axis or empty is marked
+-- `unknown` or `reserved` rather than widening the centre: a hidden parent must
+-- never stretch the block it is not drawn in.
+function Layout:Plan()
+    local central = self:Central()
+    local entries = {}
+    for id, entry in pairs(self.entries) do
+        if entry.frame and not entry.member then
+            local width, height = frameSize(entry.frame)
+            local shown
+            if type(entry.frame.IsShown) == "function" then
+                local ok, value = pcall(entry.frame.IsShown, entry.frame)
+                if ok and not app.Capabilities.IsSecret(value) then shown = value == true end
+            end
+            entries[id] = {
+                frame = entry.frame,
+                width = width, height = height,
+                shown = shown,
+                detached = entry.detached == true or nil,
+                hidden = entry.hidden == true or nil,
+                -- Unknown outranks reserved: a rectangle nobody can read cannot
+                -- be compared against the mockup at all.
+                state = (width and height) and (shown == true and "actual" or "reserved") or "unknown",
+            }
+        end
+    end
+    local plan = {
+        screen = central.screen,
+        centre = { axis = 0, main = central.mainRow, row = central.rows and central.rows[1] },
+        content = central.content,
+        units = central.units,
+        action = central.action,
+        cooldown = central.cooldown,
+        entries = entries,
+        estimated = central.estimated == true,
+    }
+    return plan
+end
+
+-- The resource rail may not be wider than the block the player actually sees:
+-- an empty action row or a hidden viewer must not carry it. Falls back to the
+-- measured block and then to the fallback ratio, in that order.
+function Layout:ResourceWidth()
+    local plan = self:Plan()
+    local width = plan.content and plan.content.width or 0
+    if not width or width <= 0 then width = self:ContentWidth() end
+    local scale = self:Scale("playerResource")
+    if scale and scale > 0 then width = width / scale end
+    return math.max(60, width)
 end
 
 function Layout:StopDragTicker()
@@ -1148,6 +1253,10 @@ Layout.presets = {
         entries = {
             topInfo = { 0.00, 0.435 },
             bottomBar = { 0.00, -0.5 },
+            -- The three managed bars keep the stack the action-bar component
+            -- gives them (centred between the bottom strip and the cast line):
+            -- the preset does not place them, so a bar the player never dragged
+            -- stays in the stack instead of falling back to the client's corner.
             party = { -0.355, -0.20 },
             -- Right column reads top to bottom: map, objectives, meter reserve.
             questList = { 0.345, 0.175 },
@@ -1669,16 +1778,19 @@ local VIEWER_IDS = {
     BuffBarCooldownViewer = "buffBar", BuffIconCooldownViewer = "buffIcon",
 }
 local HUD_SAMPLES = {
-    { key = "viewer", owner = "cooldownViewer", names = {
+    -- `plan` names the layout entry that decides this sample's rectangle, so the
+    -- report can print "actual / reserved / unknown" from the same plan the
+    -- consumers read instead of a second measurement.
+    { key = "viewer", owner = "cooldownViewer", plan = "cdEssential", names = {
         "EssentialCooldownViewer", "UtilityCooldownViewer",
         "BuffBarCooldownViewer", "BuffIconCooldownViewer" } },
-    { key = "bar", owner = "actionBars", names = {
+    { key = "bar", owner = "actionBars", plan = "actionBar1", names = {
         "MainActionBar", "MultiBarBottomLeft", "MultiBarBottomRight" } },
-    { key = "map", owner = "minimap", names = { "Minimap", "MinimapCluster" } },
-    { key = "tracker", owner = "questTracker", names = { "ObjectiveTrackerFrame" } },
-    { key = "chat", owner = "chat", names = { "ChatFrame1" } },
-    { key = "chatPlate", owner = "chat", names = { "LumaUIChatFrame1Plate" } },
-    { key = "cast", owner = "native", names = { "PlayerCastingBarFrame" } },
+    { key = "map", owner = "minimap", plan = "minimap", names = { "Minimap", "MinimapCluster" } },
+    { key = "tracker", owner = "questTracker", plan = "questTracker", names = { "ObjectiveTrackerFrame" } },
+    { key = "chat", owner = "chat", plan = "chat", names = { "ChatFrame1" } },
+    { key = "chatPlate", owner = "chat", plan = "chat", names = { "LumaUIChatFrame1Plate" } },
+    { key = "cast", owner = "native", plan = "playerCast", names = { "PlayerCastingBarFrame" } },
     -- The edit-mode cast outline is reserved space, not a drawn frame: the
     -- report says so instead of counting it as a hidden bar.
     { key = "castArea", owner = "layout", reserved = true,
@@ -1687,14 +1799,14 @@ local HUD_SAMPLES = {
     -- is not enabled has no frame, which the report prints as a missing object
     -- instead of guessing a position. Two groups sharing one rectangle is the
     -- 012 defect this line makes visible.
-    { key = "ownGroup", owner = "cooldownGroups", names = {
+    { key = "ownGroup", owner = "cooldownGroups", plan = "cdGroup_essential", names = {
         "LumaUICooldownOwn_essential", "LumaUICooldownOwn_utility", "LumaUICooldownOwn_buffs" } },
-    { key = "ownCast", owner = "playerCast", names = { "LumaUIPlayerCast" } },
+    { key = "ownCast", owner = "playerCast", plan = "playerCast", names = { "LumaUIPlayerCast" } },
     { key = "extra", owner = "native", names = { "ExtraActionButton1", "PersonalResourceDisplayFrame" } },
-    { key = "resource", owner = "playerResource", names = { "LumaUIPlayerResource" } },
-    { key = "unit", owner = "unitFrames", names = { "LumaUIUnit_player", "LumaUIUnit_target" } },
-    { key = "questList", owner = "questList", names = { "LumaUIQuestList" } },
-    { key = "strip", owner = "dataStrip", names = { "LumaUIDataStrip" } },
+    { key = "resource", owner = "playerResource", plan = "playerResource", names = { "LumaUIPlayerResource" } },
+    { key = "unit", owner = "unitFrames", plan = "unit_player", names = { "LumaUIUnit_player", "LumaUIUnit_target" } },
+    { key = "questList", owner = "questList", plan = "questList", names = { "LumaUIQuestList" } },
+    { key = "strip", owner = "dataStrip", plan = "bottomBar", names = { "LumaUIDataStrip" } },
 }
 
 -- GetRect reports a frame in its own scaled units, so two frames only compare
@@ -1772,6 +1884,7 @@ function Layout:Diagnose()
     app:Print(string.format("%s: screen=%dx%d scale=%.2f",
         app.L.hudHeader, screenWidth, screenHeight, scale))
     local central = self:Central()
+    local plan = self:Plan()
     local estimated = central.action.estimated and app.L.hudEstimate or app.L.hudMeasured
     app:Print(string.format("  action: bottom=%.0f top=%.0f width=%.0f rows=%d %s=%s owner=actionBars",
         central.action.bottom, central.action.top, central.action.width, #central.action.rows,
@@ -1790,6 +1903,13 @@ function Layout:Diagnose()
     app:Print(string.format("  cooldown: bottom=%.0f top=%s rows=%d main=%s slots=%s",
         central.cooldown.bottom, topText, #rows, main and tostring(main.id or "row1") or "none",
         (look and look.perIconSlots == true) and "on" or "off"))
+    -- The planned line and what was actually applied, side by side: "planned"
+    -- is the 0.31 line every consumer shares, "applied" the measured first row
+    -- top (unknown, not 0, when no row has been applied).
+    local firstRow = rows[1]
+    app:Print(string.format("  mainLine: planned=%.0f (%.0f%% from top) applied=%s",
+        self:MainLine(), (1 - self.mainLineRatio) * 100,
+        firstRow and firstRow.top and string.format("%.0f", firstRow.top) or "?"))
     -- The rows LumaUI actually planned, bottom to top. Two runs (login and an
     -- instance) can be compared line by line instead of by screenshot: a row that
     -- is present in one and absent in the other names the viewer responsible.
@@ -1804,6 +1924,13 @@ function Layout:Diagnose()
             if object(frame) then
                 local line = string.format("  %s %s: shown=%s vis=%s rect=%s owner=%s",
                     sample.key, name, shownText(frame), visibleText(frame), rectText(frame), sample.owner)
+                -- 018 Step 3.4: planned vs actual vs unknown. A reader has to be
+                -- able to tell "the client drew this", "I estimated it" and "I
+                -- could not read it" apart without comparing screenshots.
+                local planEntry = plan and plan.entries[sample.plan or sample.key]
+                if planEntry then
+                    line = string.format("%s plan=%s", line, planEntry.state)
+                end
                 local alpha = effectiveAlpha(frame)
                 if alpha ~= nil and alpha < 0.995 then
                     line = string.format("%s alpha=%.2f", line, alpha)

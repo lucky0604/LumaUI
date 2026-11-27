@@ -554,6 +554,17 @@ end
 local function effectiveOrder(group, entries)
     if group and group.auto then
         local list, status = groupList(group, entries)
+        -- An unreadable client list must not blank the block: the stored order is
+        -- the last thing the player saw, and drawing it keeps one display on
+        -- screen instead of leaving the native viewer in place of a group that
+        -- claims to own the centre. The status keeps reporting why.
+        if #list == 0 and status and status.status == "unreadable" then
+            local fallback = group.order or {}
+            if #fallback > 0 then
+                status.fallback = "stored"
+                return fallback, status
+            end
+        end
         return list, status
     end
     if not group then return {}, nil end
@@ -771,7 +782,19 @@ local function anchor(self, container)
     -- 1. Layout:CentralOffset and the utility corner convert the same way.
     local scale = app.Layout and app.Layout.Scale and app.Layout:Scale(layoutID(container.id)) or 1
     if type(scale) ~= "number" or scale <= 0 then scale = 1 end
-    local bottom = (central.cooldown.bottom - central.screen.height / 2) / scale
+    -- The first visible group's top edge sits on the shared main line; the
+    -- groups above it stack on top, so the line stays put when a group is
+    -- empty or resizes.
+    local firstHeight
+    for _, id in ipairs(Model.GROUP_IDS) do
+        if id == container.id then firstHeight = firstHeight or height break end
+        local before = self.containers and self.containers[id]
+        if before and (before.visibleHeight or 0) > 0 then
+            firstHeight = firstHeight or before.visibleHeight
+        end
+    end
+    local lineBottom = app.Layout:MainLineBottom(firstHeight)
+    local bottom = (lineBottom - central.screen.height / 2) / scale
     -- Groups are stacked in their fixed order: each one sits above the visible
     -- groups before it, so two non-empty groups never share a rectangle.
     for _, id in ipairs(Model.GROUP_IDS) do
@@ -1062,7 +1085,14 @@ function component:ApplyViewerHidden(id, frame)
         return false, "unreadable"
     end
     if shown == true then
-        local okCall = pcall(frame.Hide, frame)
+        -- A Cooldown Manager viewer is an Edit Mode system: its `Hide` is
+        -- `EditModeSystemMixin:HideOverride`, which re-derives visibility from
+        -- the client's own setting and can put the frame straight back on
+        -- screen (`hide-refused` in the field report). The client hides such a
+        -- frame externally with the recorded base method, so that is tried first
+        -- and the plain `Hide` remains the fallback for a build without it.
+        local hide = type(frame.HideBase) == "function" and frame.HideBase or frame.Hide
+        local okCall = pcall(hide, frame)
         local okRead, after = pcall(frame.IsShown, frame)
         if not okCall or not okRead or after ~= false then
             self.hidden[id] = nil
@@ -1106,17 +1136,44 @@ function component:SuppressNativeViewer(id, active)
             self.hidden[id] = true
             return true, "absent"
         end
-        if not self.viewerHooks[id] and type(frame.UpdateShownState) == "function"
-            and type(hooksecurefunc) == "function" then
+        if not self.viewerHooks[id] then
             self.viewerHooks[id] = true
-            pcall(hooksecurefunc, frame, "UpdateShownState", function()
+            -- `UpdateShownState` returns early when the client's own answer has
+            -- not changed, so hooking it alone misses the moment the viewer is
+            -- shown again after a settings or layout change. The visibility
+            -- writers themselves are hooked instead; each hook re-checks the
+            -- suppression flag before touching anything.
+            local function rehide()
                 if not (self.suppressed and self.suppressed[id]) then return end
+                if not component.running then return end
+                if self.rehiding and self.rehiding[id] then return end
                 if viewerIsBeingEdited(frame) then return end
-                if frame:IsShown() then pcall(frame.Hide, frame) end
-                -- Re-read after the client's own decision so the ownership record
-                -- never says "hidden" while the viewer is on screen.
-                if component.running then component:ApplyViewerHidden(id, frame) end
-            end)
+                -- Re-entrancy: a hide reaches one of the hooked methods again.
+                self.rehiding = self.rehiding or {}
+                self.rehiding[id] = true
+                if frame:IsShown() then
+                    local hide = type(frame.HideBase) == "function" and frame.HideBase or frame.Hide
+                    pcall(hide, frame)
+                end
+                self.rehiding[id] = nil
+                component:ApplyViewerHidden(id, frame)
+            end
+            if type(hooksecurefunc) == "function" then
+                -- The base writers are what the client's own visibility logic
+                -- ends in. Hooking only the Edit Mode overrides (`SetShown` and
+                -- `Show`) misses every internal re-show, which is why a viewer
+                -- could come back without the hook firing.
+                for _, method in ipairs({ "SetShown", "Show", "SetShownBase", "ShowBase" }) do
+                    if type(frame[method]) == "function" then
+                        pcall(hooksecurefunc, frame, method, rehide)
+                    end
+                end
+                if type(frame.UpdateShownState) == "function" then
+                    pcall(hooksecurefunc, frame, "UpdateShownState", rehide)
+                end
+            end
+            self.viewerRehide = self.viewerRehide or {}
+            self.viewerRehide[id] = rehide
         end
         self.suppressed[id] = true
         return self:ApplyViewerHidden(id, frame)
@@ -1272,12 +1329,18 @@ function component:Render()
             local groupRecord = app.Ownership and app.Ownership:Get("cooldownGroups." .. id)
             if groupRecord then
                 local hiddenNow = self.hidden and self.hidden[viewer]
+                -- Read the state once and build both fields from it: computing
+                -- `reason` from a second lookup let a later state write decide
+                -- the reason of a viewer that was in fact hidden.
+                local reason
+                if not hiddenNow then
+                    reason = (self.suppressed and self.suppressed[viewer]) and "hide-refused" or "client-managed"
+                end
                 app.Ownership:Set("cooldownGroups.viewer." .. viewer, {
                     intent = groupRecord.intent,
                     active = hiddenNow and "owned" or "native",
                     evidence = "simulated",
-                    reason = hiddenNow and nil
-                        or ((self.suppressed and self.suppressed[viewer]) and "hide-refused" or "client-managed"),
+                    reason = reason,
                 })
             end
         end
@@ -1303,6 +1366,13 @@ end
 -- Draft editing. `SetDraft` previews one option at once; `ApplyDraft` writes
 -- every pending option in a single Store commit; `CancelDraft` restores the
 -- applied look. Combat, a profile change, read-only and disabling discard it.
+-- One group as the preview and the renderer see it: stored values with the
+-- session draft laid over them, normalised. Read-only for the caller.
+function component:EffectiveGroup(id)
+    local groups = effectiveGroups()
+    return groups and groups.groups and groups.groups[id] or nil
+end
+
 function component:HasDraft()
     return draft ~= nil
 end
@@ -1403,7 +1473,12 @@ function component:Import(id, replace)
     local ok = self:Edit(function(groups)
         local group = groups.groups and groups.groups[id]
         if not group then return false end
-        group.auto = false
+        -- Importing from the client's own cooldown manager is the "follow the
+        -- client" state, not a snapshot: keeping a manual list here is what made
+        -- a group stop following the CDM after one import. `auto` stays on, and
+        -- the stored order is only the fallback for a build whose list cannot be
+        -- read.
+        group.auto = true
         added, replaced = Model:ApplyOrder(group, order, replace)
         return added > 0 or replaced > 0
     end)
@@ -1670,6 +1745,12 @@ function component:Command(rest)
         action, argument = action or "", argument or ""
     end
     action = action:lower()
+    if action == "file" then
+        -- The report is too long to copy out of the chat frame; the same lines go
+        -- into SavedVariables, which `/luma dump` and the diagnostics page read.
+        app:WriteReport("cooldownGroups", function() self:Diagnose() end, "cooldownGroups")
+        return
+    end
     if action == "" then
         self:Diagnose()
     elseif action == "owned" then

@@ -10,24 +10,39 @@ local note, noteHeight, section, settingsControl = kit.note, kit.noteHeight, kit
 -- because it can be switched. Every component named in `components` gets one
 -- switch on its page; a test asserts that no registered component is missing.
 SettingsUI.registry = {
-    { id = "actionBars", label = "navActionBars", extras = "ActionBars",
+    -- Combat
+    { id = "actionBars", group = "combat", label = "navActionBars", extras = "ActionBars",
       components = { "actionBars", "ownedBars", "actionButtons", "actionPanel" } },
-    { id = "unitFrames", label = "navUnitFrames", components = { "unitFrames" } },
-    { id = "cooldowns", label = "navCooldowns", extras = "Cooldowns",
+    { id = "unitFrames", group = "combat", label = "navUnitFrames", extras = "UnitFrames",
+      components = { "unitFrames" } },
+    { id = "cooldowns", group = "combat", label = "navCooldowns", extras = "Cooldowns",
       components = { "cooldownGroups", "cooldownViewer" } },
-    { id = "chat", label = "navChat", extras = "Chat", components = { "chat", "chatTabs", "chatView" } },
-    { id = "groups", label = "navGroups", components = { "partyFrames", "raidFrames", "clickCast" } },
-    { id = "nameplates", label = "navNameplates", components = { "nameplates" } },
-    { id = "resources", label = "navResources", components = { "playerResource", "playerCast", "edgeAuras" } },
-    { id = "minimap", label = "navMinimap", components = { "minimap", "launcher", "gameMenu", "utilityCorner" } },
-    { id = "quests", label = "navQuests", extras = "Quests",
+    { id = "resources", group = "combat", label = "navResources", extras = "Resources",
+      components = { "playerResource", "playerCast", "edgeAuras" } },
+    { id = "groups", group = "combat", label = "navGroups", extras = "Groups", components = { "partyFrames", "raidFrames", "clickCast" } },
+    { id = "nameplates", group = "combat", label = "navNameplates", components = { "nameplates" } },
+    -- World
+    { id = "chat", group = "world", label = "navChat", extras = "Chat",
+      components = { "chat", "chatTabs", "chatView" } },
+    { id = "minimap", group = "world", label = "navMinimap", extras = "Tools",
+      components = { "minimap", "launcher", "gameMenu", "utilityCorner" } },
+    { id = "quests", group = "world", label = "navQuests", extras = "Quests",
       components = { "questTracker", "questIndicators", "questList" } },
-    { id = "containers", label = "navContainers", extras = "Containers", components = { "inventory", "bank" } },
-    { id = "windows", label = "navWindows", components = { "characterWindow", "systemWindows" } },
-    { id = "info", label = "navInfo", extras = "Info",
+    { id = "containers", group = "world", label = "navContainers", extras = "Containers",
+      components = { "inventory", "bank" } },
+    -- Windows
+    { id = "windows", group = "windows", label = "navWindows", components = { "characterWindow", "systemWindows" } },
+    { id = "info", group = "windows", label = "navInfo", extras = "Info",
       components = { "dataStrip", "experience", "topPerformance" } },
-    { id = "meter", label = "navMeter", components = { "damageMeterArea", "damageMeter", "combatText" } },
-    { id = "tooltip", label = "navTooltip", extras = "Tooltip", components = { "tooltip" } },
+    { id = "meter", group = "windows", label = "navMeter", components = { "damageMeterArea", "damageMeter", "combatText" } },
+    { id = "tooltip", group = "windows", label = "navTooltip", extras = "Tooltip", components = { "tooltip" } },
+}
+-- Navigation groups, in display order. The overview sits above them and the
+-- profiles page forms the last group on its own.
+SettingsUI.navGroups = {
+    { id = "combat", label = "navGroupCombat" },
+    { id = "world", label = "navGroupWorld" },
+    { id = "windows", label = "navGroupWindows" },
 }
 SettingsUI.moduleByID = {}
 for _, entry in ipairs(SettingsUI.registry) do SettingsUI.moduleByID[entry.id] = entry end
@@ -88,6 +103,13 @@ end
 
 local function profileUI() return app.Store:Profile().ui end
 
+-- Names a control so search can scroll to it: page.fields[id] is the control.
+local function field(page, id, control)
+    page.fields = page.fields or {}
+    page.fields[id] = control
+    return control
+end
+
 local function simpleToggle(body, text, getter, setter)
     return Controls:Toggle(body, text, 0, getter, setter, { width = 462 })
 end
@@ -106,7 +128,23 @@ function Objects.actionBars()
     for _, bar in ipairs(app.BarModel:NativeFixed()) do
         list[#list + 1] = { id = bar.key, label = string.format(L.actionBarLabel, bar.display), bar = bar }
     end
+    -- Contextual bars are objects too, so each has its own entry; they only
+    -- explain where the client places them (no capacity or size controls).
+    for _, bar in ipairs(app.BarModel.native) do
+        if bar.kind ~= "main" and bar.kind ~= "fixed" then
+            list[#list + 1] = { id = bar.key, label = L["actionBarContext_" .. bar.kind] or bar.key, bar = bar }
+        end
+    end
     return list
+end
+
+-- Party and raid are two independent objects even while their layout entries
+-- are not built yet (the components are off by default).
+function Objects.groups()
+    return {
+        { id = "party", label = L.partyGroup },
+        { id = "raidFrames", label = L.raidFrames },
+    }
 end
 
 function Objects.unitFrames()
@@ -175,8 +213,18 @@ end
 
 function SettingsUI:SelectObject(moduleID, id)
     self.moduleObject = self.moduleObject or {}
+    local page = self.pages[moduleID]
+    local previous = self:SelectedObject(moduleID)
+    if page and page.scroll and page.scrollMemory and previous ~= id then
+        -- Each object keeps its own reading position; the first visit starts at
+        -- the top.
+        if previous ~= nil then page.scrollMemory[previous] = page.scroll:GetVerticalScroll() or 0 end
+    end
     self.moduleObject[moduleID] = id
     self:Update()
+    if page and page.scroll and page.scrollMemory and previous ~= id then
+        page.scroll:ScrollTo(page.scrollMemory[id] or 0)
+    end
 end
 
 -- The real bar entry behind the selected action-bar object (nil when the
@@ -218,7 +266,10 @@ function Extras.ActionBars(page, body)
         self:Result(app.Store:Set("ui", "actionBarLayout", current))
         self:Update()
     end
-    local function countLabel(number) return string.format("%d", math.floor(number + 0.5)) end
+    local function countLabel(number)
+        if number < 0.5 then return L.followClient end
+        return string.format("%d", math.floor(number + 0.5))
+    end
     local controls = {
         -- 0 is "the client's own value": the control is a real choice, not a
         -- reset that silently writes 12.
@@ -235,7 +286,7 @@ function Extras.ActionBars(page, body)
             function() return layoutKey("gap") or 4 end,
             function(value) stage("gap", value) end, { width = 462, format = countLabel }),
     }
-    for _, control in pairs(controls) do settingsControl(page, control) end
+    for key, control in pairs(controls) do field(page, key, settingsControl(page, control)) end
     local scale = Controls:Range(body, L.actionBarScaleSelected, 0, 0.5, 1.5, 0.05,
         function()
             local index = barID()
@@ -247,7 +298,7 @@ function Extras.ActionBars(page, body)
             current[index] = value
             self:Result(app.Store:Set("ui", "actionBarScales", current))
         end, { width = 462 })
-    settingsControl(page, scale)
+    field(page, "scale", settingsControl(page, scale))
     local visibility = {}
     for index, mode in ipairs({ { "always", L.visibilityAlways }, { "combat", L.visibilityCombat },
         { "outofcombat", L.visibilityOutOfCombat }, { "hidden", L.visibilityHidden } }) do
@@ -257,15 +308,19 @@ function Extras.ActionBars(page, body)
         end)
         visibility[index].mode = key
         settingsControl(page, visibility[index])
+        if index == 1 then field(page, "visible", visibility[index]) end
     end
     local hint = note(body, L.actionBarLayoutHint, 0, 462)
+    local limits = note(body, L.actionBarMainHint, 0, 462)
     local reset = Controls:Button(body, L.actionBarReset, 200, function()
         local slot = barID()
-        local current = app.Store:Clone(profileUI().actionBarLayout or {})
+        -- Dot call: `Store:Clone(x)` clones the Store itself, so this reset used
+        -- to drop every other bar's saved override instead of only this slot.
+        local current = app.Store.Clone(profileUI().actionBarLayout or {})
         current[slot] = nil
         self:Result(app.Store:Set("ui", "actionBarLayout", current))
         if profileUI().actionBarScales[slot] then
-            local scales = app.Store:Clone(profileUI().actionBarScales)
+            local scales = app.Store.Clone(profileUI().actionBarScales)
             scales[slot] = 1
             self:Result(app.Store:Set("ui", "actionBarScales", scales))
         end
@@ -285,20 +340,26 @@ function Extras.ActionBars(page, body)
     page.barScale = scale
     page.barVisibility = visibility
     page.barReset = reset
+    page.barLimits = limits
+    page.clientOwned = note(body, L.actionBarClientOwnedHint, 0, 462)
     return function(top)
         local readonly = app.Store.readonly
         local entry = bar()
         local managed = entry and entry.manageable
         scope:ClearAllPoints(); scope:SetPoint("TOPLEFT", 0, top)
         top = top - noteHeight(scope, 28)
+        -- Only fixed bars 2–8 are rearranged by the safe adapter. Bar 1 and the
+        -- contextual bars (pet, stance, extra, zone) ignore these fields at
+        -- runtime, so offering them would be a control that does nothing.
+        local fixed = entry ~= nil and entry.kind == "fixed"
         for _, key in ipairs({ "buttons", "rows", "size", "gap" }) do
             local control = controls[key]
-            -- Bars 4–8 cannot be moved by LumaUI yet; capacity, rows, size and
-            -- spacing are still real because they only rearrange the client's
-            -- own buttons.
-            control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
-            control:Update(); control:SetEnabled(not readonly and entry ~= nil)
-            top = top - 62
+            control:SetShown(fixed)
+            if fixed then
+                control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
+                control:Update(); control:SetEnabled(not readonly)
+                top = top - 62
+            end
         end
         scale:SetShown(managed == true)
         if managed then
@@ -306,20 +367,44 @@ function Extras.ActionBars(page, body)
             scale:Update(); scale:SetEnabled(not readonly)
             top = top - 62
         end
+        limits:SetShown(not fixed)
+        if not fixed then
+            limits:SetText(entry and entry.kind == "main" and L.actionBarMainHint or L.actionBarContextHint)
+            limits:ClearAllPoints(); limits:SetPoint("TOPLEFT", 0, top)
+            top = top - noteHeight(limits, 34)
+        end
         local current = layoutKey("visible") or "always"
         for index, button in ipairs(visibility) do
+            button:SetShown(fixed)
             button:ClearAllPoints()
             button:SetPoint("TOPLEFT", ((index - 1) % 2) * 116, top - math.floor((index - 1) / 2) * 36)
             button:SetSelected(button.mode == current)
             button:SetEnabled(not readonly and entry ~= nil)
         end
-        top = top - 76
-        hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
-        top = top - noteHeight(hint, 34)
+        if fixed then top = top - 76 end
+        hint:SetShown(fixed)
+        if fixed then
+            hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
+            top = top - noteHeight(hint, 34)
+        end
+        reset:SetShown(fixed or managed == true)
         reset:ClearAllPoints(); reset:SetPoint("TOPLEFT", 0, top)
         reset:SetEnabled(not readonly)
         editMode:ClearAllPoints(); editMode:SetPoint("TOPLEFT", 208, top)
         editMode:SetEnabled(not readonly)
+        -- Bars 4–8 are the client's: its own visible setting decides whether one
+        -- is on screen, so the page says where to turn it off instead of
+        -- offering a switch LumaUI would not honour.
+        local clientOwned = page.clientOwned
+        if clientOwned then
+            local owned = entry ~= nil and entry.manageable ~= true
+            clientOwned:SetShown(owned)
+            if owned then
+                clientOwned:ClearAllPoints()
+                clientOwned:SetPoint("TOPLEFT", 0, top - 34)
+                top = top - noteHeight(clientOwned, 40) - 34
+            end
+        end
         return top - 42
     end
 end
@@ -329,7 +414,7 @@ function Extras.Chat(page, body)
     local function get(key) return app.Store:Profile().appearance[key] end
     local function set(key, value) self:Result(app.Store:Set("appearance", key, value)) end
     local controls = {
-        settingsControl(page, simpleToggle(body, L.chatViewTitle, function()
+        field(page, "takeover", settingsControl(page, simpleToggle(body, L.chatViewTitle, function()
             return app.Store:Profile().ui.chatTakeover == true
         end, function(v)
             local view = app.components and app.components.chatView
@@ -339,13 +424,13 @@ function Extras.Chat(page, body)
                 self:Result(app.Store:Set("ui", "chatTakeover", v))
             end
             self:Update()
-        end)),
-        settingsControl(page, Controls:Range(body, L.chatOpacity, 0, 0, 1, 0.05,
-            function() return get("chatOpacity") end, function(v) set("chatOpacity", v) end, { width = 462 })),
+        end))),
+        field(page, "opacity", settingsControl(page, Controls:Range(body, L.chatOpacity, 0, 0, 1, 0.05,
+            function() return get("chatOpacity") end, function(v) set("chatOpacity", v) end, { width = 462 }))),
         settingsControl(page, Controls:Range(body, L.chatActiveOpacity, 0, 0.2, 1, 0.05,
             function() return get("chatActiveOpacity") end, function(v) set("chatActiveOpacity", v) end,
             { width = 462 })),
-        settingsControl(page, Controls:Range(body, L.chatWidthLabel, 0, 240, 600, 10,
+        field(page, "width", settingsControl(page, Controls:Range(body, L.chatWidthLabel, 0, 240, 600, 10,
             function() return profileUI().chatWidth > 0 and profileUI().chatWidth or 380 end,
             function(value)
                 -- One writer saves width and height together and applies them;
@@ -357,8 +442,8 @@ function Extras.Chat(page, body)
                 else
                     self:Result(app.Store:Set("ui", "chatWidth", math.floor(value)))
                 end
-            end, { width = 462, format = function(n) return string.format("%d", math.floor(n + 0.5)) end })),
-        settingsControl(page, Controls:Range(body, L.chatHeightLabel, 0, 100, 400, 10,
+            end, { width = 462, format = function(n) return string.format("%d", math.floor(n + 0.5)) end }))),
+        field(page, "height", settingsControl(page, Controls:Range(body, L.chatHeightLabel, 0, 100, 400, 10,
             function() return profileUI().chatHeight > 0 and profileUI().chatHeight or 140 end,
             function(value)
                 local chat = app.components and app.components.chat
@@ -368,7 +453,7 @@ function Extras.Chat(page, body)
                 else
                     self:Result(app.Store:Set("ui", "chatHeight", math.floor(value)))
                 end
-            end, { width = 462, format = function(n) return string.format("%d", math.floor(n + 0.5)) end })),
+            end, { width = 462, format = function(n) return string.format("%d", math.floor(n + 0.5)) end }))),
     }
     return function(top)
         local readonly = app.Store.readonly
@@ -383,7 +468,7 @@ end
 
 function Extras.Containers(page, body)
     local self = SettingsUI
-    local toggle = settingsControl(page, simpleToggle(body, L.containerTakeover, function()
+    local toggle = field(page, "takeover", settingsControl(page, simpleToggle(body, L.containerTakeover, function()
         return profileUI().containerTakeover == true
     end, function(v)
         -- One writer for the switch: it also enables the bank component and
@@ -396,7 +481,7 @@ function Extras.Containers(page, body)
             self:Result(app.Store:Set("ui", "containerTakeover", v))
         end
         self:Update()
-    end))
+    end)))
     local hint = note(body, L.containerTakeoverHint, 0, 462)
     page.takeoverHint = hint
     return function(top)
@@ -408,12 +493,105 @@ function Extras.Containers(page, body)
     end
 end
 
+-- Unit frames carry no size or colour setting: the module's geometry is derived
+-- from the central block. What a player can really choose is which parts of a
+-- frame are drawn, so that is what this page offers, per part, with the effect
+-- named plainly. A part turned off also releases its row height.
+function Extras.UnitFrames(page, body)
+    local self = SettingsUI
+    local function on(key) return profileUI().unitParts[key] ~= false end
+    local function set(key, value)
+        local parts = app.Store.Clone(profileUI().unitParts or {})
+        parts[key] = value and true or false
+        self:Result(app.Store:Set("ui", "unitParts", parts))
+        local component = app.components and app.components.unitFrames
+        if component and component.running and component.Refresh then component:Refresh() end
+        self:Update()
+    end
+    local controls = {
+        cast = field(page, "partsCast", settingsControl(page, simpleToggle(body,
+            L.unitPartCast, function() return on("cast") end, function(v) set("cast", v) end))),
+        auras = field(page, "partsAuras", settingsControl(page, simpleToggle(body,
+            L.unitPartAuras, function() return on("auras") end, function(v) set("auras", v) end))),
+        marks = field(page, "partsMarks", settingsControl(page, simpleToggle(body,
+            L.unitPartMarks, function() return on("marks") end, function(v) set("marks", v) end))),
+    }
+    local hint = note(body, L.unitPartsHint, 0, 462)
+    return function(top)
+        local readonly = app.Store.readonly
+        for _, key in ipairs({ "cast", "auras", "marks" }) do
+            local control = controls[key]
+            control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
+            control:Update(); control:SetEnabled(not readonly)
+            top = top - 40
+        end
+        hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
+        return top - noteHeight(hint, 40)
+    end
+end
+
+-- Native tool hosts (018 Step 2). Two independent switches: "collected" is the
+-- new screen, "follow client" leaves the Blizzard bar exactly where it is. The
+-- writer is the component, so the switch and `/luma tools` cannot disagree.
+function Extras.Tools(page, body)
+    local self = SettingsUI
+    local corner = function() return app.components and app.components.utilityCorner end
+    local function mode(key)
+        local tools = profileUI().nativeTools
+        return (tools and tools[key] or "collect") == "collect"
+    end
+    local function set(key, collected)
+        local instance = corner()
+        if instance and instance.running then
+            self:Result(instance:SetHost(key, collected and "collect" or "client"))
+        else
+            self:Result(app.Store:Set("ui", "nativeTools", (function()
+                -- Dot call: `Store:Clone(x)` would clone the Store itself.
+                local list = app.Store.Clone(profileUI().nativeTools or {})
+                list[key] = collected and "collect" or "client"
+                return list
+            end)()))
+        end
+        self:Update()
+    end
+    local bags = field(page, "bagsBar", settingsControl(page, simpleToggle(body,
+        L.nativeToolsBags, function() return mode("bagsBar") end,
+        function(value) set("bagsBar", value) end)))
+    local micro = field(page, "microMenu", settingsControl(page, simpleToggle(body,
+        L.nativeToolsMicro, function() return mode("microMenu") end,
+        function(value) set("microMenu", value) end)))
+    local noteText = note(body, L.nativeToolsNote, 0, 462)
+    local toggle = settingsControl(page, Controls:Button(body, L.nativeToolsExpand, 220, function()
+        local instance = corner()
+        if instance and instance.running then
+            self:Result(instance:ToggleNative())
+            self:Update()
+        end
+    end))
+    page.nativeTools = { bags = bags, micro = micro, toggle = toggle }
+    return function(top)
+        local readonly = app.Store.readonly
+        for _, control in ipairs({ bags, micro }) do
+            control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
+            control:Update(); control:SetEnabled(not readonly)
+            top = top - 44
+        end
+        noteText:ClearAllPoints(); noteText:SetPoint("TOPLEFT", 0, top)
+        top = top - noteHeight(noteText, 34)
+        toggle:ClearAllPoints(); toggle:SetPoint("TOPLEFT", 0, top)
+        local instance = corner()
+        toggle:SetText(instance and instance.expanded and L.nativeToolsCollapse or L.nativeToolsExpand)
+        toggle:SetEnabled(not readonly and instance ~= nil and instance.running == true)
+        return top - 44
+    end
+end
+
 function Extras.Info(page, body)
     local self = SettingsUI
-    local compact = settingsControl(page, simpleToggle(body, L.stripCompact,
+    local compact = field(page, "compact", settingsControl(page, simpleToggle(body, L.stripCompact,
         function() return profileUI().stripCompact == true end,
-        function(v) self:Result(app.Store:Set("ui", "stripCompact", v)) end))
-    local clockLabel = note(body, L.clockOwner, 0, 462)
+        function(v) self:Result(app.Store:Set("ui", "stripCompact", v)) end)))
+    local clockLabel = field(page, "clock", note(body, L.clockOwner, 0, 462))
     page.clockLabel = clockLabel
     local buttons = {}
     -- Exactly one clock: three mutually exclusive choices, none of them a
@@ -447,16 +625,112 @@ end
 -- Quests: the one layout switch 015 added without an entry. It used to be a save
 -- field only; the switch now applies both directions and a manually placed panel
 -- keeps its position.
+-- Party and raid: the raid grid has real size and spacing settings (0 follows
+-- the built-in size). Party rows are joined to the layout at build time, so the
+-- party object only shows a note.
+function Extras.Groups(page, body)
+    local self = SettingsUI
+    local function raidSelected() return self:SelectedObject("groups") == "raidFrames" end
+    local function raidValue(key)
+        local frames = profileUI().groupFrames
+        return frames and frames.raid and frames.raid[key] or 0
+    end
+    local function stage(key, value)
+        local frames = app.Store.Clone(profileUI().groupFrames or { raid = {} })
+        frames.raid = frames.raid or {}
+        frames.raid[key] = value
+        self:Result(app.Store:Set("ui", "groupFrames", frames))
+        local raid = app.components and app.components.raidFrames
+        if raid and raid.running then raid:Refresh() end
+        self:Update()
+    end
+    local function label(number)
+        if number < 0.5 then return L.followClient end
+        return string.format("%d", math.floor(number + 0.5))
+    end
+    local controls = {
+        width = Controls:Range(body, L.groupRaidWidth, 0, 0, 140, 1,
+            function() return raidValue("width") end, function(v) stage("width", v) end,
+            { width = 462, format = label }),
+        height = Controls:Range(body, L.groupRaidHeight, 0, 0, 48, 1,
+            function() return raidValue("height") end, function(v) stage("height", v) end,
+            { width = 462, format = label }),
+        gap = Controls:Range(body, L.groupRaidGap, 0, 0, 16, 1,
+            function() return raidValue("gap") end, function(v) stage("gap", v) end,
+            { width = 462, format = label }),
+    }
+    for key, control in pairs(controls) do field(page, "raid" .. key, settingsControl(page, control)) end
+    local hint = note(body, L.groupPartyHint, 0, 462)
+    page.groupControls = controls
+    page.groupHint = hint
+    return function(top)
+        local raid = raidSelected()
+        for _, key in ipairs({ "width", "height", "gap" }) do
+            local control = controls[key]
+            control:SetShown(raid)
+            if raid then
+                control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
+                control:Update(); control:SetEnabled(not app.Store.readonly)
+                top = top - 62
+            end
+        end
+        hint:SetShown(not raid)
+        if not raid then
+            hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
+            top = top - noteHeight(hint, 28)
+        end
+        return top
+    end
+end
+
+-- Class resources: the two own rows are explicit choices because they replace
+-- nothing; the client's displays stay on screen.
+function Extras.Resources(page, body)
+    local self = SettingsUI
+    local function toggleFor(key, label)
+        return field(page, key, settingsControl(page, simpleToggle(body, label,
+            function() return profileUI()[key == "runes" and "resourceRunes" or "resourceFragments"] == "owned" end,
+            function(value)
+                local setting = key == "runes" and "resourceRunes" or "resourceFragments"
+                self:Result(app.Store:Set("ui", setting, value and "owned" or "native"))
+                local resource = app.components and app.components.playerResource
+                if resource and resource.running then resource:Refresh() end
+                self:Update()
+            end)))
+    end
+    local runes = toggleFor("runes", L.resourceRunesToggle)
+    local fragments = toggleFor("fragments", L.resourceFragmentsToggle)
+    local arc = field(page, "arc", settingsControl(page, simpleToggle(body, L.resourceArcToggle,
+        function() return profileUI().resourceStyle == "arc" end,
+        function(value)
+            self:Result(app.Store:Set("ui", "resourceStyle", value and "arc" or "line"))
+            local resource = app.components and app.components.playerResource
+            if resource and resource.running then resource:Refresh() end
+            self:Update()
+        end)))
+    local hint = note(body, L.resourceStyleHint, 0, 462)
+    page.resourceToggles = { runes = runes, fragments = fragments, arc = arc }
+    return function(top)
+        for _, control in ipairs({ runes, fragments, arc }) do
+            control:ClearAllPoints(); control:SetPoint("TOPLEFT", 0, top)
+            control:Update(); control:SetEnabled(not app.Store.readonly)
+            top = top - 44
+        end
+        hint:ClearAllPoints(); hint:SetPoint("TOPLEFT", 0, top)
+        return top - noteHeight(hint, 28)
+    end
+end
+
 function Extras.Quests(page, body)
     local self = SettingsUI
-    local belowMap = settingsControl(page, simpleToggle(body, L.questBelowMap,
+    local belowMap = field(page, "belowMap", settingsControl(page, simpleToggle(body, L.questBelowMap,
         function() return profileUI().questBelowMap == true end,
         function(value)
             self:Result(app.Store:Set("ui", "questBelowMap", value))
             local quests = app.components and app.components.questList
             if quests and quests.running then quests:Refresh() end
             self:Update()
-        end))
+        end)))
     local hint = note(body, L.questBelowMapHint, 0, 462)
     return function(top)
         belowMap:ClearAllPoints(); belowMap:SetPoint("TOPLEFT", 0, top)
@@ -469,9 +743,9 @@ end
 
 function Extras.Tooltip(page, body)
     local self = SettingsUI
-    local toggle = settingsControl(page, simpleToggle(body, L.tooltipQuality,
+    local toggle = field(page, "quality", settingsControl(page, simpleToggle(body, L.tooltipQuality,
         function() return app.Store:Profile().appearance.tooltipQuality end,
-        function(v) self:Result(app.Store:Set("appearance", "tooltipQuality", v)) end))
+        function(v) self:Result(app.Store:Set("appearance", "tooltipQuality", v)) end)))
     return function(top)
         toggle:ClearAllPoints(); toggle:SetPoint("TOPLEFT", 0, top)
         toggle:Update(); toggle:SetEnabled(not app.Store.readonly)
@@ -646,6 +920,50 @@ function Extras.Cooldowns(page, body)
         end
         return false
     end
+    -- Live preview: the selected group's real plan (rows, columns, capacity)
+    -- drawn with plain icon textures. It is never a protected frame and takes
+    -- no clicks, so it cannot trigger an action.
+    local previewBox = CreateFrame("Frame", nil, body)
+    previewBox:SetSize(462, 96)
+    previewBox:EnableMouse(false)
+    local previewBack = previewBox:CreateTexture(nil, "BACKGROUND")
+    previewBack:SetAllPoints()
+    previewBack:SetColorTexture(0, 0, 0, 0.25)
+    local previewCells = {}
+    for index = 1, app.CooldownModel.maxEntries do
+        local cell = previewBox:CreateTexture(nil, "ARTWORK")
+        cell:Hide()
+        previewCells[index] = cell
+    end
+    local previewNote = note(body, L.hudPreviewEmpty, 0, 462)
+    function page.RefreshHudPreview(component, groupID)
+        local group = component and component.running and component:EffectiveGroup(groupID) or nil
+        local order = group and group.order or {}
+        local plan = group and app.CooldownModel:Plan(group, 0) or nil
+        local drawn = plan and plan.count or 0
+        local scale = 1
+        if plan and plan.width > 0 and plan.height > 0 then
+            scale = math.min(1, 440 / plan.width, 80 / plan.height)
+        end
+        for index, cell in ipairs(previewCells) do
+            local slot = plan and plan.slots[index]
+            if slot then
+                local size = slot.size * scale
+                cell:SetSize(size, size)
+                cell:ClearAllPoints()
+                -- Plan y counts up from the block's bottom edge.
+                cell:SetPoint("CENTER", previewBox, "CENTER", slot.x * scale,
+                    (slot.y - plan.height / 2) * scale)
+                local info = _G.C_Spell and _G.C_Spell.GetSpellInfo and _G.C_Spell.GetSpellInfo(order[index])
+                local icon = info and app.Capabilities.Plain(info.iconID, "number") or nil
+                cell:SetTexture(icon or 134400)
+                cell:Show()
+            else
+                cell:Hide()
+            end
+        end
+        return drawn
+    end
     local hudApply = Controls:Button(body, L.hudApply, 150, function()
         local component = groupComponent()
         if component then self:Result(component:ApplyDraft()) end
@@ -656,8 +974,24 @@ function Extras.Cooldowns(page, body)
         if component then component:CancelDraft() end
         self:Update()
     end)
+    -- Search targets the selected group's own control, so the field map is
+    -- rebuilt from whichever group the page currently shows.
+    page.fields = page.fields or {}
+    page.fields.owned = hudOwned
+    page.fields.order = orderRows[1] and orderRows[1].frame or hudApply
+    function page.RemapFields()
+        local active = selectedGroup()
+        for _, group in ipairs(hudControls) do
+            if group.id == active then
+                for _, key in ipairs({ "size", "gap", "max", "limit", "vertical", "import" }) do
+                    page.fields[key] = group[key]
+                end
+            end
+        end
+    end
     self.hudEditor = { heading = hudHeading, owned = hudOwned, buffs = hudBuffs,
-        groups = hudControls, apply = hudApply, cancel = hudCancel, orderRows = orderRows }
+        groups = hudControls, apply = hudApply, cancel = hudCancel, orderRows = orderRows,
+        preview = previewBox, previewCells = previewCells }
     return function(top)
         local readonly = app.Store.readonly
         local component = groupComponent()
@@ -722,6 +1056,16 @@ function Extras.Cooldowns(page, body)
                 group.reset:SetShown(false)
             end
         end
+        -- Preview of the selected group's plan; an empty group says so instead
+        -- of drawing a blank box.
+        local drawn = page.RefreshHudPreview(component, active)
+        previewBox:SetShown(live and drawn > 0)
+        previewNote:SetShown(live and drawn == 0)
+        if live then
+            local target = drawn > 0 and previewBox or previewNote
+            target:ClearAllPoints(); target:SetPoint("TOPLEFT", 0, top)
+            top = top - (drawn > 0 and 104 or noteHeight(previewNote, 20))
+        end
         for _, record in ipairs(orderRows) do
             local spellID = live and orderOf(record.group)[record.slot] or nil
             record.spellID = spellID
@@ -755,20 +1099,33 @@ end
 -- A module page: header, the module's status in one line, the object selector,
 -- the object's real controls, then the internal component switches folded away.
 function SettingsUI:BuildModule(page, entry)
-    local scroll = Controls:Scroll(page, 464, 420)
-    scroll:SetPoint("TOPLEFT")
+    -- Fixed header: module name, status, the object selector and the on-screen
+    -- locate action. Only the form below it scrolls.
+    local header = CreateFrame("Frame", nil, page)
+    header:SetPoint("TOPLEFT")
+    header:SetSize(464, 96)
+    page.header = header
+    local scroll = Controls:Scroll(page, 464, 330)
+    scroll:SetPoint("TOPLEFT", page, "TOPLEFT", 0, -96)
     local body = CreateFrame("Frame", nil, scroll)
-    body:SetSize(462, 420)
+    body:SetSize(462, 330)
     scroll:SetScrollChild(body)
     page.scroll, page.module, page.rows, page.rowList = scroll, entry, {}, {}
-    local heading = section(body, L[entry.label], 0)
+    page.scrollMemory = {}
+    local heading = section(header, L[entry.label], 0)
     page.heading = heading
-    page.status = note(body, "", 0, 462)
+    page.status = note(header, "", 0, 236)
+    -- 018 Step 4.1: one selector instead of a tab per object. A page with a
+    -- single object omits it entirely; a page with more uses one dropdown, so
+    -- the action bar page no longer opens with twelve buttons.
+    local objects = self:ObjectList(entry.id)
     page.tabs = {}
-    for index, object in ipairs(self:ObjectList(entry.id)) do
-        local tab = Controls:Tab(body, object.label, 100, function() self:SelectObject(entry.id, object.id) end)
-        page.tabs[index] = { button = tab, id = object.id }
-        settingsControl(page, tab)
+    local selector
+    if #objects > 1 then
+        selector = Controls:Dropdown(header, 220, function(id) self:SelectObject(entry.id, id) end)
+        page.selector = selector
+        page.navObjects = objects
+        settingsControl(page, selector)
     end
     -- The module's main switch stays visible; the components it runs alongside
     -- are internal plumbing and live in the fold below.
@@ -803,32 +1160,43 @@ function SettingsUI:BuildModule(page, entry)
     local owner = note(body, "", 0, 462)
     owner:SetText("")
     page.owner = owner
-    local locate = Controls:Button(body, L.moduleLocate, 150, function()
+    local locate = Controls:Button(header, L.moduleLocate, 104, function()
         self:Locate(entry.id, self:SelectedObject(entry.id))
     end)
     page.locate = locate
-    local diagnostics = Controls:Button(body, L.openDiagnostics, 150, function() self:Select("diagnostics") end)
+    local diagnostics = Controls:Button(header, L.openDiagnostics, 104, function() self:Select("diagnostics") end)
     page.diagButton = diagnostics
     local extra = entry.extras and Extras[entry.extras] and Extras[entry.extras](page, body) or nil
     page.Update = function()
         local readonly = app.Store.readonly
-        local top = -22
         local selected = self:SelectedObject(entry.id)
         page.selected = selected
-        local shown = #page.tabs > 1
-        for index, tab in ipairs(page.tabs) do
-            tab.button:SetShown(shown)
-            if shown then
-                tab.button:ClearAllPoints()
-                tab.button:SetPoint("TOPLEFT", ((index - 1) % 4) * 112, top - math.floor((index - 1) / 4) * 34)
-                tab.button:SetSelected(tab.id == selected)
-                tab.button:SetEnabled(not readonly)
-            end
-        end
-        if shown then top = top - math.ceil(#page.tabs / 4) * 34 end
+        if page.RemapFields then page.RemapFields() end
+        -- Header: heading, then the status line beside the two actions, then
+        -- the object row. It is measured every refresh because a long
+        -- translation or a wrapped object row changes its height.
+        local htop = -22
         page.status:SetText(self:ModuleStatus(entry))
-        page.status:ClearAllPoints(); page.status:SetPoint("TOPLEFT", 0, top)
-        top = top - noteHeight(page.status, 20)
+        page.status:ClearAllPoints(); page.status:SetPoint("TOPLEFT", 0, htop)
+        locate:ClearAllPoints(); locate:SetPoint("TOPLEFT", 244, htop + 2)
+        diagnostics:ClearAllPoints(); diagnostics:SetPoint("TOPLEFT", 356, htop + 2)
+        locate:SetEnabled(not readonly and selected ~= nil)
+        htop = htop - math.max(34, noteHeight(page.status, 20))
+        if selector then
+            selector:ClearAllPoints()
+            selector:SetPoint("TOPLEFT", 0, htop)
+            selector:SetItems(page.navObjects, selected)
+            selector:SetEnabled(not readonly)
+            htop = htop - 34
+        end
+        local headerHeight = math.min(200, -htop + 4)
+        header:SetHeight(headerHeight)
+        scroll:ClearAllPoints()
+        scroll:SetPoint("TOPLEFT", page, "TOPLEFT", 0, -headerHeight)
+        scroll:SetViewHeight(math.max(120, 424 - headerHeight))
+        page.viewHeight = math.max(120, 424 - headerHeight)
+        -- Body: the primary switch, the object's controls, internal switches.
+        local top = -4
         if primary then
             primary:ClearAllPoints(); primary:SetPoint("TOPLEFT", 0, top)
             primary:Update(app.components[primary.componentID])
@@ -836,10 +1204,7 @@ function SettingsUI:BuildModule(page, entry)
             top = top - 40
         end
         if extra then top = extra(top) end
-        locate:ClearAllPoints(); locate:SetPoint("TOPLEFT", 0, top)
-        diagnostics:ClearAllPoints(); diagnostics:SetPoint("TOPLEFT", 164, top)
-        locate:SetEnabled(not readonly and selected ~= nil)
-        top = top - 40
+        top = top - 8
         -- Internal switches, folded by default. The fold keeps its own state
         -- across refreshes; nothing below moves while it is closed.
         switches:ClearAllPoints(); switches:SetPoint("TOPLEFT", 0, top)
@@ -860,7 +1225,7 @@ function SettingsUI:BuildModule(page, entry)
         else
             switches:SetShown(true)
         end
-        body:SetHeight(math.max(420, -top + 6))
+        body:SetHeight(math.max(page.viewHeight, -top + 6))
         scroll:UpdateRange()
     end
 end

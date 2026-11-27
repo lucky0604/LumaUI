@@ -580,9 +580,29 @@ local function place(self, frame, bottom)
     return false
 end
 
--- Bottom to top: skill rows stay closest to the bars, the tracked buff views
--- sit above them, which is the order of the Pearl mockup's block.
+-- Declared before `pass`: a pass that yields has to hand every frame it already
+-- placed back, and the body sits further down with the rest of the restore path.
+local restoreAll
+
+-- The own cooldown groups draw the same skills from the same client lists. When
+-- they are on, this component would be a second implementation of the same
+-- block: it would place the client's viewers under the own groups, and a viewer
+-- the groups failed to hide would appear twice. The groups own the centre when
+-- they are enabled, so this pass steps aside and reports why.
+local function groupsOwnCentre()
+    local groups = app.components and app.components.cooldownGroups
+    if not groups or not groups.running then return false end
+    local profileGroups = app.Store:Profile().ui.cooldownGroups
+    return type(profileGroups) == "table" and profileGroups.owned ~= false
+end
+
 local function pass(self)
+    if groupsOwnCentre() then
+        self.yielded = true
+        restoreAll(self)
+        return
+    end
+    self.yielded = nil
     self.iconFallback = self.iconFallback or {}
     local useSlots = slotsWanted()
     local chosen = {}
@@ -734,7 +754,7 @@ local function layout(self)
     app:Report("cooldownViewer/pass", tostring(problem))
 end
 
-local function restoreAll(self)
+restoreAll = function(self)
     for frame in pairs(self.recorded or {}) do
         restoreFrame(frame)
     end

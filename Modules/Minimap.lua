@@ -107,6 +107,12 @@ local function style(self)
         self.edge:SetBackdropBorderColor(line[1], line[2], line[3], 0.85)
     end
     setShown(self, Minimap:IsVisible())
+    -- The shared menu has two ways in; while the tool corner's entry is on
+    -- screen this one would be a duplicate, so it steps aside.
+    if self.drawerToggle then
+        local corner = app.components and app.components.utilityCorner
+        self.drawerToggle:SetShown(not (corner and corner.running))
+    end
 end
 
 local function updateInfo(self)
@@ -190,47 +196,14 @@ local function build(self)
     self.coords = app.Type:Text(panel, "micro")
     self.coords:SetPoint("BOTTOMRIGHT", -6, 6)
 
-    -- 012 phase 14: the low-frequency entries live in one LumaUI drawer under
-    -- the map. Every button is LumaUI's own and calls the client's documented
-    -- entry point; no native button is moved, hidden or reparented, so calendar,
-    -- tracking and third-party buttons keep their own position and clicks.
+    -- 018 Step 2: the drawer is the one shared tool menu, not a second list.
+    -- When the tool corner is running, that entry already opens it and this
+    -- toggle steps aside; with the tool corner off, this remains the way in.
     local toggle = app.Controls:Button(panel, "···", 22, function(current)
-        if module.drawer then module.drawer:SetShown(not module.drawer:IsShown()) end
+        if app.ToolMenu then app.ToolMenu.Toggle(current) end
     end, { height = 18, size = 11 })
     toggle:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -4, -4)
     self.drawerToggle = toggle
-
-    local drawer = CreateFrame("Frame", "LumaUIMinimapDrawer", UIParent, "BackdropTemplate")
-    drawer:SetFrameStrata("DIALOG")
-    drawer:SetSize(148, 4 + 6 * 24)
-    drawer:SetPoint("TOPLEFT", panel, "BOTTOMLEFT", 0, -4)
-    app.Surface:Plate(drawer, "window")
-    drawer:Hide()
-    self.drawer = drawer
-    local entries = {
-        { text = app.L.drawerSettings, run = function() app.Settings:Toggle() end },
-        { text = app.L.drawerBags, run = function()
-            local inventory = app.components.inventory
-            if inventory and inventory.running then inventory:Toggle() end
-        end },
-        { text = app.L.drawerCharacter, run = function()
-            local window = app.components.characterWindow
-            if window and window.running then window:Toggle() end
-        end },
-        { text = app.L.drawerLayout, run = function() app.Unlock:Toggle() end },
-        { text = app.L.drawerCalendar, run = function()
-            if type(ToggleCalendar) == "function" then ToggleCalendar() end
-        end },
-        { text = app.L.drawerMap, run = function()
-            if type(ToggleWorldMap) == "function" then ToggleWorldMap() end
-        end },
-    }
-    self.drawerButtons = {}
-    for index, entry in ipairs(entries) do
-        local button = app.Controls:Button(drawer, entry.text, 136, entry.run, { height = 20, size = 11 })
-        button:SetPoint("TOPLEFT", 6, -4 - (index - 1) * 24)
-        self.drawerButtons[index] = button
-    end
     self.useCoords = type(C_Map) == "table"
         and type(C_Map.GetBestMapForUnit) == "function"
         and type(C_Map.GetPlayerMapPosition) == "function"
@@ -278,6 +251,9 @@ module = app:RegisterComponent({ id = "minimap", label = "minimap",
         if self.zonePlate then self.zonePlate:Show() end
         self:Listen("ZONE_CHANGED", function() fitZone(module) end)
         self:Listen("ZONE_CHANGED_NEW_AREA", function() fitZone(module) end)
+        app:Subscribe(self, "TOOL_ENTRY_CHANGED", function()
+            if self.running then style(self) end
+        end)
         style(self)
         updateInfo(self)
         self:Every(1, updateInfo)
@@ -287,7 +263,7 @@ module = app:RegisterComponent({ id = "minimap", label = "minimap",
         updateInfo(self)
     end,
     Disable = function(self)
-        if self.drawer then self.drawer:Hide() end
+        if app.ToolMenu then app.ToolMenu.Hide() end
         setShown(self, false)
         if self.maskApplied and Minimap.SetMaskTexture then
             Minimap:SetMaskTexture(CIRCLE_MASK)

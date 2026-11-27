@@ -16,7 +16,6 @@ local _, app = ...
 
 local ID = "playerCast"
 local HEIGHT = 16
-local INSET = 8
 local component
 local ticker
 
@@ -134,10 +133,98 @@ local function position(self)
     if not scale or scale <= 0 then scale = 1 end
     local width = math.max(160, math.min(380, central.action.width * 0.62))
     self.bar:SetSize(width / scale, HEIGHT)
-    local bottom = central.action.bottom - INSET
-    local center = bottom - (HEIGHT * scale) / 2 - central.screen.height / 2
+    -- The bar's centre sits on the shared cast line (~77% from the top), clear
+    -- of the action bars so a taller or hidden bar never moves it.
+    local center = app.Layout:CastLine() - central.screen.height / 2
     app.Layout:SetEntryDefault(ID, 0, center / scale)
     app.Layout:Apply(ID)
+end
+
+-- Native path. The client's own PlayerCastingBarFrame keeps drawing the cast
+-- (timing, empower stages, interrupt state); Luma only moves it onto the shared
+-- cast line. It is moved out of combat and outside Edit Mode, the old points are
+-- recorded once, the new anchor is read back, and anything refused or odd hands
+-- the frame back where it was. The own bar takes over only when the player
+-- chose it (/luma cast).
+local function editModeActive()
+    local manager = _G.EditModeManagerFrame
+    if not manager then return false end
+    if type(manager.IsEditModeActive) == "function" then
+        local ok, active = pcall(manager.IsEditModeActive, manager)
+        if ok then return active == true end
+    end
+    if type(manager.IsShown) == "function" then
+        local ok, shown = pcall(manager.IsShown, manager)
+        return ok and shown == true
+    end
+    return false
+end
+
+local function nativeFrame()
+    local frame = _G.PlayerCastingBarFrame
+    if frame and type(frame.SetPoint) == "function" and type(frame.GetPoint) == "function"
+        and type(frame.ClearAllPoints) == "function" then
+        return frame
+    end
+end
+
+local function recordNative(frame)
+    if frame.lumaCastOriginal then return true end
+    local count = type(frame.GetNumPoints) == "function" and frame:GetNumPoints() or 1
+    count = plainNumber(count) or 0
+    local points = {}
+    for index = 1, count do
+        local ok, point, relative, relativePoint, x, y = pcall(frame.GetPoint, frame, index)
+        if not ok or not point then return false end
+        x, y = plainNumber(x), plainNumber(y)
+        if not x or not y then return false end
+        points[#points + 1] = { point, relative, relativePoint, x, y }
+    end
+    if #points == 0 then return false end
+    frame.lumaCastOriginal = points
+    return true
+end
+
+local function restoreNative(self)
+    local frame = nativeFrame()
+    if not frame or not frame.lumaCastOriginal then return end
+    if InCombatLockdown() or editModeActive() then
+        -- Try again when the lock ends; the record stays until it is replayed.
+        self.restorePending = true
+        return
+    end
+    local points = frame.lumaCastOriginal
+    pcall(frame.ClearAllPoints, frame)
+    for _, saved in ipairs(points) do
+        pcall(frame.SetPoint, frame, saved[1], saved[2], saved[3], saved[4], saved[5])
+    end
+    frame.lumaCastOriginal = nil
+    self.restorePending = nil
+    self.nativeMoved = nil
+end
+
+local function adaptNative(self)
+    local frame = nativeFrame()
+    if not frame then self.nativeMoved = nil; return end
+    if owned() or self.nativeRejected then
+        restoreNative(self)
+        return
+    end
+    if InCombatLockdown() or editModeActive() then return end
+    if not recordNative(frame) then self.nativeRejected = true; return end
+    local central = app.Layout:Central()
+    local centre = app.Layout:CastLine() - central.screen.height / 2
+    pcall(frame.ClearAllPoints, frame)
+    local ok = pcall(frame.SetPoint, frame, "CENTER", UIParent, "CENTER", 0, centre)
+    local _, _, _, x, y = frame:GetPoint(1)
+    x, y = plainNumber(x), plainNumber(y)
+    if not ok or not x or not y or math.abs(x) > 0.5 or math.abs(y - centre) > 0.5 then
+        -- The read-back disagrees: put it back and leave it to the client.
+        self.nativeRejected = true
+        restoreNative(self)
+        return
+    end
+    self.nativeMoved = true
 end
 
 component = app:RegisterComponent({ id = "playerCast", label = "playerCast", defaultEnabled = true,
@@ -197,9 +284,17 @@ component = app:RegisterComponent({ id = "playerCast", label = "playerCast", def
         end
         self:Listen("PLAYER_ENTERING_WORLD", function(current) update(current) end)
         app:Subscribe(self, "LAYOUT_CENTRAL_CHANGED", function()
-            if self.running then app:Call("playerCast/position", position, self) end
+            if self.running then
+                app:Call("playerCast/position", position, self)
+                app:Call("playerCast/native", adaptNative, self)
+            end
+        end)
+        self:Listen("PLAYER_REGEN_ENABLED", function(current)
+            if current.restorePending then restoreNative(current) end
+            adaptNative(current)
         end)
         position(self)
+        adaptNative(self)
         update(self)
         if app.Ownership then
             app.Ownership:Set("playerCast", {
@@ -211,6 +306,7 @@ component = app:RegisterComponent({ id = "playerCast", label = "playerCast", def
     end,
     Refresh = function(self)
         position(self)
+        adaptNative(self)
         update(self)
         if app.Ownership then
             app.Ownership:Set("playerCast", {
@@ -222,6 +318,7 @@ component = app:RegisterComponent({ id = "playerCast", label = "playerCast", def
     end,
     Disable = function(self)
         self.holdToken = nil
+        restoreNative(self)
         stopTicker()
         if self.bar then
             self.bar:Hide()

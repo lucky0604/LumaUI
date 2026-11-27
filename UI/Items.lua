@@ -7,11 +7,12 @@ local L, Plain = app.L, app.Capabilities.Plain
 local Items = {}
 app.Items = Items
 
--- Retail item class ids -> browser filter categories. Anything else, including
--- items whose class id cannot be read yet, counts as "other".
+-- Retail item class ids (Enum.ItemClass, 12.1.5 build 70961) -> browser filter
+-- categories. 11 is the Quiver class and 12 is Questitem; anything else,
+-- including items whose class id cannot be read yet, counts as "other".
 local CLASS_CATEGORY = {
     [2] = "equip", [4] = "equip", [0] = "consumable",
-    [5] = "mat", [7] = "mat", [11] = "quest",
+    [5] = "mat", [7] = "mat", [12] = "quest",
 }
 local classCache = {}
 
@@ -21,8 +22,8 @@ function Items.Class(link)
     if not id then return nil end
     local cached = classCache[id]
     if cached ~= nil then return cached end
-    -- GetItemInfoInstant returns (name, link, quality, itemLevel, reqLevel,
-    -- classID, ...): the sixth value is the class id on Retail.
+    -- GetItemInfoInstant returns (itemID, itemType, itemSubType, itemEquipLoc,
+    -- icon, classID, subClassID): the sixth value is the class id.
     local ok, _, _, _, _, _, classID = pcall(C_Item.GetItemInfoInstant, link)
     classID = ok and Plain(classID, "number") or nil
     if classID ~= nil then classCache[id] = classID end
@@ -80,11 +81,37 @@ function Items.Link(item)
     if type(ChatFrame_OpenChat) == "function" then ChatFrame_OpenChat(item.link) end
 end
 
--- User clicks, never automated actions. A locked slot and a window whose
--- permissions forbid changes refuse before the client call; missing container
--- functions degrade to a message instead of an error.
+-- Action-time re-verification: the record a cell painted may be stale if the
+-- slot changed since the last refresh. Re-read the physical slot and compare
+-- only plain identity fields (never locked/secret values); when nothing plain
+-- identifies the item, or the slot no longer holds it, the action refuses and
+-- points at the native bags instead of moving the wrong item.
+function Items.Verify(item)
+    if not item or item.bag == nil or item.slot == nil then return false end
+    local now = Items.Read(item.bag, item.slot)
+    if not now then return false end
+    local compared = false
+    if item.itemID ~= nil or now.itemID ~= nil then
+        compared = true
+        if item.itemID ~= now.itemID then return false end
+    end
+    if item.link ~= nil or now.link ~= nil then
+        compared = true
+        if item.link ~= now.link then return false end
+    end
+    if item.count ~= nil or now.count ~= nil then
+        compared = true
+        if item.count ~= now.count then return false end
+    end
+    return compared
+end
+
+-- User clicks, never automated actions. A stale record, a locked slot and a
+-- window whose permissions forbid changes refuse before the client call;
+-- missing container functions degrade to a message instead of an error.
 function Items.Pickup(item)
     if not item then return end
+    if not Items.Verify(item) then app:Print(L.itemStale); return end
     if item.blocked then app:Print(item.blocked); return end
     if item.locked then app:Print(L.itemLocked); return end
     if not Items.Actions() then app:Print(L.itemActionsUnavailable); return end
@@ -93,6 +120,7 @@ end
 
 function Items.Use(item)
     if not item then return end
+    if not Items.Verify(item) then app:Print(L.itemStale); return end
     if item.blocked then app:Print(item.blocked); return end
     if item.locked then app:Print(L.itemLocked); return end
     if not Items.Actions() then app:Print(L.itemActionsUnavailable); return end

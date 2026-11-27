@@ -83,22 +83,33 @@ local function sync()
 end
 
 -- The bars stay on screen at alpha 0; a separate backing would otherwise hang
--- behind buttons that are visually gone. Reading the bar component's published
--- fade keeps one driver and leaves the panels opaque when the bars component is
--- off (the native bars are then fully visible and still need their backing).
-local function barAlpha()
-    local bars = app.components.actionBars
-    if bars and bars.running then
-        local alpha = app.Capabilities.Plain(bars.alpha, "number")
-        if alpha then return math.max(0, math.min(1, alpha)) end
+-- behind buttons that are visually gone. 018 Step 1: every panel reads the alpha
+-- of the bar it belongs to, so moving onto bar 2 never lights the bar 1 panel.
+-- When the bars component is off the native bars are fully visible and their
+-- backings stay opaque.
+local function ownerAlpha(bar)
+    local bars = app.components and app.components.actionBars
+    if not bars or not bars.running then return 1 end
+    local key
+    if type(bar) == "table" or type(bar) == "userdata" then
+        local name = type(bar.GetName) == "function" and select(2, pcall(bar.GetName, bar)) or nil
+        name = app.Capabilities.Plain(name, "string")
+        local native = name and app.BarModel:NativeByFrame(name) or nil
+        if native then key = native.key end
     end
+    local alphas = bars.alphas
+    local alpha = key and type(alphas) == "table" and app.Capabilities.Plain(alphas[key], "number") or nil
+    -- A host the action-bar component never fades (bars 4–8, pet, stance, the
+    -- optional own bars) is drawn by the client at full strength: its backing
+    -- must not dim with the centre stack.
+    if alpha then return math.max(0, math.min(1, alpha)) end
     return 1
 end
 
 local function applyAlpha(self)
-    local alpha = barAlpha()
-    self.panelAlpha = alpha
-    for _, panel in pairs(self.panels or {}) do pcall(panel.SetAlpha, panel, alpha) end
+    for bar, panel in pairs(self.panels or {}) do
+        pcall(panel.SetAlpha, panel, ownerAlpha(bar))
+    end
 end
 
 -- Creation and painting are separate: a panel that already exists must still
@@ -291,5 +302,23 @@ function component:Diagnose()
     for _, entry in ipairs(reportBars()) do
         local line = reportLine(entry)
         if line then app:Print(line) end
+    end
+    -- The managed hosts and the fade each one is actually at. Reading the
+    -- scheduler's published values keeps this a report, never a second writer.
+    local bars = app.components and app.components.actionBars
+    if not bars then return end
+    local alphas = bars.running and bars.alphas or nil
+    for _, def in ipairs({ { key = "main", id = "actionBar1" },
+        { key = "bar2", id = "actionBar2" }, { key = "bar3", id = "actionBar3" } }) do
+        local frame = bars.bars and bars.bars[def.key]
+        local host = frame and "present" or "absent"
+        local alpha = alphas and alphas[def.id]
+        if app.Capabilities.Plain(alpha, "number") then
+            app:Print(string.format("  hover %-12s host=%s alpha=%.2f mode=%s",
+                def.id, host, alpha, app.BarModel:HoverMode(def.id)))
+        else
+            app:Print(string.format("  hover %-12s host=%s alpha=unknown mode=%s",
+                def.id, host, app.BarModel:HoverMode(def.id)))
+        end
     end
 end
