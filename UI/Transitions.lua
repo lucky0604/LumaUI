@@ -78,6 +78,16 @@ local function removeTask(task)
     if task.group and task.group.lumaTask == task then
         pcall(task.group.Stop, task.group)
     end
+    -- A native motion (the scale bump) has no Lua task slot on its group, so it
+    -- is stopped by the registration itself. Stopping a group mid-bump leaves
+    -- the region at whatever scale it reached, which is why the resting scale
+    -- is written back here rather than only in the animation's OnFinished.
+    if task.kind == "native" and task.group then
+        pcall(task.group.Stop, task.group)
+        if task.region and type(task.region.SetScale) == "function" then
+            pcall(task.region.SetScale, task.region, 1)
+        end
+    end
     task.group = nil
     local set = Transitions.tasks[task.owner]
     if set and set[task.channel] == task then
@@ -278,4 +288,164 @@ function Transitions:Reveal(frame)
     end
     frame:SetAlpha(0)
     self:Fade(frame, frame, 1, 0.16, nil, "reveal")
+end
+
+----------------------------------------------------------------------
+-- 019: native animation primitives
+----------------------------------------------------------------------
+-- Four finished motions built from the client's own AnimationGroup: appear,
+-- vanish, a scale bump and a highlight flash. None of them runs a Lua frame;
+-- an idle or hidden region costs nothing. Every one of them lands on its final
+-- state and calls back when motion is off, when the region cannot animate, or
+-- when the client refuses a subtype — a caller never has to branch on any of
+-- that, and no region is ever left transparent because an animation failed to
+-- start.
+
+local function motionOff()
+    return not motionWanted()
+end
+
+-- One reusable group per region and channel name, so a repeated bump on a proc
+-- restarts the same animation instead of creating a new group per event.
+local function groupFor(region, channel)
+    local groups = region.lumaMotion
+    if not groups then groups = {}; region.lumaMotion = groups end
+    local group = groups[channel]
+    if group then return group end
+    if type(region.CreateAnimationGroup) ~= "function" then return nil end
+    local ok, created = pcall(region.CreateAnimationGroup, region)
+    if not ok or not created then return nil end
+    groups[channel] = created
+    created.lumaChannel = channel
+    return created
+end
+
+local function makeAnimation(group, kind, options)
+    if type(group.CreateAnimation) ~= "function" then return nil end
+    local ok, anim = pcall(group.CreateAnimation, group, kind)
+    if not ok or not anim then return nil end
+    for name, value in pairs(options or {}) do
+        local setter = anim["Set" .. name]
+        if type(setter) == "function" then pcall(setter, anim, value) end
+    end
+    return anim
+end
+
+-- Alpha down to zero must still leave a hidden region clickable nowhere: the
+-- caller hides the frame in `onDone`, so the two facts never disagree.
+function Transitions:Vanish(owner, frame, duration, onDone)
+    if not frame or isForbidden(frame) then
+        if onDone then app:Call("transitions/vanish", onDone, false) end
+        return nil
+    end
+    duration = app.Capabilities.Plain(duration, "number") or 0.14
+    if motionOff() or duration <= 0 then
+        if type(frame.SetAlpha) == "function" then frame:SetAlpha(0) end
+        if onDone then app:Call("transitions/vanish", onDone, true) end
+        return nil
+    end
+    return self:Fade(owner, frame, 0, duration, function() 
+        if onDone then app:Call("transitions/vanish", onDone, true) end
+    end, "vanish")
+end
+
+-- Appear: fade in and, when the caller asks for a rise, let it drive the few
+-- pixels itself through the shared value channel (the same mechanism the
+-- settings page fade already uses for its own offset). Nothing is written to an
+-- anchor the caller did not hand over, so a frame that must not move only
+-- fades. A refused or missing animation still lands on the final alpha.
+function Transitions:Appear(owner, frame, options)
+    if not frame or isForbidden(frame) then return nil end
+    options = options or {}
+    local duration = app.Capabilities.Plain(options.duration, "number") or 0.18
+    local rise = app.Capabilities.Plain(options.rise, "number") or 0
+    if motionOff() or duration <= 0 then
+        if type(frame.SetAlpha) == "function" then frame:SetAlpha(1) end
+        if options.onDone then app:Call("transitions/appear", options.onDone, true) end
+        return nil
+    end
+    if type(frame.SetAlpha) == "function" then frame:SetAlpha(0) end
+    if rise ~= 0 and type(options.riseApply) == "function" then
+        -- 0 = still lowered, 1 = settled. The caller writes its own anchor.
+        self:Animate(owner, "rise", {
+            from = 0, to = 1, duration = duration,
+            apply = function(value) options.riseApply(value, rise) end,
+        })
+    end
+    return self:Fade(owner, frame, 1, duration, options.onDone, "appear")
+end
+
+-- A restrained scale pulse: 1.08 up and back to 1.0 in 0.14 s, used for a proc
+-- highlight and a ready cue. Scale is the region's own, so nothing around it
+-- moves. The client plays both halves as one native group; when motion is off,
+-- or the region cannot animate, the resting scale is written directly instead
+-- of being left at a peak.
+function Transitions:Bump(owner, region, peakScale, onDone)
+    if not region or isForbidden(region) then return nil end
+    peakScale = app.Capabilities.Plain(peakScale, "number") or 1.08
+    local duration = 0.14
+    if motionOff() then
+        if type(region.SetScale) == "function" then pcall(region.SetScale, region, 1) end
+        if onDone then app:Call("transitions/bump", onDone, true) end
+        return nil
+    end
+    local group = groupFor(region, "bump")
+    if not group then
+        if onDone then app:Call("transitions/bump", onDone, true) end
+        return nil
+    end
+    local out, back = group.lumaBumpOut, group.lumaBumpBack
+    if not out then
+        out = makeAnimation(group, "Scale", { ScaleX = peakScale, ScaleY = peakScale,
+            Duration = duration / 2, Smoothing = "OUT" })
+        back = makeAnimation(group, "Scale", { ScaleX = 1, ScaleY = 1,
+            Duration = duration / 2, Smoothing = "IN" })
+        if back and type(back.SetStartDelay) == "function" then
+            pcall(back.SetStartDelay, back, duration / 2)
+        end
+        group.lumaBumpOut, group.lumaBumpBack = out, back
+    end
+    if not out then
+        if onDone then app:Call("transitions/bump", onDone, true) end
+        return nil
+    end
+    pcall(group.Stop, group)
+    pcall(group.SetScript, group, "OnFinished", function()
+        if owner then app.Transitions:Cancel(owner, "bump") end
+        if onDone then app:Call("transitions/bump", onDone, true) end
+    end)
+    -- Registered as a lightweight owner/channel pair so Settle/Cancel on a
+    -- hiding window also stops the group; it carries no Lua driver.
+    self.tasks[owner] = self.tasks[owner] or {}
+    self.tasks[owner].bump = { owner = owner, channel = "bump", kind = "native",
+        group = group, region = region }
+    self.count = self.count + 1
+    group:Play()
+    return group
+end
+
+-- A transient highlight on a region that already owns a colour texture: the
+-- alpha rises to `alpha` and falls back to its resting value. Used for a rune
+-- lighting up and for a proc edge; a texture cannot animate alpha through
+-- Fade, so this is a value channel and is only used for decoration.
+function Transitions:Flash(owner, region, duration, alpha)
+    if not region or isForbidden(region) then return nil end
+    duration = app.Capabilities.Plain(duration, "number") or 0.28
+    alpha = app.Capabilities.Plain(alpha, "number") or 0.85
+    local rest = type(region.GetAlpha) == "function"
+        and app.Capabilities.Plain(select(2, pcall(region.GetAlpha, region)), "number") or 0
+    if motionOff() or duration <= 0 then
+        if type(region.SetAlpha) == "function" then pcall(region.SetAlpha, region, rest) end
+        return nil
+    end
+    return self:Animate(owner, "flash", {
+        from = rest, to = alpha, duration = duration / 2,
+        apply = function(value) region:SetAlpha(value) end,
+        onDone = function()
+            self:Animate(owner, "flash", {
+                from = alpha, to = rest, duration = duration / 2,
+                apply = function(value) region:SetAlpha(value) end,
+            })
+        end,
+    })
 end

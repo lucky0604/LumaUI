@@ -42,18 +42,24 @@ Store.defaults = {
         -- is opt-in until the live client confirms it draws over every plate.
         -- The reversible native repaint above stays the default.
         -- 012 phase 04: the own 116 x 8 plate layer is the shipped look. The
-        -- native plate stays the click/position/aura host; `plateCast` remains
-        -- opt-in because that row is still awaiting in-game validation.
-        plateOwned = true, plateCast = false,
+        -- native plate stays the click/position/aura host. 019 promotes the own
+        -- cast row: a restricted cast now goes through the client's duration
+        -- object, which is exactly the case a tuple-only reader could not draw,
+        -- so the row works in instances instead of staying blank there.
+        plateOwned = true, plateCast = true,
         -- 013 phase 02: restricted health goes straight into the own StatusBar
         -- (`plateDirect`), and the client's matching native parts are handed
         -- over while the own layer draws (`plateNative` = "hide"). "keep" leaves
         -- every native part visible under the own layer and is the diagnostic
         -- fallback until each hand-over has live evidence.
         plateDirect = true, plateNative = "hide",
-        -- 012 phase 08: own rune row and player cast bar. The client's runes and
-        -- cast bar keep drawing until the own path is explicitly enabled.
-        resourceRunes = "native", resourceFragments = "native", resourceStyle = "line", playerCastOwned = false, containerCollapsed = {}, pinnedCurrencies = {},
+        -- 012 phase 08: own rune row and player cast bar. 019: both class
+        -- resource rows and the own cast bar ship on. Taking over the native
+        -- PlayerFrame (the shipped default) hides its child RuneFrame, so a
+        -- death knight who never touched a setting had no runes at all; the own
+        -- row is the replacement, not an opt-in. `/luma runes` and `/luma
+        -- fragments` still turn either back to the client's own display.
+        resourceRunes = "owned", resourceFragments = "owned", resourceStyle = "line", playerCastOwned = true, containerCollapsed = {}, pinnedCurrencies = {},
         -- 012 phase 10/11: own secure action bars. Off by default; the native
         -- bars keep keys, paging and vehicle handling until the own path is
         -- validated in game.
@@ -66,9 +72,47 @@ Store.defaults = {
         -- Layout-level native switches for the group frames. Party keeps its
         -- current default; raid stays off until its own validation exists.
         partyTakeover = true, raidTakeover = false,
-        -- 012 phase 16: saved size of the main chat window. Zero means "use the
-        -- client's own size"; Normalize only accepts the documented range.
-        chatWidth = 0, chatHeight = 0,
+        -- 012 phase 16: saved size of the main chat window. 019: a compact
+        -- Pearl chat sits at ~19% of a 1728-wide viewport instead of covering a
+        -- third of the screen and colliding with the player frame. Zero still
+        -- means "use the client's own size".
+        chatWidth = 328, chatHeight = 152,
+        -- 019: where the experience/reputation reading lives. "bottomRail" is a
+        -- 3 px hairline along the top edge of the information strip; "topBar"
+        -- keeps the older wide bar; "hidden" draws neither and lets the client
+        -- keep its own. The strip rail is the shipped look because the visual
+        -- target has no large bar across the sky.
+        experienceMode = "bottomRail",
+        -- 019: the five combat modules' appearance, stored so the settings page
+        -- and the renderers read one model. Every field has a shipped default
+        -- equal to what the renderer used to hardcode, so a profile that never
+        -- opened this page draws exactly the composition it had.
+        cooldownViews = {
+            countdownSize = 15, borderSize = 1, showSwipe = true,
+            showProcGlow = true, desaturateUnusable = true,
+        },
+        actionButtonStyle = {
+            enabled = true, hotkeyShow = true, hotkeySize = 10, macroShow = false,
+            countSize = 12, iconZoom = 0.08,
+        },
+        unitFrames = {
+            player = { width = 180, healthHeight = 14, powerHeight = 3, colorMode = "auto",
+                nameSize = 11, healthFormat = "percent", auraSize = 16, auraLimit = 5, castHeight = 12 },
+            target = { width = 180, healthHeight = 14, powerHeight = 3, colorMode = "auto",
+                nameSize = 11, healthFormat = "percent", auraSize = 16, auraLimit = 5, castHeight = 12 },
+            focus = { width = 100, healthHeight = 12, powerHeight = 2, colorMode = "auto",
+                nameSize = 10, healthFormat = "percent", auraSize = 16, auraLimit = 3, castHeight = 12 },
+            pet = { width = 100, healthHeight = 12, powerHeight = 2, colorMode = "auto",
+                nameSize = 10, healthFormat = "percent", auraSize = 16, auraLimit = 3, castHeight = 12 },
+            targettarget = { width = 100, healthHeight = 12, powerHeight = 2, colorMode = "auto",
+                nameSize = 10, healthFormat = "percent", auraSize = 16, auraLimit = 3, castHeight = 12 },
+        },
+        nameplates = { width = 112, height = 7, targetWidth = 124, targetHeight = 9,
+            nameSize = 11, nameColumns = 22, showPercent = true, castHeight = 7,
+            targetIndicator = true, nonTargetAlpha = 75, threatColor = false },
+        -- Per-bar idle transparency, added next to `actionBarHover`. A bar that
+        -- no pointer has touched settles at this alpha out of combat.
+        actionBarIdleAlpha = {},
         -- 012 phase 06: own cooldown groups. Enabled but empty means nothing is
         -- drawn; a group only appears after an explicit import or `/luma cds
         -- add`, so the default screen keeps the client's own viewers.
@@ -161,7 +205,86 @@ function Store:Normalize(input)
     if ui.plateNative == "keep" then result.ui.plateNative = "keep" end
     if ui.resourceRunes == "owned" then result.ui.resourceRunes = "owned" end
     if ui.resourceFragments == "owned" then result.ui.resourceFragments = "owned" end
+    -- An explicit "native" is a real choice (`/luma runes`) and must survive
+    -- normalization; only an absent field falls back to the shipped "owned".
+    if ui.resourceRunes == "native" then result.ui.resourceRunes = "native" end
+    if ui.resourceFragments == "native" then result.ui.resourceFragments = "native" end
     result.ui.resourceStyle = ui.resourceStyle == "arc" and "arc" or "line"
+    -- Where the experience/reputation reading is drawn. Anything unknown keeps
+    -- the shipped strip rail instead of hiding the reading.
+    if ui.experienceMode == "topBar" or ui.experienceMode == "hidden" then
+        result.ui.experienceMode = ui.experienceMode
+    else
+        result.ui.experienceMode = "bottomRail"
+    end
+    -- 019 combat appearance. Every range is bounded and every enum is whitelisted,
+    -- so a damaged save can only repaint the same controls differently, never
+    -- produce a negative size, an unknown format or a colour mode the renderer
+    -- has no branch for.
+    do
+        local views = type(ui.cooldownViews) == "table" and ui.cooldownViews or {}
+        result.ui.cooldownViews = {
+            countdownSize = math.floor(bounded(views.countdownSize, 15, 10, 24) + 0.5),
+            borderSize = math.floor(bounded(views.borderSize, 1, 1, 2) + 0.5),
+            showSwipe = views.showSwipe ~= false,
+            showProcGlow = views.showProcGlow ~= false,
+            desaturateUnusable = views.desaturateUnusable ~= false,
+        }
+        local style = type(ui.actionButtonStyle) == "table" and ui.actionButtonStyle or {}
+        result.ui.actionButtonStyle = {
+            enabled = style.enabled ~= false,
+            hotkeyShow = style.hotkeyShow ~= false,
+            hotkeySize = math.floor(bounded(style.hotkeySize, 10, 8, 16) + 0.5),
+            macroShow = style.macroShow == true,
+            countSize = math.floor(bounded(style.countSize, 12, 8, 18) + 0.5),
+            iconZoom = bounded(style.iconZoom, 0.08, 0, 0.24),
+        }
+        local frames = type(ui.unitFrames) == "table" and ui.unitFrames or {}
+        local defaults = self.defaults.ui.unitFrames
+        result.ui.unitFrames = {}
+        local formats = { percent = true, value = true, both = true, none = true }
+        for _, unit in ipairs({ "player", "target", "focus", "pet", "targettarget" }) do
+            local source = type(frames[unit]) == "table" and frames[unit] or {}
+            local base = defaults[unit]
+            result.ui.unitFrames[unit] = {
+                width = math.floor(bounded(source.width, base.width, 80, 260) + 0.5),
+                healthHeight = math.floor(bounded(source.healthHeight, base.healthHeight, 6, 30) + 0.5),
+                powerHeight = math.floor(bounded(source.powerHeight, base.powerHeight, 1, 12) + 0.5),
+                colorMode = (source.colorMode == "pearl" and "pearl") or "auto",
+                nameSize = math.floor(bounded(source.nameSize, base.nameSize, 8, 20) + 0.5),
+                healthFormat = formats[source.healthFormat] and source.healthFormat or "percent",
+                auraSize = math.floor(bounded(source.auraSize, 16, 10, 26) + 0.5),
+                auraLimit = math.floor(bounded(source.auraLimit, base.auraLimit, 0, 8) + 0.5),
+                castHeight = math.floor(bounded(source.castHeight, base.castHeight, 6, 26) + 0.5),
+            }
+        end
+        local plates = type(ui.nameplates) == "table" and ui.nameplates or {}
+        result.ui.nameplates = {
+            width = math.floor(bounded(plates.width, 112, 60, 220) + 0.5),
+            height = math.floor(bounded(plates.height, 7, 3, 20) + 0.5),
+            targetWidth = math.floor(bounded(plates.targetWidth, 124, 60, 240) + 0.5),
+            targetHeight = math.floor(bounded(plates.targetHeight, 9, 3, 24) + 0.5),
+            nameSize = math.floor(bounded(plates.nameSize, 11, 8, 20) + 0.5),
+            nameColumns = math.floor(bounded(plates.nameColumns, 22, 8, 40) + 0.5),
+            showPercent = plates.showPercent ~= false,
+            castHeight = math.floor(bounded(plates.castHeight, 7, 4, 16) + 0.5),
+            targetIndicator = plates.targetIndicator ~= false,
+            nonTargetAlpha = math.floor(bounded(plates.nonTargetAlpha, 75, 0, 100) + 0.5),
+            threatColor = plates.threatColor == true,
+        }
+        -- Idle alpha per bar: 0..100 integers keyed by a catalogued bar key, so a
+        -- damaged save cannot invent a bar the scheduler has no branch for.
+        local idle = {}
+        if type(ui.actionBarIdleAlpha) == "table" then
+            for key, value in pairs(ui.actionBarIdleAlpha) do
+                if type(key) == "string" and app.BarModel:Native(key)
+                    and finite(value) and value >= 0 and value <= 100 then
+                    idle[key] = math.floor(value + 0.5)
+                end
+            end
+        end
+        result.ui.actionBarIdleAlpha = idle
+    end
     -- Container view: collapsed section names (known sections only) and up to
     -- four pinned currency ids; anything else is dropped.
     local collapsed, pinned = {}, {}
@@ -488,6 +611,39 @@ function Store:Open(character)
         if not migrations.takeover015 then
             for _, profile in pairs(profiles) do self:ApplyTakeover(profile) end
             migrations.takeover015 = true
+        end
+        -- 019: the Pearl screen's edge defaults. A profile written before this
+        -- build stored the wide chat (or the explicit zero that meant "client
+        -- size") and the own rows as "native". Each value is moved only while it
+        -- is still the old default, so a player who already chose a size or
+        -- turned the own runes off keeps that choice. The migration runs once and
+        -- never again.
+        migrations.pearlEdge019 = type(saved.migrations) == "table"
+            and saved.migrations.pearlEdge019 == true
+        if not migrations.pearlEdge019 then
+            for _, profile in pairs(profiles) do
+                local ui = type(profile.ui) == "table" and profile.ui or nil
+                if ui then
+                    -- Chat: zero or the client's own default means "never chosen".
+                    if not (type(ui.chatWidth) == "number" and ui.chatWidth >= 240) then
+                        ui.chatWidth, ui.chatHeight = 328, 152
+                    end
+                    -- The duplicate performance readout: the strip already owns
+                    -- it, so the second copy only appears when a profile asked.
+                    if profile.modules and profile.modules.topPerformance == nil then
+                        profile.modules.topPerformance = false
+                    end
+                    -- An absent field is "never chosen". "native" written by the
+                    -- old default is indistinguishable from a deliberate choice,
+                    -- so only a missing value is promoted; `/luma runes` and the
+                    -- settings switch still reach the client display.
+                    if ui.resourceRunes == nil then ui.resourceRunes = "owned" end
+                    if ui.resourceFragments == nil then ui.resourceFragments = "owned" end
+                    if ui.playerCastOwned == nil then ui.playerCastOwned = true end
+                    if ui.experienceMode == nil then ui.experienceMode = "bottomRail" end
+                end
+            end
+            migrations.pearlEdge019 = true
         end
         -- The adopted-screen record survives a reload, so a player who restarts
         -- can still return to the profile their copy came from.

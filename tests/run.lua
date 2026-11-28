@@ -5646,6 +5646,7 @@ test("a texture-drawn nameplate bar is decorated without repainting the fill", f
     eq(bar.color[1], 0.2)
     app.Store:Set("modules", "nameplates", false)
     eq(bar.lumaNameplateBg:IsShown(), false)
+    H.noBarColor = nil
     eq(#app.errors, 0)
 end)
 
@@ -5735,6 +5736,7 @@ test("a nameplate bar without a readable colour keeps its native fill", function
     app.Store:Set("ui", "plateOwned", false)
     app.Store:Set("modules", "nameplates", true)
     -- No GetStatusBarColor on this bar, so the colour cannot be put back.
+    H.noBarColor = true
     local bar = H.NewFrame(nil, UIParent)
     H.nameplates.target = H.Plate("modern", bar)
     H.Fire("PLAYER_TARGET_CHANGED")
@@ -7066,6 +7068,479 @@ test("a forbidden frame is never animated or touched", function()
 end)
 
 -- ==== TRACK: VIS-07 controls —append new tests above this line ====
+-- ==== TRACK: 019 Step 2 — shipped defaults and the strip experience rail ====
+test("019 shipped defaults: strip rail, own resources, own cast and compact chat", function()
+    local app = H.Load({ profiles = {}, migrations = { pearlEdge019 = true } })
+    H.Fire("PLAYER_LOGIN")
+    local ui = app.Store:Profile().ui
+    -- A fresh profile is built for the Pearl screen, not the old one.
+    eq(ui.experienceMode, "bottomRail")
+    eq(ui.resourceRunes, "owned")
+    eq(ui.resourceFragments, "owned")
+    eq(ui.playerCastOwned, true)
+    eq(ui.chatWidth, 328)
+    eq(ui.chatHeight, 152)
+    eq(app.Store:Profile().modules.topPerformance, false)
+    eq(#app.errors, 0)
+end)
+
+test("019 migration promotes the new defaults once and keeps explicit choices", function()
+    -- A profile written before this build: no experience mode, the wide chat,
+    -- and the own rows never chosen. Everything moves.
+    local app = H.Load({ profiles = { Default = { ui = { chatWidth = 0, chatHeight = 0 } } } })
+    H.Fire("PLAYER_LOGIN")
+    local ui = app.Store:Profile().ui
+    eq(ui.experienceMode, "bottomRail")
+    eq(ui.resourceRunes, "owned")
+    eq(ui.playerCastOwned, true)
+    eq(ui.chatWidth, 328)
+    eq(ui.chatHeight, 152)
+    eq(app.Store:Profile().modules.topPerformance, false)
+    -- A saved width is the player's own size and survives the migration.
+    local tuned = H.Load({ profiles = { Default = { ui = { chatWidth = 460, chatHeight = 210 } } } })
+    H.Fire("PLAYER_LOGIN")
+    eq(tuned.Store:Profile().ui.chatWidth, 460)
+    eq(tuned.Store:Profile().ui.chatHeight, 210)
+    -- An explicit "native" row is a choice and is never promoted.
+    local native = H.Load({ profiles = { Default = { ui = {
+        resourceRunes = "native", resourceFragments = "native", experienceMode = "hidden",
+    } } } })
+    H.Fire("PLAYER_LOGIN")
+    eq(native.Store:Profile().ui.resourceRunes, "native")
+    eq(native.Store:Profile().ui.resourceFragments, "native")
+    eq(native.Store:Profile().ui.experienceMode, "hidden")
+end)
+
+test("019 the experience rail rides the strip and returns to the wide bar", function()
+    local app = H.Load({ profiles = { Default = { ui = { experienceMode = "bottomRail" } } } })
+    H.Fire("PLAYER_LOGIN")
+    local experience = app.components.experience
+    local strip = app.components.dataStrip
+    eq(experience.surface, "bottomRail")
+    eq(experience.frame:IsShown(), true)
+    eq(experience.frame:GetHeight(), 3)
+    -- Anchored to the band, so moving the strip carries the hairline with it.
+    eq(experience.frame.point[1], "BOTTOMLEFT")
+    eq(experience.frame.point[2], strip.frame)
+    -- The three-pixel rail draws no label and no rested band.
+    eq(experience.text:IsShown(), false)
+    eq(experience.rested:IsShown(), false)
+    -- Switching back to the wide bar restores the readable form.
+    app.Store:Set("ui", "experienceMode", "topBar")
+    experience:Refresh()
+    eq(experience.surface, "topBar")
+    eq(experience.frame:GetHeight(), 20)
+    eq(experience.text:IsShown(), true)
+    -- "hidden" hands the client's own bar back without drawing a fake zero.
+    app.Store:Set("ui", "experienceMode", "hidden")
+    experience:Refresh()
+    eq(experience.frame:IsShown(), false)
+    eq(_G.MainStatusTrackingBarContainer:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("019 blood death knight sees six own runes by default", function()
+    -- The shipped default takes over PlayerFrame, which hides its child
+    -- RuneFrame: the own layer is what makes the runes visible at all.
+    local app = H.Load({ profiles = {}, migrations = { pearlEdge019 = true } })
+    H.unitInfo.player.class = "DEATHKNIGHT"
+    H.runes = {}
+    for index = 1, 6 do
+        H.runes[index] = { start = 0, duration = 10, ready = index > 2 }
+    end
+    _G.GetRuneCooldown = function(index)
+        local rune = H.runes[index]
+        if not rune then return 0, 0, true end
+        return rune.start, rune.duration, rune.ready
+    end
+    H.now = 2.5
+    H.Fire("PLAYER_LOGIN")
+    app:Reconcile()
+    local resource = app.components.playerResource
+    eq(app.Store:Profile().ui.resourceRunes, "owned")
+    eq(resource.runes:IsShown(), true)
+    -- Six segments, and the ready three are the accent colour while the three
+    -- charging ones are dimmed to a fraction of it.
+    local accent = app.Theme:Accent()
+    local readyR, readyG = resource.runes.bars[3]:GetStatusBarColor()
+    local chargeR = select(1, resource.runes.bars[1]:GetStatusBarColor())
+    eq(math.abs(readyR - accent[1]) < 1e-6, true)
+    eq(math.abs(readyG - accent[2]) < 1e-6, true)
+    eq(chargeR < accent[1] * 0.6, true)
+    -- The lane reserves the taller row so nothing overlaps the buff row.
+    eq(resource.rail:GetHeight() > 8, true)
+    eq(app.Layout.resourceHeight, resource.rail:GetHeight())
+    -- `/luma runes` still hands the row back to the client.
+    SlashCmdList.LUMAUI("runes")
+    eq(app.Store:Profile().ui.resourceRunes, "native")
+    eq(resource.runes:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("019 the own cast bar draws from a duration object", function()
+    local app = H.Load({ profiles = { Default = { ui = { playerCastOwned = true } } } })
+    H.Fire("PLAYER_LOGIN")
+    local cast = app.components.playerCast
+    eq(cast.running, true)
+    -- A duration object is handed straight to SetTimerDuration; the fill is not
+    -- given a start/elapsed pair, so a restricted cast still draws.
+    local duration = H.Duration({ remaining = 1.4, total = 2.5 })
+    H.durations.player = { kind = "cast", remaining = 1.4, total = 2.5, object = duration }
+    H.Fire("UNIT_SPELLCAST_START", "player")
+    eq(cast.bar:IsShown(), true)
+    eq(cast.fill.timerDuration, duration)
+    eq(cast.timer:GetText(), "1.4")
+    H.durations.player = nil
+    H.Fire("UNIT_SPELLCAST_STOP", "player")
+    eq(cast.bar:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("019 cast bar previews every kind and leaves on combat", function()
+    local app = H.Load({ profiles = { Default = { ui = { playerCastOwned = true } } } })
+    H.Fire("PLAYER_LOGIN")
+    local cast = app.components.playerCast
+    eq(cast:StartPreview("cast"), true)
+    eq(cast.bar:IsShown(), true)
+    eq(cast.previewing, "cast")
+    -- The spark is a live-progress cue, so a preview does not show it.
+    eq(cast.spark:IsShown(), false)
+    eq(cast:StartPreview("channel"), true)
+    eq(cast.state.channel, true)
+    eq(cast:StartPreview("empower"), true)
+    eq(cast.state.empower, true)
+    eq(cast:StartPreview("nonsense"), false)
+    -- Entering combat ends the preview at once: a live bar must never draw a
+    -- synthetic cast.
+    H.Combat(true)
+    eq(cast.previewing, nil)
+    eq(cast.bar:IsShown(), false)
+    H.Combat(false)
+    eq(cast:StopPreview(), false)
+    eq(#app.errors, 0)
+end)
+
+-- ==== TRACK: 019 Step 4 — cards on every page, manifest hygiene ====
+test("019 every settings page presents its rows on a card", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    -- The pages that are not one of the five combat pages still gain the same
+    -- grouped surface, so no page reads as controls printed on bare fill.
+    for _, page in ipairs({ "chat", "quests", "containers", "tooltip", "groups", "info" }) do
+        settings:Toggle(page)
+        local current = settings.pages[page]
+        eq(current ~= nil, true)
+        eq(current.card ~= nil, true)
+        eq(current.card.lumaSurfaceRole, "section")
+        eq(current.card.lumaRimTop:IsShown(), true)
+    end
+    -- The overview is carded too, and its card grows with the content.
+    settings:Select("overview")
+    local overview = settings.pages.overview
+    eq(overview.card ~= nil, true)
+    eq(overview.card:GetHeight() > 0, true)
+    eq(#app.errors, 0)
+end)
+
+test("019 the manifest is cross-platform and loads the previews first", function()
+    local lines = {}
+    for line in io.lines("LumaUI.toc") do lines[#lines + 1] = line end
+    local previews, modules
+    for index, line in ipairs(lines) do
+        -- Directives keep their value; only file entries are paths.
+        local entry = line:match("^([^#].*%.lua)%s*$")
+        if entry then
+            eq(entry:find("\\", 1, true), nil)
+            eq(entry:find("/", 1, true) ~= nil, true)
+        end
+        if line:match("UI/SettingsPreviews%.lua") then previews = index end
+        if line:match("UI/SettingsModules%.lua") then modules = index end
+    end
+    eq(previews ~= nil, true)
+    eq(modules ~= nil, true)
+    eq(previews < modules, true)
+end)
+
+-- ==== TRACK: 019 Step 1 — prism surfaces, capsule controls, motion ====
+test("019 the five combat pages each build a live preview stage", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local settings = app.Settings
+    for _, page in ipairs({ "cooldowns", "actionBars", "unitFrames", "resources", "nameplates" }) do
+        settings:Toggle(page)
+        local current = settings.pages[page]
+        eq(current.preview ~= nil, true)
+        eq(current.preview:IsShown(), true)
+        eq(current.preview.lumaSurfaceRole, "preview")
+    end
+    -- A non-combat page has no plinth to sit empty.
+    settings:Select("tooltip")
+    eq(settings.pages.tooltip.preview, nil)
+    eq(#app.errors, 0)
+end)
+
+test("019 stored cooldown appearance reaches the cells and their countdown", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local views = app.Store:Profile().ui.cooldownViews
+    eq(views.countdownSize, 15)
+    eq(views.showSwipe, true)
+    eq(views.showProcGlow, true)
+    eq(app.Store:Set("ui", "cooldownViews", {
+        countdownSize = 20, borderSize = 2, showSwipe = false,
+        showProcGlow = false, desaturateUnusable = false,
+    }), true)
+    local stored = app.Store:Profile().ui.cooldownViews
+    eq(stored.countdownSize, 20)
+    eq(stored.borderSize, 2)
+    -- Out-of-range values are clamped, never accepted verbatim.
+    app.Store:Set("ui", "cooldownViews", { countdownSize = 99, borderSize = 9 })
+    stored = app.Store:Profile().ui.cooldownViews
+    eq(stored.countdownSize, 24)
+    eq(stored.borderSize, 2)
+    -- A cell follows the stored size without being rebuilt.
+    local cell = app.PearlCell:Create(UIParent, 26)
+    app.PearlCell:SetTime(cell, 12.5)
+    eq(cell.time.fontSize, 24)
+    eq(cell.time.text, "12")
+    eq(cell.time.fontFlags, "OUTLINE")
+    app.PearlCell:Clear(cell)
+    eq(#app.errors, 0)
+end)
+
+test("019 unit frame geometry is stored per unit and applied", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Store:Set("modules", "unitFrames", true)
+    local units = app.components.unitFrames
+    local frame = units.frames.player
+    local before = frame.metrics.width
+    -- The page writes the selected unit's entry, then asks the component to
+    -- apply it; the size write is queued because the frame is protected.
+    app.Store:Set("ui", "unitFrames", {
+        player = { width = 220, healthHeight = 18, powerHeight = 5, nameSize = 13,
+            colorMode = "auto", healthFormat = "both", auraSize = 16, auraLimit = 5, castHeight = 12 },
+    })
+    eq(app.Store:Profile().ui.unitFrames.player.width, 220)
+    units:ApplyUnitConfig("player")
+    eq(units.frames.player.metrics.width, 220)
+    eq(units.frames.player.metrics.health, 18)
+    eq(units.frames.player.healthFormat, "both")
+    eq(units.frames.player.name.fontSize, 13)
+    eq(frame.metrics.width ~= before, true)
+    -- A damaged value is bounded, not trusted.
+    app.Store:Set("ui", "unitFrames", { player = { width = 5000, healthFormat = "nonsense" } })
+    eq(app.Store:Profile().ui.unitFrames.player.width, 260)
+    eq(app.Store:Profile().ui.unitFrames.player.healthFormat, "percent")
+    eq(#app.errors, 0)
+end)
+
+test("019 nameplate size changes reach an existing plate view", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local PV = app.PlateView
+    local host = H.NewFrame(nil, UIParent)
+    local view = PV:Create(host)
+    PV:SetTarget(view, false)
+    eq(view.width, PV.Spec.width)
+    -- A stored width is applied to a plate that already exists.
+    app.Store:Set("ui", "nameplates", { width = 150, height = 10, targetWidth = 170,
+        targetHeight = 12, nameColumns = 18, showPercent = true, castHeight = 9,
+        targetIndicator = true, nonTargetAlpha = 60, threatColor = false })
+    PV:RefreshSpec()
+    PV:SetTarget(view, false)
+    eq(view.width, 150)
+    eq(view.height, 10)
+    eq(view.frame:GetAlpha(), 0.6)
+    PV:SetTarget(view, true)
+    eq(view.width, 170)
+    eq(view.frame:GetAlpha(), 1)
+    -- The cast row takes the stored height and a duration object, with no
+    -- arithmetic on any restricted value.
+    app.Store:Set("ui", "nameplates", { castHeight = 11 })
+    PV:RefreshSpec()
+    local duration = H.Duration({ remaining = 1, total = 2 })
+    eq(PV:SetCast(view, { durationObject = duration, name = "Cast", channel = false }), true)
+    eq(view.cast:IsShown(), true)
+    eq(view.castBar.timerDuration, duration)
+    PV:Release(host)
+    eq(#app.errors, 0)
+end)
+test("019 surface hierarchy: window, section, field and preview each have a rim", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local holder = H.NewFrame(nil, UIParent)
+    holder:SetSize(200, 80)
+    -- Every level of the page is a distinct material, not a second name for one
+    -- of the others: the colour token and the role behind it are different.
+    local section = app.Surface:Role("section")
+    local field = app.Surface:Role("field")
+    local preview = app.Surface:Role("preview")
+    eq(section.color, "section")
+    eq(field.color, "field")
+    eq(preview.color, "preview")
+    eq(app.Surface.roles.section.rim, true)
+    eq(app.Surface.roles.field.rim, true)
+    eq(app.Surface.roles.preview.rim, true)
+    -- A card is still the only role that owns a shadow: a page of floating
+    -- shadows is the noise the hierarchy exists to remove.
+    eq(app.Surface.roles.card.shadow, true)
+    eq(app.Surface.roles.section.shadow, false)
+    local card = app.Controls:Card(holder, "Section", "subtitle")
+    eq(card.lumaSurfaceRole, "section")
+    eq(card.lumaRimTop:IsShown(), true)
+    eq(card.lumaRimBottom:IsShown(), true)
+    eq(card.lumaRimTop:GetHeight(), app.Pixel:Pixels(1, card))
+    eq(card.title:GetText(), "Section")
+    eq(card.subtitle:GetText(), "subtitle")
+    -- The body grows with the caller's own height, title block included.
+    local before = card:GetHeight()
+    card:Layout(100)
+    eq(card:GetHeight() > before, true)
+    eq(card:GetHeight() >= 100, true)
+    -- A role without a rim hides the bands a previous paint left behind.
+    app.Surface:Plate(card, "inset")
+    eq(card.lumaRimTop:IsShown(), false)
+    eq(#app.errors, 0)
+end)
+
+test("019 Theme:SetBarValue and SetBarMinMax ask the client to interpolate", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local bar = app.Theme:Bar(UIParent, 10)
+    local smooth = _G.Enum.StatusBarInterpolation.ExponentialEaseOut
+    -- Motion on: the native easing token is the second argument, so the client
+    -- owns the tween and no Lua frame runs.
+    app.Store:Set("appearance", "motion", true)
+    eq(app.Theme:SetBarValue(bar, 42), true)
+    eq(bar.value, 42)
+    eq(bar.valueInterpolation, smooth)
+    eq(app.Theme:SetBarMinMax(bar, 0, 100), true)
+    eq(bar.maximum, 100)
+    eq(bar.minMaxInterpolation, smooth)
+    -- Immediate overrides the tween: a reset or a fresh frame must land at once.
+    app.Theme:SetBarValue(bar, 10, true)
+    eq(bar.valueInterpolation, nil)
+    -- Reduced motion settles the same way without touching the stored profile.
+    app.Store:Set("appearance", "reduceMotion", true)
+    app.Theme:SetBarValue(bar, 77)
+    eq(bar.valueInterpolation, nil)
+    eq(bar.value, 77)
+    app.Store:Set("appearance", "reduceMotion", false)
+    -- A client without the enum keeps the plain call instead of failing.
+    local saved = _G.Enum.StatusBarInterpolation
+    _G.Enum.StatusBarInterpolation = nil
+    app.Theme:SetBarValue(bar, 12)
+    eq(bar.value, 12)
+    _G.Enum.StatusBarInterpolation = saved
+    eq(#app.errors, 0)
+end)
+
+test("019 motion primitives land on their final state with motion off", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local frame = H.NewFrame(nil, UIParent)
+    local region = H.NewFrame(nil, UIParent)
+    app.Store:Set("appearance", "motion", false)
+    local appeared, vanished, bumped = 0, 0, 0
+    app.Transitions:Appear("probe", frame, { onDone = function() appeared = appeared + 1 end })
+    eq(frame:GetAlpha(), 1)
+    eq(appeared, 1)
+    app.Transitions:Vanish("probe", frame, nil, function() vanished = vanished + 1 end)
+    eq(frame:GetAlpha(), 0)
+    eq(vanished, 1)
+    app.Transitions:Bump("probe", region, 1.08, function() bumped = bumped + 1 end)
+    eq(region:GetScale(), 1)
+    eq(bumped, 1)
+    -- Nothing was queued: a reduced-motion session never drives a ticker.
+    eq(app.Transitions:Count(), 0)
+    eq(app.Transitions:HasDriver(), false)
+    -- Motion back on: the fade runs and finishes at the visible state.
+    app.Store:Set("appearance", "motion", true)
+    frame:SetAlpha(0)
+    app.Transitions:Appear("probe", frame)
+    H.Advance(1)
+    eq(frame:GetAlpha(), 1)
+    eq(app.Transitions:Count(), 0)
+    eq(#app.errors, 0)
+end)
+
+test("019 segmented switch moves the highlight and reports the pick once", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local picks = {}
+    local seg = app.Controls:Segmented(UIParent,
+        { { id = "essential", label = "A" }, { id = "utility", label = "B" }, { id = "buffs", label = "C" } },
+        300, { onSelect = function(id) picks[#picks + 1] = id end })
+    eq(seg.current, "essential")
+    eq(seg.highlight:IsShown(), true)
+    H.Click(seg.buttons[2])
+    eq(seg.current, "utility")
+    eq(picks[1], "utility")
+    -- Clicking the current item is not a change and must not fire again.
+    H.Click(seg.buttons[2])
+    eq(#picks, 1)
+    -- A programmatic refresh moves the block without calling back.
+    seg:SetSelected("buffs", true)
+    eq(#picks, 1)
+    eq(seg.current, "buffs")
+    eq(seg.highlight:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
+test("019 range rows take an exact typed value and clamp it", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    local value, commits = 1, 0
+    local row = app.Controls:Range(UIParent, "Probe", 0, 0.5, 1.5, 0.05,
+        function() return value end, function(v) value = v; commits = commits + 1 end)
+    row:Update()
+    eq(row.valueLabel:GetText(), "100%")
+    -- The value label opens a field; Enter commits the typed number.
+    row.valueLabel.scripts.OnMouseDown(row.valueLabel)
+    eq(row.editing, true)
+    eq(row.editor:IsShown(), true)
+    row.editor:SetText("0.75")
+    row.editor.scripts.OnEnterPressed(row.editor)
+    eq(row.editing, false)
+    eq(commits, 1)
+    eq(math.abs(value - 0.75) < 1e-9, true)
+    eq(row.valueLabel:GetText(), "75%")
+    -- Out-of-range input is clamped to the documented bounds.
+    row.valueLabel.scripts.OnMouseDown(row.valueLabel)
+    row.editor:SetText("9")
+    row.editor.scripts.OnEnterPressed(row.editor)
+    eq(value, 1.5)
+    eq(commits, 2)
+    -- Esc restores the shown value without committing anything.
+    row.valueLabel.scripts.OnMouseDown(row.valueLabel)
+    row.editor:SetText("0.6")
+    row.editor.scripts.OnEscapePressed(row.editor)
+    eq(commits, 2)
+    eq(value, 1.5)
+    eq(row.valueLabel:GetText(), "150%")
+    eq(#app.errors, 0)
+end)
+
+test("019 navigation, switch and scroll are compact and quiet", function()
+    local app = H.Load(); H.Fire("PLAYER_LOGIN")
+    app.Settings:Toggle("minimap")
+    local nav = app.Settings.navigation.minimap
+    -- A 28 px row with a capsule wash instead of a four-sided gold frame.
+    eq(nav:GetHeight(), 28)
+    eq(nav.selectedCapsule:IsShown(), true)
+    eq(nav.ring.borderColor[4] < 0.5, true)
+    local row = app.Controls:Toggle(UIParent, "Probe", 0, function() return true end, function() end)
+    row:Update()
+    eq(row.track:GetWidth(), 38)
+    eq(row.track:GetHeight(), 20)
+    eq(row.thumb:GetWidth(), 16)
+    eq(row.statusText:GetText(), "")
+    -- The rail is a 3 px hairline that disappears when the page fits.
+    local scroll = app.Controls:Scroll(UIParent, 300, 100)
+    local body = CreateFrame("Frame", nil, scroll)
+    body:SetSize(300, 50)
+    scroll:SetScrollChild(body)
+    scroll:UpdateRange()
+    eq(scroll.bar:GetWidth(), 3)
+    eq(scroll.bar:IsShown(), false)
+    body:SetHeight(400)
+    scroll:UpdateRange()
+    eq(scroll.bar:IsShown(), true)
+    eq(#app.errors, 0)
+end)
+
 test("selected navigation keeps its accent after the mouse leaves", function()
     local app = H.Load(); H.Fire("PLAYER_LOGIN")
     app.Settings:Toggle("minimap")
@@ -7265,12 +7740,16 @@ test("tabs and fold headers resolve their own selected state", function()
     H.Click(header)
     eq(folds[1], true)
     eq(header.mark:GetText(), "+")
-    eq(header.state.selected, true)
+    -- 019: folding is not selection. Writing `selected` from the fold lit a
+    -- full accent frame around every collapsed "internal components" section.
+    eq(header.state.selected, false)
+    eq(header.ring.borderColor[4], 0)
     H.Click(header)
     eq(folds[2], false)
     eq(header.mark:GetText(), "-")
     header:SetFolded(true)
     eq(header.mark:GetText(), "+")
+    eq(header.state.selected, false)
     eq(#app.errors, 0)
 end)
 
@@ -7372,10 +7851,11 @@ test("settings header is compact and the general page scrolls", function()
     local general = app.Settings.pages.overview
     eq(frame:IsShown(), true)
     eq(general:IsShown(), true)
-    -- Pages start above the old 110px header, so the content area is taller.
+    -- 019: the 880x600 window puts the page column right of the 200 px
+    -- navigation, under the taller header rule.
     eq(general.point[1], "TOPLEFT")
-    eq(general.point[2], 228)
-    eq(general.point[3], -72)
+    eq(general.point[2], app.Settings.PAGE_LEFT)
+    eq(general.point[3], app.Settings.PAGE_TOP)
     eq(app.Settings.versionLabel:GetText(), app.version)
     eq(app.Settings.closeButton ~= nil, true)
     -- Long content lives in a scroll area instead of running past the window.
@@ -7416,10 +7896,10 @@ test("settings controls fit their scroll content without clipping the values", f
     local page = app.Settings.pages.overview
     for _, control in ipairs(page.settings) do
         if control.slider then
-            eq(control:GetWidth(), 462)
-            eq(control.slider:GetWidth(), 462)
+            eq(control:GetWidth(), app.Settings.COLUMN)
+            eq(control.slider:GetWidth(), app.Settings.COLUMN)
         elseif control.kind == "switch" then
-            eq(control:GetWidth(), 462)
+            eq(control:GetWidth(), app.Settings.COLUMN)
             eq(control.text.point[1], "RIGHT")
             eq(control.text.point[2], control.statusText)
         end
@@ -7691,8 +8171,8 @@ test("general page wraps long Chinese text inside its scroll area", function()
     app.Settings:Toggle("general")
     local page = app.Settings.pages.overview
     eq(page.compatibilityHint:GetText(), app.L.compatibilityHint)
-    eq(page.compatibilityHint.width, 462)
-    eq(page.instructions.width, 462)
+    eq(page.compatibilityHint.width, app.Settings.COLUMN)
+    eq(page.instructions.width, app.Settings.COLUMN)
     eq(page.scroll.rangeMax > 0, true)
     eq(#app.errors, 0)
 end)
@@ -8590,9 +9070,12 @@ test("the information strip owns the bottom bar while experience stays on top", 
 end)
 
 test("a stale top info centre cannot drag the experience bar off the screen axis", function()
-    local app = H.Load({ schema = 1, profiles = { Default = { positions = {
-        topInfo = { x = -900, y = 420 },
-    } } } })
+    -- The top band only exists in the wide "topBar" form; the shipped strip
+    -- rail has no draggable band of its own.
+    local app = H.Load({ schema = 1, profiles = { Default = {
+        ui = { experienceMode = "topBar" },
+        positions = { topInfo = { x = -900, y = 420 } },
+    } } })
     H.Fire("PLAYER_LOGIN")
     local group = app.Layout.entries.topInfo
     -- The band keeps the saved height but its centre stays on the screen axis,
@@ -8605,9 +9088,10 @@ test("a stale top info centre cannot drag the experience bar off the screen axis
 end)
 
 test("a legacy experience position is centred inside the top information band", function()
-    local app = H.Load({ schema = 1, profiles = { Default = { positions = {
-        experience = { x = -900, y = 500 },
-    } } } })
+    local app = H.Load({ schema = 1, profiles = { Default = {
+        ui = { experienceMode = "topBar" },
+        positions = { experience = { x = -900, y = 500 } },
+    } } })
     H.Fire("PLAYER_LOGIN")
     local xp = app.Layout.entries.experience
     -- The old absolute centre only contributes its height; the corrected
@@ -12987,17 +13471,25 @@ test("a class resource gets a second rail only when the client reports it", func
     _G.UnitPowerMax = function(unit, kind) if kind == 4 then return 5 end return 100 end
     component:Refresh()
     eq(component.secondaryType, 4)
-    eq(rail.secondary:IsShown(), true)
-    eq(rail:GetHeight(), 21)
+    -- 019: a small-capacity class resource (combo points, holy power, chi,
+    -- shards, arcane charges, essence) is drawn as counted pips, not as a short
+    -- continuous bar.
+    eq(rail.secondary:IsShown(), false)
+    eq(rail.segments:IsShown(), true)
+    eq(rail.segments.capacity, 5)
+    eq(rail.segments.pips[3].IsShown ~= nil, true)
+    eq(rail.segments.pips[5]:IsShown(), true)
+    eq(rail.segments.pips[6], nil)
+    -- Primary rail plus the pip row and its gap.
+    eq(rail:GetHeight(), 8 + 6 + 3)
     eq(rail.primary.value, 60)
     eq(rail.primary.maximum, 100)
-    eq(rail.secondary.value, 3)
-    eq(rail.secondary.maximum, 5)
     -- A restricted maximum is not evidence of a resource: the rail goes away.
     _G.UnitPowerMax = function() return H.Secret(100) end
     component:Refresh()
     eq(component.secondaryType, nil)
     eq(rail.secondary:IsShown(), false)
+    eq(rail.segments:IsShown(), false)
     _G.UnitPower, _G.UnitPowerMax = power, powerMax
     app.Store:Set("modules", "playerResource", false)
     eq(#app.errors, 0)

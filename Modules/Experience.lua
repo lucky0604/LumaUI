@@ -6,6 +6,19 @@ local function plain(value, expected)
 end
 
 local MODE_XP, MODE_REPUTATION = "xp", "reputation"
+local RAIL_HEIGHT = 3
+local RAIL_WIDTH = 220
+
+-- Where the reading is drawn. "bottomRail" is a 3 px hairline along the top edge
+-- of the information strip, so the sky stays empty the way the visual target
+-- shows it; "topBar" keeps the older wide bar for players who want the numbers
+-- spelled out; "hidden" draws nothing and hands the client its own bar back.
+local function experienceMode()
+    local ui = app.Store and app.Store:Profile().ui
+    local mode = ui and ui.experienceMode
+    if mode == "topBar" or mode == "hidden" then return mode end
+    return "bottomRail"
+end
 
 -- The client's own status bars are the ground truth this module replaces: they
 -- carry the same experience or watched faction, plus rested and locked states.
@@ -204,6 +217,12 @@ end
 local function paintRested(self, current, maximum, rested)
     local texture = self.rested
     if not texture then return end
+    -- The rail is three pixels tall: a second band there would only muddy the
+    -- hairline, and the strip tooltip already reports the rested pool.
+    if self.surface == "bottomRail" then
+        texture:Hide()
+        return
+    end
     current, maximum, rested = plain(current, "number"), plain(maximum, "number"), plain(rested, "number")
     local width = self.bar and plain(self.bar:GetWidth(), "number") or nil
     if not width or width <= 0 or not current or not maximum or maximum <= 0 or not rested or rested <= 0 then
@@ -222,17 +241,84 @@ local function paintRested(self, current, maximum, rested)
     texture:Show()
 end
 
-local function update(self)
+-- Reads whichever reading applies right now. Returns nil when neither does
+-- (max level, XP locked, nothing watched), which is the one case that must not
+-- draw a fake zero.
+local function readState()
     local faction, watching = watchedFaction()
     local xp = not watching and xpState() or nil
-    if not faction and not xp then
-        -- Nothing applies to this character right now (max level, XP locked,
-        -- no watched faction): the bar hides instead of printing a fake 0%,
-        -- and the client's own bar takes the reading back.
+    if not faction and not xp then return nil end
+    return faction, xp
+end
+
+-- A 3 px rail along the strip's top edge. It is the same StatusBar as the wide
+-- bar, only resized and re-anchored, so the reading, its colour and the rested
+-- band all come from one draw path. The rail has no text of its own: at three
+-- pixels a label would only cut the hairline, and the strip's own tooltip
+-- carries the numbers.
+local function layoutRail(self)
+    local frame = self.frame
+    if not frame then return end
+    local strip = app.components and app.components.dataStrip
+    local host = strip and strip.frame
+    frame:ClearAllPoints()
+    if host then
+        -- The strip is a layout group and is scaled as one; anchoring to it
+        -- keeps the rail on the band through a profile move or a resize. One
+        -- point plus an explicit width, so the rail's own scale never doubles
+        -- the band's.
+        local width = plain(host:GetWidth(), "number") or RAIL_WIDTH
+        frame:SetSize(math.max(1, width), RAIL_HEIGHT)
+        frame:SetPoint("BOTTOMLEFT", host, "TOPLEFT", 0, 0)
+    else
+        frame:SetSize(RAIL_WIDTH, RAIL_HEIGHT)
+        frame:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, (app.Theme.strip.height or 30) + 1)
+    end
+    self.bar:ClearAllPoints()
+    self.bar:SetPoint("TOPLEFT", 1, -1)
+    self.bar:SetPoint("BOTTOMRIGHT", -1, 1)
+    self.text:Hide()
+end
+
+-- The older wide bar: 650 x 20 hanging from the top information band. The band
+-- itself is a layout group, so only its member offset is written here and a
+-- profile that moved the band carries the bar with it.
+local function layoutTopBar(self)
+    local frame = self.frame
+    frame:SetSize(650, 20)
+    self.bar:ClearAllPoints()
+    self.bar:SetPoint("TOPLEFT", 1, -1)
+    self.bar:SetPoint("BOTTOMRIGHT", -1, 1)
+    local screenHeight = UIParent:GetHeight()
+    app.Layout:Join("topInfo", "experience", frame, 0, screenHeight / 2 - 64,
+        { label = app.L.topInfoGroup, x = 0, y = screenHeight / 2 - 47, width = 650, height = 59 })
+    self.text:Show()
+    self.text:SetWidth(630)
+    self.text:SetJustifyH("CENTER")
+end
+
+local function update(self)
+    local faction, xp = readState()
+    local mode = experienceMode()
+    -- "hidden" is a real choice: the bar goes away and the client keeps its own
+    -- reading, which is exactly what suppressNative(false) gives back.
+    if not faction and not xp or mode == "hidden" then
         self.mode, self.faction, self.current, self.maximum = nil, nil, nil, nil
         self.frame:Hide()
         suppressNative(self, false)
         return
+    end
+    -- Two shapes, one frame: the rail is the same StatusBar resized and
+    -- re-anchored, so switching in the settings never rebuilds anything. The
+    -- layout is written on a shape change only; a reading update never relayouts.
+    if mode == "bottomRail" then
+        if self.surface ~= "bottomRail" then
+            self.surface = "bottomRail"
+            layoutRail(self)
+        end
+    elseif self.surface ~= "topBar" then
+        self.surface = "topBar"
+        layoutTopBar(self)
     end
     self.frame:Show()
     suppressNative(self, true)
@@ -241,16 +327,20 @@ local function update(self)
         self.current, self.maximum = nil, nil
         self.bar:SetMinMaxValues(faction.minimum, faction.maximum)
         self.bar:SetValue(faction.current)
-        local percent = math.floor((faction.current - faction.minimum) / (faction.maximum - faction.minimum) * 100)
-        local label = faction.name .. (faction.standing and ("  ·  " .. faction.standing) or "")
-        if faction.rewardPending then label = label .. "  ·  " .. app.L.reputationRewardPending end
-        self.text:SetFormattedText("%s  %d%%", label, percent)
+        if self.surface == "topBar" then
+            local percent = math.floor((faction.current - faction.minimum) / (faction.maximum - faction.minimum) * 100)
+            local label = faction.name .. (faction.standing and ("  ·  " .. faction.standing) or "")
+            if faction.rewardPending then label = label .. "  ·  " .. app.L.reputationRewardPending end
+            self.text:SetFormattedText("%s  %d%%", label, percent)
+        end
         paintRested(self, nil)
     else
         self.mode, self.faction = MODE_XP, nil
         self.bar:SetMinMaxValues(0, xp.maximum)
         self.bar:SetValue(xp.current)
-        self.text:SetFormattedText("%s  %d%%", app.L.xp, math.floor(xp.current / xp.maximum * 100))
+        if self.surface == "topBar" then
+            self.text:SetFormattedText("%s  %d%%", app.L.xp, math.floor(xp.current / xp.maximum * 100))
+        end
         self.current, self.maximum = xp.current, xp.maximum
         paintRested(self, xp.current, xp.maximum, restedXP())
     end
@@ -312,9 +402,15 @@ app:RegisterComponent({ id = "experience", label = "experience",
             self.rested = rested
             frame:EnableMouse(true)
             tooltip(frame, self)
-            local screenHeight = UIParent:GetHeight()
-            app.Layout:Join("topInfo", "experience", frame, 0, screenHeight / 2 - 64,
-                { label = app.L.topInfoGroup, x = 0, y = screenHeight / 2 - 47, width = 650, height = 59 })
+        end
+        -- Only the wide form joins the top band. The rail follows the strip and
+        -- has no layout handle of its own, so a profile that never used the top
+        -- bar is not offered a movable rectangle for a 3 px hairline.
+        if experienceMode() == "topBar" then
+            layoutTopBar(self)
+            self.surface = "topBar"
+        else
+            self.surface = nil
         end
         -- Edit Mode can re-show the native container after the player moves it;
         -- the replacement owns the reading, so the suppression is replayed with
@@ -329,6 +425,9 @@ app:RegisterComponent({ id = "experience", label = "experience",
     Refresh = function(self)
         if not self.frame then return end
         app.Theme:PaintSurface(self.frame, "hud")
+        -- A mode change is a shape change: the surface tag is cleared so the
+        -- next update re-anchors instead of reusing the previous form.
+        self.surface = nil
         update(self)
     end,
     Disable = function(self)

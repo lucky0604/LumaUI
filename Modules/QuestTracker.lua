@@ -16,6 +16,11 @@ local LAYOUT_JOB = "questTracker/layout"
 local COLUMN_GAP = 6
 local COLUMN_GAP_WITHOUT_PANEL = 28
 local MIN_WIDTH = 120
+-- 019: the objective column stops above the bottom-right auxiliary area instead
+-- of growing into the damage meter and the data strip. The cap is applied to the
+-- container's height only; the client's own scroll and fold stay untouched, and
+-- a build with no readable screen height keeps the frame at its natural size.
+local MIN_HEIGHT = 180
 
 local function eachBlock(visit)
     for _, name in ipairs(TRACKERS) do
@@ -124,6 +129,22 @@ local function applyLayout(self)
     frame:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", 0,
         -((panel and COLUMN_GAP) or COLUMN_GAP_WITHOUT_PANEL))
     frame:SetWidth(math.max(MIN_WIDTH, width))
+    -- Height cap: the column ends above the bottom-right auxiliary area. The
+    -- frame's top is the map's bottom edge, so the available space is everything
+    -- between it and the strip plus the meter reserve. A build with no readable
+    -- map bottom leaves the native height alone.
+    local stripHeight = app.Theme.strip.height or 30
+    local mapBottom = nil
+    if type(anchor.GetBottom) == "function" then
+        local ok, value = pcall(anchor.GetBottom, anchor)
+        mapBottom = ok and app.Capabilities.Plain(value, "number") or nil
+    end
+    if mapBottom and mapBottom > 0 then
+        -- Meter reserve and the strip's top edge, with the same 34-unit clear
+        -- space the auxiliary bars keep.
+        local limit = mapBottom - (stripHeight + 34 + 160)
+        if limit >= MIN_HEIGHT then frame:SetHeight(limit) end
+    end
     self.anchorTarget = anchor
 end
 

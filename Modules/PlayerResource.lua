@@ -17,6 +17,9 @@ local _, app = ...
 local RAIL_HEIGHT = 8
 local SECONDARY_HEIGHT = 10
 local SECONDARY_GAP = 3
+-- Segmented class resources: one small pip per point, so "3 of 5 combo points"
+-- is countable at a glance instead of read off a shortened bar.
+local SEGMENT_WIDTH, SEGMENT_HEIGHT, SEGMENT_GAP = 12, 6, 2
 -- 012 phase 08: death knight runes as six own segments. Per-rune recovery is
 -- what a continuous 0..6 rail cannot express, so each rune gets its own small
 -- StatusBar fed by GetRuneCooldown. The native rune row keeps drawing until the
@@ -132,6 +135,7 @@ local function drawRunes(self)
     local now = type(GetTime) == "function" and select(2, pcall(GetTime)) or nil
     now = plain(now, "number")
     local recovering = false
+    local accent = app.Theme:Accent()
     for index = 1, RUNE_COUNT do
         local bar = runes.bars[index]
         local ok, start, duration, ready = pcall(GetRuneCooldown, index)
@@ -140,18 +144,29 @@ local function drawRunes(self)
         if bar then
             if ready == true then
                 bar:SetValue(1)
-                local accent = app.Theme:Accent()
                 bar:SetStatusBarColor(accent[1], accent[2], accent[3], 1)
+                -- A rune that just came up gets one short highlight: without a
+                -- cue the row is six identical bars and a player cannot tell
+                -- which one returned.
+                if bar.lumaReady ~= true and self.running and bar.lumaReady ~= nil then
+                    if app.Transitions and app.Transitions.Flash and bar.lumaGlow then
+                        app.Transitions:Flash(self, bar.lumaGlow, 0.32, 0.9)
+                    end
+                end
+                bar.lumaReady = true
             elseif start and duration and duration > 0 and now then
+                -- Charging: a low-saturation catch-up fill, so "still coming
+                -- back" never reads as a second ready rune.
                 local elapsed = math.max(0, math.min(duration, now - start))
                 bar:SetValue(elapsed / duration)
-                local dark = app.Theme.colors.muted
-                bar:SetStatusBarColor(dark[1], dark[2], dark[3], 1)
+                bar:SetStatusBarColor(accent[1] * 0.42, accent[2] * 0.42, accent[3] * 0.42, 0.9)
+                bar.lumaReady = false
                 if elapsed < duration then recovering = true end
             else
                 bar:SetValue(0)
                 local dark = app.Theme.colors.tapped
                 bar:SetStatusBarColor(dark[1], dark[2], dark[3], 1)
+                bar.lumaReady = false
             end
         end
     end
@@ -237,6 +252,74 @@ local function drawFragments(self)
     return FRAGMENT_HEIGHT + SECONDARY_GAP
 end
 
+-- Which classes use a segmented row and how many pips it has. The count is the
+-- documented capacity, so dividers can be placed without reading the live value.
+-- The keys are `Enum.PowerType` numbers; the numeric fallbacks live next to the
+-- names in SECONDARY_TYPES above.
+local SEGMENT_CAPACITY = {
+    [4] = 5,  -- ComboPoints
+    [12] = 5, -- Chi
+    [16] = 4, -- ArcaneCharges
+    [7] = 5,  -- SoulShards
+    [19] = 5, -- Essence
+    [9] = 5,  -- HolyPower
+}
+
+local function segmentsSupported(kind)
+    -- Segmented second resources: a small capacity that a bar expresses badly.
+    -- Anything a continuous rail shows correctly (Maelstrom, Fury, RunicPower)
+    -- stays on the bar path.
+    return kind ~= nil and SEGMENT_CAPACITY[kind] ~= nil
+end
+
+-- Draws the segmented row for a class resource. Every value goes through
+-- `UnitPower`/`UnitPowerMax` and `Plain`; a restricted maximum leaves the row
+-- hidden rather than inventing a capacity.
+local function drawSegments(self, kind)
+    local row = self.segments
+    if not row then return 0 end
+    local maximum = plain(UnitPowerMax("player", kind), "number")
+    local capacity = maximum and maximum > 0 and maximum or SEGMENT_CAPACITY[kind]
+    if not capacity or capacity <= 0 then
+        if row:IsShown() then row:Hide() end
+        return 0
+    end
+    if row.capacity ~= capacity then
+        row.capacity = capacity
+        row:SetWidth(capacity * SEGMENT_WIDTH + (capacity - 1) * SEGMENT_GAP)
+        for index = 1, capacity do
+            local pip = row.pips[index]
+            if not pip then
+                pip = row:CreateTexture(nil, "ARTWORK")
+                pip:SetSize(SEGMENT_WIDTH, SEGMENT_HEIGHT)
+                pip:SetColorTexture(1, 1, 1, 1)
+                row.pips[index] = pip
+            end
+            pip:ClearAllPoints()
+            pip:SetPoint("LEFT", row, "LEFT", (index - 1) * (SEGMENT_WIDTH + SEGMENT_GAP), 0)
+            pip:Show()
+        end
+        for index = capacity + 1, #row.pips do row.pips[index]:Hide() end
+    end
+    local accent = app.Theme:Accent()
+    local dark = app.Theme.colors.embedded
+    for index = 1, capacity do
+        local pip = row.pips[index]
+        -- Each pip is compared against its own index, which is LumaUI's counter,
+        -- not a restricted value: `UnitPower` only goes into the comparison's
+        -- right-hand side through a plain read, and a secret one leaves the row
+        -- at its resting colour instead of guessing.
+        local value = plain(UnitPower("player", kind), "number")
+        if value and index <= value then
+            pip:SetColorTexture(accent[1], accent[2], accent[3], 1)
+        elseif value then
+            pip:SetColorTexture(dark[1] * 1.9, dark[2] * 1.9, dark[3] * 1.9, 1)
+        end
+    end
+    row:Show()
+    return SEGMENT_HEIGHT + SECONDARY_GAP
+end
+
 local function draw(self)
     local bar = self.primary
     if not bar then return end
@@ -250,6 +333,7 @@ local function draw(self)
     -- The own rune row, when chosen, replaces that summary instead.
     if self.secondaryNative then
         drawFragments(self)
+        if self.segments and self.segments:IsShown() then self.segments:Hide() end
         if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
         local extra = drawRunes(self)
         local height = extra > 0 and (RAIL_HEIGHT + extra) or RAIL_HEIGHT
@@ -273,6 +357,20 @@ local function draw(self)
     end
     local kind = self.secondaryType
     if kind then
+        -- Segmented resources draw as pips: a five-point combo row is readable
+        -- as a count, while a 3/5-filled bar just looks short.
+        if segmentsSupported(kind) then
+            if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
+            local extra = drawSegments(self, kind)
+            if extra > 0 then
+                local height = RAIL_HEIGHT + extra
+                self.railHeight = height
+                self.rail:SetHeight(height)
+                app.Layout:SetResourceHeight(math.max(11, height))
+                return
+            end
+        end
+        if self.segments and self.segments:IsShown() then self.segments:Hide() end
         local secondMax = plain(UnitPowerMax("player", kind), "number")
         if secondMax and secondMax > 0 then
             local secondary = self.secondary
@@ -287,6 +385,7 @@ local function draw(self)
             return
         end
     end
+    if self.segments and self.segments:IsShown() then self.segments:Hide() end
     if self.secondary and self.secondary:IsShown() then self.secondary:Hide() end
     self.railHeight = RAIL_HEIGHT
     self.rail:SetHeight(RAIL_HEIGHT)
@@ -366,10 +465,28 @@ component = app:RegisterComponent({
                 segment:SetStatusBarTexture(app.Theme.media.combatFill)
                 segment:SetMinMaxValues(0, 1)
                 segment:SetValue(0)
+                -- Three layers per rune: a recessed well, the fill, and a soft
+                -- top light on the ready state. The well is slightly darker than
+                -- the rail so six segments read as six sockets, not one bar cut
+                -- by gaps.
                 segment.background = segment:CreateTexture(nil, "BACKGROUND")
                 segment.background:SetAllPoints()
                 local dark = app.Theme.colors.embedded
                 segment.background:SetColorTexture(dark[1], dark[2], dark[3], 1)
+                local well = segment:CreateTexture(nil, "BACKGROUND", nil, -2)
+                well:SetPoint("TOPLEFT", 0, 0)
+                well:SetPoint("BOTTOMRIGHT", 0, 0)
+                well:SetColorTexture(0.01, 0.015, 0.025, 0.9)
+                -- The ready glow is a hairline at the top of the segment, hidden
+                -- except during a Flash. A whole-segment overlay would wash the
+                -- fill out and hide the very state it announces.
+                local glow = segment:CreateTexture(nil, "OVERLAY")
+                glow:SetPoint("TOPLEFT", 0, 0)
+                glow:SetPoint("TOPRIGHT", 0, 0)
+                glow:SetHeight(app.Pixel:Pixels(1, segment))
+                glow:SetColorTexture(1, 0.97, 0.9, 1)
+                glow:SetAlpha(0)
+                segment.lumaGlow = glow
                 runes.bars[index] = segment
             end
             runes:Hide()
@@ -428,6 +545,17 @@ component = app:RegisterComponent({
             fragments:Hide()
             rail.fragments = fragments
             self.fragments = fragments
+            -- Segmented class resources: a pip row under the primary fill. It is
+            -- built once and re-shaped when the capacity changes (a spec switch
+            -- can move combo points from 5 to 7).
+            local segments = CreateFrame("Frame", "LumaUIPlayerSegments", rail)
+            segments:SetHeight(SEGMENT_HEIGHT)
+            segments:SetPoint("TOPLEFT", 0, -(RAIL_HEIGHT + SECONDARY_GAP))
+            segments:SetPoint("TOPRIGHT", 0, -(RAIL_HEIGHT + SECONDARY_GAP))
+            segments.pips = {}
+            segments:Hide()
+            rail.segments = segments
+            self.segments = segments
             self.rail, self.primary, self.secondary = rail, rail.primary, rail.secondary
             self.runes = runes
         end
@@ -476,6 +604,7 @@ component = app:RegisterComponent({
         stopRuneTicker(self)
         if self.runes then self.runes:Hide() end
         if self.fragments then self.fragments:Hide() end
+        if self.segments then self.segments:Hide() end
         if self.runeArc then self.runeArc:Hide() end
         if self.rail then self.rail:Hide() end
         if self.primary then self.primary:SetValue(0) end

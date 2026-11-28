@@ -3,6 +3,30 @@ local L, Controls = app.L, app.Controls
 local SettingsUI = { pages = {}, active = "overview", profileOffset = 0 }
 app.Settings = SettingsUI
 
+-- 019 geometry. The window grew from 760x574 to 880x600 so the navigation fits
+-- every page without a rail and the body can hold a card's worth of controls at
+-- once; `FitToScreen` still scales it down on a small viewport. `NAV_WIDTH` is
+-- the whole left column (panel plus gutter), `CONTENT` the body column every
+-- page and its cards are measured from.
+SettingsUI.WIDTH, SettingsUI.HEIGHT = 880, 600
+-- The whole left column (panel plus its gutter) and the body column every page
+-- and its cards are measured from. 16 + 200 + 22 = 238 for the page's left
+-- edge, and 880 - 238 - 30 = 612 for its width.
+SettingsUI.NAV_WIDTH, SettingsUI.CONTENT = 200, 612
+local CONTENT = SettingsUI.CONTENT
+local NAV_WIDTH = SettingsUI.NAV_WIDTH
+-- Body controls are one scrollbar's width narrower than the page frame, so a
+-- card can never slide under the rail.
+local COLUMN = CONTENT - 2
+SettingsUI.COLUMN = COLUMN
+-- Vertical anchors, kept in one place so the header, the page area and the
+-- footer cannot drift apart when one of them changes.
+local PAGE_LEFT, PAGE_TOP, PAGE_HEIGHT = 238, -74, 466
+SettingsUI.PAGE_LEFT, SettingsUI.PAGE_TOP, SettingsUI.PAGE_HEIGHT = PAGE_LEFT, PAGE_TOP, PAGE_HEIGHT
+-- Vertical advance per control kind. A range row is 44 px and a switch row 32;
+-- the step carries a few pixels of breathing room so two cards never touch.
+local RANGE_STEP, SWITCH_STEP = 50, 40
+
 -- Pages that existed before 015 keep answering to their old key, so a stored
 -- command, a bound macro or an older test still lands on the right page.
 local PAGE_ALIAS = { general = "overview", modules = "overview", layout = "profiles" }
@@ -11,7 +35,7 @@ SettingsUI.aliases = PAGE_ALIAS
 local function note(parent, text, y, width)
     local label = app.Type:Text(parent, "micro")
     label:SetPoint("TOPLEFT", 0, y)
-    label:SetWidth(width or 462)
+    label:SetWidth(width or COLUMN)
     label:SetText(text)
     label:SetJustifyV("TOP")
     return label
@@ -28,11 +52,11 @@ end
 local function section(parent, text, y)
     local label = app.Type:Text(parent, "label")
     label:SetPoint("TOPLEFT", 0, y)
-    label:SetWidth(462)
+    label:SetWidth(COLUMN)
     label:SetText(text)
     local line = app.Surface:HLine(parent, 0.3)
     line:SetPoint("TOPLEFT", 0, y - 15)
-    line:SetWidth(462)
+    line:SetWidth(COLUMN)
     return label
 end
 
@@ -78,21 +102,28 @@ function SettingsUI:Result(ok, message)
 end
 
 function SettingsUI:BuildOverview(page)
-    local scroll = Controls:Scroll(page, 464, 420)
+    local scroll = Controls:Scroll(page, CONTENT, PAGE_HEIGHT - 4)
     scroll:SetPoint("TOPLEFT")
     local body = CreateFrame("Frame", nil, scroll)
-    body:SetSize(462, 420)
+    body:SetSize(COLUMN, PAGE_HEIGHT - 4)
     scroll:SetScrollChild(body)
     page.scroll = scroll
+    -- 019: the whole overview is one card. The rows keep their own x=0 anchors
+    -- and the y cursor keeps measuring them, so the card is the container and
+    -- the page's existing flow is untouched. `paddingX = 0` is what makes that
+    -- true: with a 14 px inset every row would shift right by 14.
+    local card = Controls:Card(cardBody, L.overview, nil, { paddingX = 0 })
+    page.card = card
+    local cardBody = card.body
     local updates = {}
     local function get(key) return app.Store:Profile().appearance[key] end
     local function set(key, value) self:Result(app.Store:Set("appearance", key, value)) end
-    local hint = note(body, L.generalHint, 0, 462)
+    local hint = note(cardBody, L.generalHint, 0, COLUMN)
     local y = -noteHeight(hint, 26)
     -- 018 Step 3: the profile this character uses may still carry the geometry
     -- of the previous composition. Offer a copy on the new screen, and a way
     -- back once it was adopted; both buttons exist only when they can act.
-    local tryScreen = settingsControl(page, Controls:Button(body, L.screenTry, 220, function()
+    local tryScreen = settingsControl(page, Controls:Button(cardBody, L.screenTry, 220, function()
         local name, problem = app.Store:TryNewScreen()
         if name then
             self:Result(true, string.format(L.screenAdopted, name))
@@ -102,76 +133,76 @@ function SettingsUI:BuildOverview(page)
         self:Update()
     end))
     tryScreen:SetPoint("TOPLEFT", 0, y)
-    local backScreen = settingsControl(page, Controls:Button(body, L.screenBack, 220, function()
+    local backScreen = settingsControl(page, Controls:Button(cardBody, L.screenBack, 220, function()
         local ok, problem = app.Store:ReturnToSource()
         self:Result(ok, ok and L.screenReturned or (problem or L.readonly))
         self:Update()
     end))
     backScreen:SetPoint("TOPLEFT", 230, y)
     page.screenTry, page.screenBack = tryScreen, backScreen
-    page.screenLabel = note(body, "", 0, 462)
+    page.screenLabel = note(cardBody, "", 0, COLUMN)
     page.screenLabel:SetPoint("TOPLEFT", 0, y - 34)
     y = y - 34 - noteHeight(page.screenLabel, 30) - 12
-    section(body, L.sectionSize, y)
+    section(cardBody, L.sectionSize, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
-        Controls:Range(body, L.scale, y, 0.7, 1.5, 0.05, function() return get("scale") end,
-            function(v) set("scale", v) end, { width = 462 }))
-    y = y - 70
-    section(body, L.sectionMotion, y)
+        Controls:Range(cardBody, L.scale, y, 0.7, 1.5, 0.05, function() return get("scale") end,
+            function(v) set("scale", v) end, { width = COLUMN }))
+    y = y - RANGE_STEP
+    section(cardBody, L.sectionMotion, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
-        Controls:Toggle(body, L.motion, y, function() return get("motion") end, function(v) set("motion", v) end,
-            { width = 462 }))
+        Controls:Toggle(cardBody, L.motion, y, function() return get("motion") end, function(v) set("motion", v) end,
+            { width = COLUMN }))
     y = y - 40
     updates[#updates + 1] = settingsControl(page,
-        Controls:Toggle(body, L.reduceMotion, y, function() return get("reduceMotion") end,
-            function(v) set("reduceMotion", v) end, { width = 462 }))
+        Controls:Toggle(cardBody, L.reduceMotion, y, function() return get("reduceMotion") end,
+            function(v) set("reduceMotion", v) end, { width = COLUMN }))
     y = y - 44
-    section(body, L.sectionOpacity, y)
+    section(cardBody, L.sectionOpacity, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
-        Controls:Range(body, L.windowOpacity, y, 0.45, 1, 0.05, function() return get("windowOpacity") end,
-            function(v) set("windowOpacity", v) end, { width = 462 }))
-    y = y - 70
+        Controls:Range(cardBody, L.windowOpacity, y, 0.45, 1, 0.05, function() return get("windowOpacity") end,
+            function(v) set("windowOpacity", v) end, { width = COLUMN }))
+    y = y - RANGE_STEP
     updates[#updates + 1] = settingsControl(page,
-        Controls:Range(body, L.hudOpacity, y, 0.15, 1, 0.05, function() return get("hudOpacity") end,
-            function(v) set("hudOpacity", v) end, { width = 462 }))
-    y = y - 70
+        Controls:Range(cardBody, L.hudOpacity, y, 0.15, 1, 0.05, function() return get("hudOpacity") end,
+            function(v) set("hudOpacity", v) end, { width = COLUMN }))
+    y = y - RANGE_STEP
     y = y - 4
-    section(body, L.sectionAccent, y)
+    section(cardBody, L.sectionAccent, y)
     y = y - 22
-    local pearl = settingsControl(page, Controls:Button(body, L.pearl, 140, function() set("accent", "pearl") end))
+    local pearl = settingsControl(page, Controls:Button(cardBody, L.pearl, 140, function() set("accent", "pearl") end))
     pearl:SetPoint("TOPLEFT", 0, y)
-    local ocean = settingsControl(page, Controls:Button(body, L.ocean, 140, function() set("accent", "ocean") end))
+    local ocean = settingsControl(page, Controls:Button(cardBody, L.ocean, 140, function() set("accent", "ocean") end))
     ocean:SetPoint("TOPLEFT", 148, y)
-    local ember = settingsControl(page, Controls:Button(body, L.ember, 140, function() set("accent", "ember") end))
+    local ember = settingsControl(page, Controls:Button(cardBody, L.ember, 140, function() set("accent", "ember") end))
     ember:SetPoint("TOPLEFT", 296, y)
     y = y - 40
-    section(body, L.sectionStatus, y)
+    section(cardBody, L.sectionStatus, y)
     y = y - 22
-    page.statusLabel = note(body, "", y, 462)
+    page.statusLabel = note(cardBody, "", y, COLUMN)
     page.statusHeight = 40
     y = y - 44
-    local diagnostics = Controls:Button(body, L.openDiagnostics, 180, function() self:Select("diagnostics") end)
+    local diagnostics = Controls:Button(cardBody, L.openDiagnostics, 180, function() self:Select("diagnostics") end)
     diagnostics:SetPoint("TOPLEFT", 0, y)
     page.diagButton = diagnostics
     y = y - 44
-    page.instructions = note(body, L.instructions, y, 462)
+    page.instructions = note(cardBody, L.instructions, y, COLUMN)
     y = y - noteHeight(page.instructions, 44)
-    section(body, L.sectionCompatibility, y)
+    section(cardBody, L.sectionCompatibility, y)
     y = y - 22
     updates[#updates + 1] = settingsControl(page,
-        Controls:Range(body, L.legacyOpacity, y, 0.45, 1, 0.05, function() return get("opacity") end,
-            function(v) set("opacity", v) end, { width = 462 }))
-    y = y - 70
-    page.compatibilityHint = note(body, L.compatibilityHint, y, 462)
+        Controls:Range(cardBody, L.legacyOpacity, y, 0.45, 1, 0.05, function() return get("opacity") end,
+            function(v) set("opacity", v) end, { width = COLUMN }))
+    y = y - RANGE_STEP
+    page.compatibilityHint = note(cardBody, L.compatibilityHint, y, COLUMN)
     y = y - noteHeight(page.compatibilityHint, 34)
     -- Components that no module page claims (an optional extension registered
     -- after the window was built) are still switchable from here.
     page.rows = {}
     local extensionTop = y
-    body:SetHeight(math.max(420, -y + 34))
+    body:SetHeight(math.max(PAGE_HEIGHT - 4, -y + 34))
     page.Update = function()
         local unclaimed = 0
         for _, id in ipairs(app.order) do
@@ -181,10 +212,10 @@ function SettingsUI:BuildOverview(page)
                 if not row then
                     local component = app.components[id]
                     local label = type(component.label) == "string" and component.label or id
-                    row = Controls:Toggle(body, L[label], 0,
+                    row = Controls:Toggle(cardBody, L[label], 0,
                         function() return app.Store:Profile().modules[id] == true end,
                         function(v) self:Result(app.Store:Set("modules", id, v)) end,
-                        { width = 462, component = component })
+                        { width = COLUMN, component = component })
                     page.rows[id] = row
                     settingsControl(page, row)
                 end
@@ -195,9 +226,13 @@ function SettingsUI:BuildOverview(page)
         end
         -- The heading and its rule exist only once something needs them.
         if unclaimed > 0 and not page.extensionHeading then
-            page.extensionHeading = section(body, L.sectionExtensions, extensionTop)
+            page.extensionHeading = section(cardBody, L.sectionExtensions, extensionTop)
         end
-        body:SetHeight(math.max(420, -extensionTop + 34 + unclaimed * 38))
+        card:ClearAllPoints()
+        card:SetPoint("TOPLEFT", 0, 0)
+        card:SetWidth(COLUMN)
+        card:Layout(-extensionTop + 8 + unclaimed * 38)
+        body:SetHeight(math.max(PAGE_HEIGHT - 4, card:GetHeight() + 34))
         for _, control in ipairs(updates) do control:Update() end
         -- The two screen buttons follow the profile, not a one-time session
         -- flag: a legacy profile offers the copy, an adopted one the way back,
@@ -229,14 +264,14 @@ end
 function SettingsUI:BuildProfiles(page)
     -- One scroll area: the profile list, then the layout presets that act on the
     -- whole profile. Long translations grow the page instead of covering rows.
-    local scroll = Controls:Scroll(page, 464, 420)
+    local scroll = Controls:Scroll(page, CONTENT, PAGE_HEIGHT - 4)
     scroll:SetPoint("TOPLEFT")
     local body = CreateFrame("Frame", nil, scroll)
-    body:SetSize(462, 420)
+    body:SetSize(COLUMN, PAGE_HEIGHT - 4)
     scroll:SetScrollChild(body)
     page.scroll = scroll
-    note(body, L.profileHint, -2, 462)
-    local readonlyNote = note(body, L.readonlyNote, -30, 462)
+    note(body, L.profileHint, -2, COLUMN)
+    local readonlyNote = note(body, L.readonlyNote, -30, COLUMN)
     readonlyNote:Hide()
     self.readonlyNote = readonlyNote
     self.currentLabel = note(body, "", -64)
@@ -268,7 +303,7 @@ function SettingsUI:BuildProfiles(page)
     self.profileRows = {}
     for i = 1, 5 do
         local row = CreateFrame("Frame", nil, body)
-        row:SetSize(490, 28)
+        row:SetSize(COLUMN, 28)
         row:SetPoint("TOPLEFT", 0, -196 - (i - 1) * 33)
         row.name = app.Theme:TextRole(row, "label")
         row.name:SetPoint("LEFT")
@@ -342,10 +377,10 @@ function SettingsUI:BuildProfiles(page)
 end
 
 function SettingsUI:BuildDiagnostics(page)
-    local scroll = Controls:Scroll(page, 464, 300)
+    local scroll = Controls:Scroll(page, CONTENT, PAGE_HEIGHT - 4)
     scroll:SetPoint("TOPLEFT", 0, -2)
     local body = CreateFrame("Frame", nil, scroll)
-    body:SetSize(462, 300)
+    body:SetSize(COLUMN, PAGE_HEIGHT - 4)
     scroll:SetScrollChild(body)
     page.scroll = scroll
     page.bodies = {}
@@ -374,11 +409,11 @@ function SettingsUI:BuildDiagnostics(page)
     end
     local function addSection(key, title, expanded)
         local section
-        local header = Controls:FoldHeader(body, title, 462, function(folded)
+        local header = Controls:FoldHeader(body, title, COLUMN, function(folded)
             setSection(section, not folded)
         end)
         local text = app.Theme:TextRole(body, "muted")
-        text:SetWidth(462)
+        text:SetWidth(COLUMN)
         text:SetJustifyV("TOP")
         text:Hide()
         section = { key = key, header = header, text = text, expanded = expanded == true }
@@ -407,7 +442,7 @@ function SettingsUI:BuildDiagnostics(page)
                 y = y + math.max(18, section.text:GetStringHeight() or 18) + 12
             end
         end
-        body:SetHeight(math.max(300, y + 6))
+        body:SetHeight(math.max(PAGE_HEIGHT - 4, y + 6))
         scroll:UpdateRange()
     end
     local clear = Controls:Button(page, L.clear, 180, function()
@@ -513,7 +548,7 @@ function SettingsUI:Build()
     local frame = CreateFrame("Frame", "LumaUISettings", UIParent, "BackdropTemplate")
     self.frame = frame
     frame:Hide()
-    frame:SetSize(760, 574)
+    frame:SetSize(self.WIDTH, self.HEIGHT)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
     frame:SetClampedToScreen(true)
@@ -569,16 +604,17 @@ function SettingsUI:Build()
     self:WatchDisplay()
     self.rule = app.Theme:Rule(frame)
     self.rule:SetPoint("TOPLEFT", theme:Space("lg") + 6, -62)
-    self.rule:SetSize(708, 2)
+    self.rule:SetSize(self.WIDTH - 44, 2)
     -- The navigation sits on an embedded surface: overview, one entry per
-    -- module, then profiles. It scrolls, because the module list is longer than
-    -- the window is tall at small UI scales.
+    -- module, then profiles. At 880x600 every page fits without a rail; the
+    -- scroll container stays because a translated caption can still push the
+    -- list past the panel at a large UI scale.
     local nav = CreateFrame("Frame", nil, frame, "BackdropTemplate")
-    nav:SetPoint("TOPLEFT", theme:Space("md") + 4, -74)
-    nav:SetSize(200, 440)
+    nav:SetPoint("TOPLEFT", theme:Space("md") + 4, PAGE_TOP)
+    nav:SetSize(NAV_WIDTH - 12, PAGE_HEIGHT + 14)
     nav:EnableMouse(false)
     self.navPanel = nav
-    local navScroll = Controls:Scroll(frame, 176, 424)
+    local navScroll = Controls:Scroll(frame, NAV_WIDTH - 34, PAGE_HEIGHT + 6)
     navScroll:SetPoint("TOPLEFT", nav, "TOPLEFT", 6, -8)
     local navBody = CreateFrame("Frame", nil, navScroll)
     navScroll:SetScrollChild(navBody)
@@ -601,24 +637,25 @@ function SettingsUI:Build()
         end)()
     local rowY = 0
     local function addPage(key)
-        local button = Controls:Navigation(navBody, labels[key], 170, function() self:Select(key) end)
+        local button = Controls:Navigation(navBody, labels[key], NAV_WIDTH - 40, function() self:Select(key) end)
         button:SetPoint("TOPLEFT", 0, -rowY)
         self.navigation[key] = button
-        rowY = rowY + 30
+        -- A 28 px row plus a 2 px gap fits all 17 entries in the 452 px column
+        -- without the rail the old 30 px rows needed.
+        rowY = rowY + 28
     end
-    -- Groups are plain captions, not folds. A collapsed group left the player
-    -- with a column of headings and a large empty panel, and one extra click to
-    -- reach every page; the whole list fits without folding.
+    -- Groups are plain captions, not folds. The whole list fits one screen, so
+    -- a collapsed group would only add a click between the player and a page.
     local folds = {}
     local function addGroup(id, labelKey)
         local heading = app.Type:Text(navBody, "micro")
-        heading:SetPoint("TOPLEFT", 10, -(rowY + 10))
+        heading:SetPoint("TOPLEFT", 10, -(rowY + 8))
         heading:SetText(L[labelKey])
         heading.key = id
         heading.pages = {}
         self.navLabels[#self.navLabels + 1] = heading
         folds[id] = heading
-        rowY = rowY + 26
+        rowY = rowY + 24
     end
     -- Kept as a no-op hook so page selection never has to special-case folding.
     local function expandOwn() end
@@ -641,11 +678,11 @@ function SettingsUI:Build()
     addPage("profiles")
     self.navFolds = folds
     self.navExpandOwn = expandOwn
-    navBody:SetSize(170, rowY + 4)
+    navBody:SetSize(NAV_WIDTH - 40, rowY + 4)
     navScroll:UpdateRange()
-    self.footer = note(frame, "", -541, 708)
+    self.footer = note(frame, "", PAGE_TOP - PAGE_HEIGHT - 6, CONTENT)
     self.footer:ClearAllPoints()
-    self.footer:SetPoint("BOTTOMLEFT", 26, 16)
+    self.footer:SetPoint("BOTTOMLEFT", PAGE_LEFT, 16)
     self:Select(self.active)
 end
 
@@ -655,8 +692,8 @@ end
 function SettingsUI:EnsurePage(key)
     if self.pages[key] then return self.pages[key] end
     local page = CreateFrame("Frame", nil, self.frame)
-    page:SetPoint("TOPLEFT", 228, -72)
-    page:SetSize(490, 424)
+    page:SetPoint("TOPLEFT", PAGE_LEFT, PAGE_TOP)
+    page:SetSize(CONTENT, PAGE_HEIGHT)
     page:Hide()
     self.pages[key] = page
     local ok
@@ -681,6 +718,16 @@ function SettingsUI:Select(key)
     -- never repositions another page.
     if previous and previous ~= page then
         app.Transitions:Settle(previous)
+        -- A page owns its own controls, and a control may own a one-shot motion
+        -- (the segmented highlight, a cell's proc pulse). Those are settled here,
+        -- at the one place a page is left, so nothing keeps running behind a
+        -- hidden page.
+        if previous.preview then
+            app.Transitions:Settle(previous.preview)
+            for _, cell in ipairs(previous.preview.cells or {}) do app.Transitions:Settle(cell) end
+        end
+        if previous.segmented then app.Transitions:Settle(previous.segmented) end
+        if previous.scroll then app.Transitions:Settle(previous.scroll) end
         if previous == self.pages.profiles and self.profileInput then self.profileInput:ClearFocus() end
         app.Controls:ClearFocus()
     end
@@ -694,13 +741,19 @@ function SettingsUI:Select(key)
         end
     end
     if page and previous ~= page and self.frame and self.frame:IsShown() then
+        -- A 2 px lift instead of the old 4: the new page settles under the
+        -- header rather than sliding up into it. Motion off lands on the final
+        -- position in the same pass.
+        local targetTop = PAGE_TOP
         page:SetAlpha(0)
+        page:ClearAllPoints()
+        page:SetPoint("TOPLEFT", self.frame, "TOPLEFT", PAGE_LEFT, targetTop - 2)
         app.Transitions:Animate(page, "page", {
-            from = 0, to = 1, duration = 0.16,
+            from = 0, to = 1, duration = 0.14,
             apply = function(value)
                 page:SetAlpha(value)
                 page:ClearAllPoints()
-                page:SetPoint("TOPLEFT", self.frame, "TOPLEFT", 228, -76 + 4 * value)
+                page:SetPoint("TOPLEFT", self.frame, "TOPLEFT", PAGE_LEFT, targetTop - 2 * (1 - value))
             end,
         })
     end

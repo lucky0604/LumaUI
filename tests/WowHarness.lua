@@ -186,12 +186,23 @@ function Frame:GetStringWidth()
     if type(value) ~= "string" or value == "" then return 0 end
     return stringPixelWidth(value, self.fontSize or 13)
 end
-function Frame:SetValue(value)
+function Frame:SetValue(value, interpolation)
     self.value = value
+    self.valueInterpolation = interpolation
     if self.scripts.OnValueChanged then self.scripts.OnValueChanged(self, value) end
 end
 function Frame:GetValue() return self.value end
-function Frame:SetMinMaxValues(minimum, maximum) self.minimum, self.maximum = minimum, maximum end
+function Frame:SetMinMaxValues(minimum, maximum, interpolation)
+    self.minimum, self.maximum = minimum, maximum
+    self.minMaxInterpolation = interpolation
+end
+-- 12.1.5: the client drives a StatusBar's progress from a duration object, so
+-- the widget owns the tween and Lua never sees a remaining second. The stub
+-- records the object and the mode exactly like the native call.
+function Frame:SetTimerDuration(duration, interpolation, direction)
+    self.timerDuration, self.timerInterpolation, self.timerDirection = duration, interpolation, direction
+    return true
+end
 function Frame:SetBackdrop(spec) self.backdrop = spec end
 function Frame:SetBackdropColor(...) self.backgroundColor = { ... } end
 function Frame:SetBackdropBorderColor(...) self.borderColor = { ... } end
@@ -219,6 +230,13 @@ end
 function Frame:SetVertexColor(...) self.vertexColor = { ... } end
 function Frame:SetMaskTexture(texture) self.maskTexture = texture end
 function Frame:SetStatusBarColor(...) self.barColor = { ... } end
+-- A bar may be built by the client without the getter; H.noBarColor puts that
+-- shape on every frame created afterwards, which is what the "no readable
+-- colour" nameplate test needs.
+function Frame:GetStatusBarColor()
+    if H.noBarColor then return nil end
+    return unpack(self.barColor or { 1, 1, 1, 1 })
+end
 function Frame:CreateTexture(name, layer)
     local texture = H.NewFrame(name, self)
     texture.drawLayer = layer
@@ -286,6 +304,15 @@ function Frame:ClearFocus()
     self.focused = false
     if self.scripts and self.scripts.OnEditFocusLost then self.scripts.OnEditFocusLost(self) end
 end
+-- An EditBox takes keyboard focus and reports it; the exact-entry field on a
+-- range row depends on both, and HighlightText is what a click selects.
+function Frame:SetFocus()
+    if self.focused then return end
+    self.focused = true
+    if self.scripts and self.scripts.OnEditFocusGained then self.scripts.OnEditFocusGained(self) end
+end
+function Frame:HasFocus() return self.focused == true end
+function Frame:HighlightText() self.highlighted = true end
 function Frame:SetScrollChild(child) self.scrollChild = child end
 function Frame:GetScrollChild() return self.scrollChild end
 function Frame:SetVerticalScroll(value) self.scrollValue = value end
@@ -313,7 +340,10 @@ end
 local function plainBar(color)
     local bar = H.NewFrame(nil, UIParent)
     bar.barColor = color or { 0.8, 0.1, 0.1, 1 }
-    bar.GetStatusBarColor = function(self) return unpack(self.barColor) end
+    bar.GetStatusBarColor = function(self)
+        if H.noBarColor then return nil end
+        return unpack(self.barColor)
+    end
     return bar
 end
 H.PlainBar = plainBar
@@ -423,6 +453,7 @@ function H.Load(saved)
     H.shiftDown, H.superTracked = false, nil
     H.bankType, H.bankView, H.bankUsable, H.bankTabs = nil, nil, nil, nil
     H.privateAnchorRefuse = nil
+    H.noBarColor = nil
     -- A scene with LumaUI alone loaded; a test that needs another addon in the
     -- census replaces H.addons before loading the app.
     H.addons = {
@@ -443,7 +474,15 @@ function H.Load(saved)
             -- Manager; the stock fixture keeps the client's own viewers so the
             -- placement tests stay about the client. The shipped default is
             -- asserted by its own test.
+            -- 019: the shipped default moves the experience reading onto the
+            -- strip, promotes the own rune/fragment rows and the own cast bar,
+            -- and saves a compact chat size. The stock fixture stays on the old
+            -- baseline so the placement, layout and resource tests keep testing
+            -- the composition they were written for; the `019 shipped defaults`
+            -- test asserts what a fresh profile really gets.
             ui = { takeoverUnitFrames = false,
+                experienceMode = "topBar", resourceRunes = "native",
+                resourceFragments = "native", playerCastOwned = false,
                 cooldownGroups = { owned = false, groups = {} } },
             -- The slot-grid tests drive the per-icon layout directly, so the
             -- shared fixture opts in. The shipped default (off) and the stable
@@ -451,7 +490,7 @@ function H.Load(saved)
             appearance = { perIconSlots = true },
         } },
         migrations = { pearlBatch = true, questListDefault = true, visualModules = true,
-            actionBars = true, cooldownGroupsDefault = true },
+            actionBars = true, cooldownGroupsDefault = true, pearlEdge019 = true },
     }
     _G.unpack = table.unpack or unpack
     _G.WOW_PROJECT_ID, _G.WOW_PROJECT_MAINLINE = 1, 1
@@ -918,6 +957,47 @@ function H.Load(saved)
     }
     _G.Enum = _G.Enum or {}
     _G.Enum.BankType = _G.Enum.BankType or { Character = 1, Account = 2 }
+    -- 12.1.5 status-bar interpolation. The client tween lives in C++; the stub
+    -- only has to record which mode each write asked for, so a test can prove a
+    -- smoothed call ran instead of a Lua loop.
+    _G.Enum.StatusBarInterpolation = _G.Enum.StatusBarInterpolation
+        or { Immediate = 0, Linear = 1, ExponentialEaseOut = 2 }
+    -- Duration objects: `UnitCastingDuration` and friends return one of these
+    -- on the live build. `GetRemainingDuration` answers from H.now so a test can
+    -- advance simulated time the same way the client would.
+    _G.DurationObject = _G.DurationObject or {}
+    function _G.DurationObject:GetRemainingDuration() return self.remaining or 0 end
+    function _G.DurationObject:GetTotalDuration() return self.total or 0 end
+    -- A duration the tests stage is a real object with those two methods, not a
+    -- plain table: the component asks the object, exactly like the client.
+    function H.Duration(spec)
+        return setmetatable({ remaining = spec.remaining, total = spec.total },
+            { __index = _G.DurationObject })
+    end
+    -- H.durations[unit] = { remaining =, total =, kind = "cast"|"channel"|"empower" }
+    -- drives the three duration readers below. A test can hand back a secret
+    -- object instead by setting the value to H.Secret(...).
+    H.durations = {}
+    _G.UnitCastingDuration = function(unit)
+        local info = H.durations[unit]
+        if not info or info.kind ~= "cast" then return nil end
+        return info.object or info
+    end
+    _G.UnitChannelDuration = function(unit)
+        local info = H.durations[unit]
+        if not info or info.kind ~= "channel" then return nil end
+        return info.object or info
+    end
+    _G.UnitEmpoweredChannelDuration = function(unit)
+        local info = H.durations[unit]
+        if not info or info.kind ~= "empower" then return nil end
+        return info.object or info
+    end
+    _G.UnitEmpoweredStagePercentages = function(unit)
+        local info = H.durations[unit]
+        if not info then return nil end
+        return unpack(info.stages or {})
+    end
     _G.UnitXP = function() return 30 end
     _G.UnitXPMax = function() return 100 end
     _G.GetXPExhaustion = function() return 25 end

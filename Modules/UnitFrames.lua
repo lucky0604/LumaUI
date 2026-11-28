@@ -400,6 +400,17 @@ end
 -- Main health bars share the same screen top; auxiliary frames use the compact
 -- metrics and the inner half of their parent's column. Only the entry default is
 -- updated here: Layout:Apply still gives a saved manual position precedence.
+--
+-- 019: the reference line is the *health* bar's top edge, not the frame's. The
+-- frame's own top is the name row, so a frame placed by its centre without the
+-- name row in the sum sat one text line low. `healthTop` below is that edge and
+-- the entry's centre is derived back from it, which is what makes the pair level
+-- with the first skill row instead of merely near it.
+local function healthEdgeTop(frame)
+    -- The health bar's top offset inside the frame is the name row.
+    return frame.metrics.nameRow
+end
+
 local function updateDefaults(self)
     if not self.frames then return end
     local central = app.Layout:Central()
@@ -445,7 +456,14 @@ local function updateDefaults(self)
                 top = mainTop - mainHeight - AUX_GAP
             end
             rows[spec.unit] = { x = x, top = top, width = width, height = height }
-            app.Layout:SetEntryDefault(id, x, top - height / 2)
+            -- The entry stores a centre. For the main pair the health edge (not
+            -- the frame top) is the anchor, so the centre is the edge minus the
+            -- name row and half the frame.
+            local centre = top - height / 2
+            if spec.style == "main" then
+                centre = (healthTop / scale) + healthEdgeTop(frame) - height / 2
+            end
+            app.Layout:SetEntryDefault(id, x, centre)
             -- A preset writes positions, but the main bars are driven by the
             -- measured block. Follow a new boundary only while the saved centre
             -- still equals the previous automatic one, so a deliberate drag
@@ -464,7 +482,27 @@ local function updateDefaults(self)
     for _, spec in ipairs(specs) do
         if self.frames[spec.unit] then app.Layout:Apply("unit_" .. spec.unit) end
     end
+    -- The preset asks the component for the pair's exact centre instead of
+    -- keeping a second fraction of its own. Only the main pair is geometry-owned:
+    -- the auxiliary frames keep their presets' deliberate offsets.
+    self.centres = self.centres or {}
+    for _, spec in ipairs(specs) do
+        local row = rows[spec.unit]
+        if row then
+            self.centres[spec.unit] = { x = row.x, y = row.top - row.height / 2 }
+        end
+    end
     positionPlayerCast(self, central)
+end
+
+-- 019: the stored per-unit appearance. Width, bar heights, name size, aura size,
+-- the health format and the colour mode are all read here so the settings page
+-- and this renderer share one model; a profile that never opened the page reads
+-- the shipped defaults, which equal the constants above.
+local function unitConfig(unit)
+    local profile = app.Store and app.Store:Profile()
+    local list = profile and profile.ui and profile.ui.unitFrames
+    return list and list[unit]
 end
 
 component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", defaultEnabled = true,
@@ -483,12 +521,24 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
             ensureParts(self.parts, frame)
             attachEvents(self.parts, frame, spec.unit)
             frame.lumaUnitWatched = pcall(RegisterUnitWatch, frame) or nil
+            self:ApplyUnitConfig(spec.unit)
             drawFrame(frame)
             applyHeight(self, frame)
         end
         local castEntry = playerCastPlaceholder(self)
         castEntry.hidden = nil
         updateDefaults(self)
+        -- The main pair answers the preset with the centre it just computed, so
+        -- "apply preset" and the running geometry can never disagree by a
+        -- fraction that then gets saved as a real position.
+        app.Layout:OwnGeometry("unit_player", function()
+            local centre = component.centres and component.centres.player
+            return centre and centre.x, centre and centre.y
+        end)
+        app.Layout:OwnGeometry("unit_target", function()
+            local centre = component.centres and component.centres.target
+            return centre and centre.x, centre and centre.y
+        end)
         applyTakeover(self)
         app:Subscribe(self, "LAYOUT_CENTRAL_CHANGED", function()
             if not self.running then return end
@@ -523,6 +573,7 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
             -- Registration is a set operation, so re-attaching is safe and lets a
             -- part that became available after login start receiving events.
             attachEvents(self.parts, frame, frame.unitToken)
+            self:ApplyUnitConfig(frame.unitToken)
             drawFrame(frame)
             applyHeight(self, frame)
         end
@@ -546,6 +597,11 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
         -- The native frames come back even though the component stops: the
         -- restore job runs after the stop, so the guard inside checks nothing.
         restoreNativeFrames(self)
+        -- A stopped component no longer owns a slot: a preset must fall back to
+        -- its own fraction instead of reading the last frame's centre.
+        app.Layout:OwnGeometry("unit_player", nil)
+        app.Layout:OwnGeometry("unit_target", nil)
+        self.centres = nil
         if app.Ownership then
             app.Ownership:Active("unitFrames", "native", "component-off")
             app.Ownership:Active("unitFrames.targetCast", "native", "component-off")
@@ -553,6 +609,49 @@ component = app:RegisterComponent({ id = "unitFrames", label = "unitFrames", def
         end
     end,
 })
+
+-- Re-applies the stored geometry to one frame. Width and the health height are
+-- protected changes on a secure unit button, so the size write goes through the
+-- queue; the fonts, the format and the colour are plain region writes and land
+-- immediately.
+function component:ApplyUnitConfig(unit)
+    local frame = self.frames and self.frames[unit]
+    local spec = unitConfig(unit)
+    if not frame or not spec then return false end
+    local m = frame.metrics
+    local width = app.Capabilities.Plain(spec.width, "number") or m.width
+    local health = app.Capabilities.Plain(spec.healthHeight, "number") or m.health
+    local power = app.Capabilities.Plain(spec.powerHeight, "number") or m.power
+    local nameSize = app.Capabilities.Plain(spec.nameSize, "number") or m.nameSize
+    m.width, m.health, m.power, m.nameSize = width, health, power, nameSize
+    frame.baseHeight = m.nameRow + m.health + m.power + m.powerGap
+    -- Points are protected: queue them and let the height job coalesce with the
+    -- next layout pass.
+    app.Queue:Run("unitFrames/size/" .. unit, function()
+        if not frame or not frame.metrics then return end
+        frame:SetSize(frame.metrics.width, frame.baseHeight)
+        frame.health:SetHeight(frame.metrics.health)
+        frame.health:ClearAllPoints()
+        frame.health:SetPoint("TOPLEFT", 0, -frame.metrics.nameRow)
+        frame.health:SetPoint("TOPRIGHT", 0, -frame.metrics.nameRow)
+        frame.power:SetHeight(frame.metrics.power)
+        frame.power:ClearAllPoints()
+        frame.power:SetPoint("TOPLEFT", 0, -(frame.metrics.nameRow + frame.metrics.health + frame.metrics.powerGap))
+        frame.power:SetPoint("TOPRIGHT", 0, -(frame.metrics.nameRow + frame.metrics.health + frame.metrics.powerGap))
+        frame.name:SetWidth(math.max(36, frame.metrics.width - (frame.metrics.nameReserve or 72)))
+    end)
+    local font = app.Type:Face()
+    if type(frame.name.SetFont) == "function" then
+        pcall(frame.name.SetFont, frame.name, font, nameSize, "OUTLINE")
+    end
+    local valueSize = math.max(8, nameSize - 1)
+    if type(frame.value.SetFont) == "function" then
+        pcall(frame.value.SetFont, frame.value, font, valueSize, "OUTLINE")
+    end
+    frame.healthFormat = spec.healthFormat or "percent"
+    frame.colorMode = spec.colorMode or "auto"
+    return true
+end
 
 -- One diagnostic line for the components page inside `/luma status`: it says
 -- which native frames the preview took over and which ones it kept because a

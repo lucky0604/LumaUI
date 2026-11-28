@@ -16,6 +16,10 @@ app.PearlCell = Cell
 
 local PAD = 2
 local SIZE = 26
+-- 019: the countdown is the one number a player reads mid-fight, so it gets its
+-- own size and an outline instead of the shared 10 px body font. 15 reads
+-- cleanly on a 26 px icon without touching the frame edge.
+local COUNT_SIZE, TIME_SIZE = 11, 15
 
 local STATE_COLORS = {
     ready = nil,
@@ -30,6 +34,17 @@ end
 
 local function plainText(value)
     return app.Capabilities.Plain(value, "string")
+end
+
+-- The stored view options, read on every paint. A cell therefore follows a
+-- settings change without being rebuilt, and a profile switch reaches cells that
+-- were created in an earlier session. A missing profile (early load) falls back
+-- to the shipped defaults.
+function Cell:Options()
+    local profile = app.Store and app.Store:Profile()
+    local ui = profile and profile.ui
+    return (ui and ui.cooldownViews) or { countdownSize = TIME_SIZE, borderSize = 1,
+        showSwipe = true, showProcGlow = true, desaturateUnusable = true }
 end
 
 function Cell:Create(parent, size)
@@ -78,13 +93,24 @@ function Cell:Create(parent, size)
     overlay:SetAllPoints()
     overlay:SetFrameLevel((swipe:GetFrameLevel() or frame:GetFrameLevel() or 0) + 3)
 
-    local count = app.Theme:Text(overlay, 10)
+    local count = app.Theme:Text(overlay, COUNT_SIZE)
     count:SetPoint("BOTTOMRIGHT", -PAD - 1, PAD + 1)
     count:SetText("")
 
-    local time = app.Theme:Text(overlay, 10)
+    -- The timer is the readable number, so it gets the outline face and the
+    -- warm-white ink: a plain body-size string on top of a dark sweep is what
+    -- made the countdown look "missing" in the field screenshots.
+    local time = app.Theme:Text(overlay, TIME_SIZE)
     time:SetPoint("CENTER")
     time:SetText("")
+    if type(time.SetFont) == "function" then
+        local font = app.Type and app.Type:Face() or GameFontNormal:GetFont()
+        pcall(time.SetFont, time, font, TIME_SIZE, "OUTLINE")
+    end
+    if type(time.SetTextColor) == "function" then
+        local warm = app.Theme.colors.pearl
+        time:SetTextColor(warm[1], warm[2], warm[3], 1)
+    end
 
     -- State edge, not a state fill: a backdrop hairline just outside the icon.
     -- A full-cell colour texture here painted a solid slab over the icon, the
@@ -129,9 +155,18 @@ function Cell:SetCount(cell, count)
 end
 
 -- `remaining` is seconds. The text is coarse on purpose: a cooldown cell shows
--- minutes above 60 and whole seconds below, which keeps the 10px label legible.
+-- minutes above 60 and whole seconds below. The size is the stored countdown
+-- size, so a player who needs bigger numbers can raise it without the whole HUD
+-- changing scale.
 function Cell:SetTime(cell, remaining)
     if not cell then return end
+    local options = self:Options()
+    local size = plainNumber(options.countdownSize) or TIME_SIZE
+    if cell.lumaTimeSize ~= size and type(cell.time.SetFont) == "function" then
+        cell.lumaTimeSize = size
+        local font = app.Type and app.Type:Face() or GameFontNormal:GetFont()
+        pcall(cell.time.SetFont, cell.time, font, size, "OUTLINE")
+    end
     remaining = plainNumber(remaining)
     if not remaining or remaining <= 0 then
         cell.time:SetText("")
@@ -150,6 +185,11 @@ end
 -- the client's own swipe/timer and the own cell simply shows no sweep.
 function Cell:SetCooldown(cell, start, duration)
     if not cell then return false end
+    local options = self:Options()
+    if options.showSwipe == false then
+        if type(cell.swipe.Clear) == "function" then pcall(cell.swipe.Clear, cell.swipe) end
+        return false
+    end
     start, duration = plainNumber(start), plainNumber(duration)
     if not start or not duration or duration <= 0 then
         if type(cell.swipe.Clear) == "function" then pcall(cell.swipe.Clear, cell.swipe) end
@@ -184,6 +224,7 @@ function Cell:Clear(cell)
     cell.ring:Hide()
     if type(cell.swipe.Clear) == "function" then pcall(cell.swipe.Clear, cell.swipe) end
     cell.state = nil
+    cell.lumaState = nil
     -- The caller's own bookkeeping goes with the drawing: a cell that no longer
     -- shows a spell must not keep reporting a remaining time, or the shared
     -- cooldown ticker would run for it forever.
@@ -202,18 +243,38 @@ function Cell:SetState(cell, state)
         return
     end
     local color = token == "accent" and app.Theme:Accent() or app.Theme.colors[token]
+    local options = self:Options()
     -- Proc is a thicker outline of the same accent, so the cue survives both a
-    -- colour-blind player and a reduced-motion session.
-    local thickness = state == "proc" and 2 or 1
+    -- colour-blind player and a reduced-motion session. The stored border width
+    -- is a floor: a proc still earns one extra pixel, because the shape is the
+    -- cue that survives a monochrome screen.
+    local baseWidth = plainNumber(options.borderSize) or 1
+    local thickness = (state == "proc" and baseWidth + 1) or baseWidth
     if cell.ringThickness ~= thickness then
         cell.ringThickness = thickness
         cell.ring:SetBackdrop({ edgeFile = app.Theme.white, edgeSize = app.Pixel:Pixels(thickness, cell.ring) })
     end
-    cell.ring:SetBackdropBorderColor(color[1], color[2], color[3], state == "proc" and 0.95 or 0.65)
-    cell.ring:Show()
-    -- "unavailable" also loses saturation: colour alone is not a cue.
-    cell.icon:SetDesaturated(state == "unavailable")
+    -- The proc glow is an explicit switch: a player who reads the icon art better
+    -- than the ring can turn the extra emphasis off without losing the outline.
+    if state == "proc" and options.showProcGlow == false then
+        cell.ring:Hide()
+    else
+        cell.ring:SetBackdropBorderColor(color[1], color[2], color[3], state == "proc" and 0.95 or 0.65)
+        cell.ring:Show()
+    end
+    -- "unavailable" also loses saturation: colour alone is not a cue. The switch
+    -- keeps a dimmed alpha either way, so the state never reads as "ready".
+    local fade = options.desaturateUnusable ~= false
+    cell.icon:SetDesaturated(state == "unavailable" and fade)
     cell.icon:SetAlpha(state == "unavailable" and 0.55 or 1)
+    -- A proc earns one short scale pulse on the way in. It is a transition on the
+    -- cell's own frame, so six proccing cells do not share a driver and an idle
+    -- cell never animates. Only the arrival animates: the renderer repaints every
+    -- cell on every beat, and a pulse per repaint would be a permanent jitter.
+    if state == "proc" and cell.lumaState ~= "proc" and app.Transitions then
+        app.Transitions:Bump(cell, cell, 1.08)
+    end
+    cell.lumaState = state
 end
 
 -- Writes the visible role of one cell from a plain descriptor. The descriptor

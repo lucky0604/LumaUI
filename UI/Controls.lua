@@ -97,7 +97,20 @@ local function apply(control)
             control.text:SetTextColor(text[1], text[2], text[3], 1)
         end
     end
-    setRing(control, ringOn and color or line, ringOn and 1 or 0)
+    -- A soft-selected control (the navigation) announces its state with a wash
+    -- and a lit outline instead of the full-strength ring a button uses: the
+    -- gold four-sided frame is what made the left column read as a row of boxes.
+    local soft = control.selectedSoft and state.selected and not state.disabled
+    if soft then
+        if control.selectedCapsule then
+            control.selectedCapsule:SetColorTexture(color[1], color[2], color[3], 1)
+            control.selectedCapsule:SetAlpha(state.hover and 0.26 or 0.20)
+            control.selectedCapsule:Show()
+        end
+    elseif control.selectedCapsule then
+        control.selectedCapsule:Hide()
+    end
+    setRing(control, ringOn and color or line, ringOn and (soft and 0.30 or 1) or 0)
     if control.selectedMark then
         if state.selected and not state.disabled then control.selectedMark:Show() else control.selectedMark:Hide() end
     end
@@ -255,24 +268,37 @@ function Controls:Button(parent, text, width, callback, options)
     return button
 end
 
--- Navigation entry: selected keeps an accent edge, accent text and a small
--- accent bar on the left, independent of hover. The row itself is flat — on an
--- inset navigation well a stack of raised slabs is exactly the box look the
--- navigation was supposed to replace, so the accent bar carries the state instead.
+-- Navigation entry: a compact row with a soft capsule behind the current page
+-- and one short accent bar on the left. The row itself stays flat — on an inset
+-- navigation well a stack of raised slabs is exactly the box look the
+-- navigation was supposed to replace, so the capsule and the bar carry the
+-- state instead of a four-sided frame. A faint accent outline is kept on the
+-- selected row only, at a third of the old weight, so it reads as a lit edge
+-- rather than as a gold box.
 function Controls:Navigation(parent, text, width, callback, options)
     options = options or {}
     options.flat = true
     local button = self:Button(parent, text, width or 176, callback, options)
     button.kind = "navigation"
+    button:SetHeight(28)
     button.text:ClearAllPoints()
-    button.text:SetPoint("LEFT", 16, 0)
+    button.text:SetPoint("LEFT", 18, 0)
     local mark = button:CreateTexture(nil, "ARTWORK")
-    mark:SetSize(app.Pixel:Pixels(2), 16)
-    mark:SetPoint("LEFT", 6, 0)
+    mark:SetSize(app.Pixel:Pixels(3), 14)
+    mark:SetPoint("LEFT", 7, 0)
     local color = accent()
     mark:SetColorTexture(color[1], color[2], color[3], 1)
     mark:Hide()
     button.selectedMark = mark
+    -- The capsule sits under the label: a low-alpha accent wash, rounded by the
+    -- same nine-slice plate the cards use when the client can slice.
+    local capsule = button:CreateTexture(nil, "BACKGROUND", nil, -6)
+    capsule:SetPoint("TOPLEFT", 2, -2)
+    capsule:SetPoint("BOTTOMRIGHT", -2, 2)
+    capsule:SetColorTexture(color[1], color[2], color[3], 1)
+    capsule:SetAlpha(0)
+    button.selectedCapsule = capsule
+    button.selectedSoft = true
     apply(button)
     return button
 end
@@ -350,8 +376,10 @@ function Controls:Dropdown(parent, width, onSelect, options)
     return drop
 end
 
--- Switch row: label left, a real track and thumb on the right, plus the old
--- value and runtime-status fields the settings page still reads.
+-- Switch row: label left, a capsule track and a round thumb on the right.
+-- The two value fields stay on the control because the pages and the search
+-- read them, but the redundant "running" suffix is no longer drawn: a switch
+-- that already says Enabled does not need a second word saying it runs.
 function Controls:Toggle(parent, text, y, getter, setter, options)
     options = options or {}
     local row
@@ -366,51 +394,104 @@ function Controls:Toggle(parent, text, y, getter, setter, options)
     row.text:SetPoint("LEFT", 12, 0)
     row.text:SetText(text)
     row.valueText = app.Theme:Text(row, 12)
-    row.valueText:SetPoint("RIGHT", -56, 0)
+    row.valueText:SetPoint("RIGHT", -60, 0)
     row.statusText = app.Theme:Text(row, 11, true)
-    row.statusText:SetPoint("RIGHT", -128, 0)
+    row.statusText:SetPoint("RIGHT", -132, 0)
     row.statusText:SetWidth(65)
     row.statusText:SetJustifyH("RIGHT")
     row.statusText:SetWordWrap(false)
-    row.valueText:SetWidth(55)
+    row.valueText:SetWidth(52)
     row.valueText:SetJustifyH("RIGHT")
     row.valueText:SetWordWrap(false)
     row.text:SetPoint("RIGHT", row.statusText, "LEFT", -8, 0)
     row.text:SetWordWrap(false)
+    -- 38 x 20 capsule: the track is the control, the 16 px dot inside it is the
+    -- thumb. Both are masked into a round end where the client exposes the
+    -- portrait mask; a build without it keeps the same two-tone block, just
+    -- with square ends, so the switch never disappears.
     local track = CreateFrame("Frame", nil, row, "BackdropTemplate")
-    track:SetSize(34, 16)
+    track:SetSize(38, 20)
     track:SetPoint("RIGHT", -12, 0)
     track:EnableMouse(false)
-    app.Theme:PaintSurface(track, "embedded")
-    local thumb = track:CreateTexture(nil, "ARTWORK")
-    thumb:SetSize(14, 14)
-    thumb:SetPoint("LEFT", track, "LEFT", 1, 0)
-    local color = accent()
-    thumb:SetColorTexture(color[1], color[2], color[3], 1)
-    row.track, row.thumb = track, thumb
+    local trackFill = track:CreateTexture(nil, "ARTWORK")
+    trackFill:SetAllPoints(track)
+    trackFill:SetColorTexture(1, 1, 1, 1)
+    local trackEdge = track:CreateTexture(nil, "OVERLAY")
+    trackEdge:SetAllPoints(track)
+    trackEdge:SetColorTexture(1, 1, 1, 1)
+    -- A round mask is borrowed from the client's own portrait alpha mask: it is
+    -- already loaded on every client and gives a true capsule end without a new
+    -- texture file. `CreateMaskTexture` is absent on some builds and in tests,
+    -- so every mask step is optional.
+    local function round(region)
+        if type(track.CreateMaskTexture) ~= "function" then return false end
+        local ok, mask = pcall(track.CreateMaskTexture, track)
+        if not ok or not mask or type(region.AddMaskTexture) ~= "function" then return false end
+        local applied = pcall(mask.SetTexture, mask, "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask",
+            "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+        if not applied then return false end
+        mask:SetAllPoints(region)
+        return (pcall(region.AddMaskTexture, region, mask))
+    end
+    local rounded = round(trackFill)
+    local thumb = CreateFrame("Frame", nil, track)
+    thumb:SetSize(16, 16)
+    thumb:SetPoint("LEFT", track, "LEFT", 2, 0)
+    local dot = thumb:CreateTexture(nil, "OVERLAY")
+    dot:SetAllPoints(thumb)
+    dot:SetColorTexture(1, 1, 1, 1)
+    if rounded then round(dot) end
+    -- The edge is a hairline inset so the capsule reads as a well even when the
+    -- client cannot round the fill.
+    trackEdge:Hide()
+    row.track, row.thumb, row.trackFill, row.thumbDot = track, thumb, trackFill, dot
+    row.trackRounded = rounded
+    local function settle(on, animate)
+        local c = on and accent() or app.Theme.colors.muted
+        local raised = app.Theme.colors.raised
+        local floor = on and { c[1] * 0.55, c[2] * 0.55, c[3] * 0.55 }
+            or { raised[1] * 1.5, raised[2] * 1.5, raised[3] * 1.5 }
+        -- The anchor is the state, not the animation: writing it first means the
+        -- thumb is never left on the wrong side if the client refuses to animate.
+        thumb:ClearAllPoints()
+        if on then
+            thumb:SetPoint("RIGHT", track, "RIGHT", -2, 0)
+        else
+            thumb:SetPoint("LEFT", track, "LEFT", 2, 0)
+        end
+        local function paintFill(value)
+            trackFill:SetColorTexture(floor[1], floor[2], floor[3], 1)
+            dot:SetColorTexture(0.97 * value + c[1] * (1 - value),
+                0.96 * value + c[2] * (1 - value), 0.94 * value + c[3] * (1 - value), 1)
+        end
+        paintFill(on and 0 or 1)
+        if animate and app.Transitions then
+            -- 0.12 s tint settle across the whole capsule: the thumb arrives at
+            -- once and the track catches up, which reads as one smooth throw.
+            local from = on and 1 or 0
+            local to = on and 0 or 1
+            app.Transitions:Animate(row, "switch", {
+                from = from, to = to, duration = 0.12,
+                apply = function(value) paintFill(value) end,
+            })
+        end
+    end
     function row:Update(component)
         local on = getter() == true
         self.valueText:SetText(on and app.L.on or app.L.off)
         local c = on and accent() or app.Theme.colors.muted
         self.valueText:SetTextColor(c[1], c[2], c[3])
-        self.thumb:ClearAllPoints()
-        if on then
-            self.thumb:SetPoint("RIGHT", self.track, "RIGHT", -1, 0)
-        else
-            self.thumb:SetPoint("LEFT", self.track, "LEFT", 1, 0)
-        end
-        self.thumb:SetColorTexture(c[1], c[2], c[3], 1)
-        local raised = app.Theme.colors.raised
-        if on then
-            self.track:SetBackdropColor(c[1] * 0.55, c[2] * 0.55, c[3] * 0.55, 1)
-        else
-            self.track:SetBackdropColor(raised[1] * 1.4, raised[2] * 1.4, raised[3] * 1.4, 1)
-        end
+        -- Only a real change animates. A page refresh repaints every row on
+        -- each profile update, and starting a tween per repaint would keep the
+        -- transition queue busy for no visible reason.
+        settle(on, self.painted == true and self.lastOn ~= on)
+        self.painted = true
+        self.lastOn = on
         if component then
             local status = component.status
-            if on and status == "running" then
-                self.statusText:SetText(app.L.statusRunning)
-            elseif on and status == "failed" then
+            -- Only an abnormal status earns a word; "running" is what the switch
+            -- already shows, so it is exactly the duplicate this page drops.
+            if on and status == "failed" then
                 self.statusText:SetText(app.L.statusFailed)
             elseif on and status == "unsupported" then
                 self.statusText:SetText(app.L.unsupported)
@@ -502,14 +583,16 @@ function Controls:Input(parent, width, options)
     return input
 end
 
--- Horizontal value row. The label follows the drag; the profile is committed
--- once on release or wheel step, so dragging never reconciles the whole UI per
--- pixel.
+-- Horizontal value row: one 44 px line — title and formatted value on the top
+-- row, the rail underneath. The value is also an editor: clicking the number
+-- turns it into a field, Enter or leaving commits an exact value, Esc restores
+-- what was there. The slider stays the wide surface (`slider:GetWidth()` is the
+-- row width) so a drag anywhere on the rail still works.
 function Controls:Range(parent, title, y, low, high, step, getter, setter, options)
     options = options or {}
     local width = options.width or 490
     local row = CreateFrame("Frame", nil, parent)
-    row:SetSize(width, 58)
+    row:SetSize(width, 44)
     row:SetPoint("TOPLEFT", 0, y)
     local label = app.Theme:TextRole(row, "label")
     label:SetPoint("TOPLEFT")
@@ -522,7 +605,7 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     label:SetPoint("TOPRIGHT", value, "TOPLEFT", -8, 0)
     label:SetWordWrap(false)
     local slider = CreateFrame("Slider", nil, row)
-    slider:SetPoint("TOPLEFT", 0, -30)
+    slider:SetPoint("TOPLEFT", 0, -26)
     slider:SetSize(width, 8)
     slider:SetOrientation("HORIZONTAL")
     slider:SetMinMaxValues(low, high)
@@ -607,6 +690,73 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     local function snap(number)
         return math.max(low, math.min(high, math.floor(number / step + 0.5) * step))
     end
+    -- The number is also a field. It covers the label's own rectangle, so the
+    -- row never grows a second input line: click the value, type, Enter.
+    local editor = CreateFrame("EditBox", nil, row, "BackdropTemplate")
+    editor:SetSize(56, 22)
+    editor:SetPoint("TOPRIGHT", 2, 1)
+    editor:SetAutoFocus(false)
+    editor:SetMaxLetters(8)
+    editor:SetFont(app.Type and app.Type:Face() or GameFontNormal:GetFont(), 12, "")
+    if type(editor.SetTextInsets) == "function" then editor:SetTextInsets(4, 4, 0, 0) end
+    editor:SetJustifyH("RIGHT")
+    editor:EnableMouse(true)
+    editor:SetAlpha(0)
+    editor:Hide()
+    row.editor = editor
+    local function leaveEditor(restore)
+        if row.editing ~= true then return end
+        row.editing = false
+        local text = editor:GetText()
+        editor:Hide()
+        editor:SetAlpha(0)
+        value:Show()
+        if restore then
+            row:Update()
+            return
+        end
+        local number = tonumber(text)
+        if number == nil then
+            row:Update()
+            return
+        end
+        local snapped = snap(number)
+        -- The exact entry is one commit. Setting the slider fires OnValueChanged,
+        -- which would commit a second time through the drag path; the guard is
+        -- the same one a programmatic refresh uses.
+        pending = nil
+        row.updating = true
+        slider:SetValue(snapped)
+        row.updating = false
+        if not row.disabled and setter then app:Call("controls/range", setter, snapped) end
+        row:Update()
+    end
+    row.CommitValue = function(text) -- exposed for a keyboard-driven caller
+        editor:SetText(tostring(text))
+        leaveEditor(false)
+    end
+    value:EnableMouse(true)
+    value:SetScript("OnMouseDown", function()
+        if row.disabled then return end
+        row.editing = true
+        local current = type(slider.GetValue) == "function" and slider:GetValue() or low
+        -- The raw number, not the formatted label: the player edits a value,
+        -- not a percentage sign.
+        editor:SetText(type(current) == "number" and string.format("%g", current) or "")
+        value:Hide()
+        editor:Show()
+        editor:SetAlpha(1)
+        editor:SetFocus()
+        if type(editor.HighlightText) == "function" then editor:HighlightText() end
+    end)
+    editor:SetScript("OnEnterPressed", function() leaveEditor(false) end)
+    editor:SetScript("OnEscapePressed", function() leaveEditor(true) end)
+    editor:SetScript("OnEditFocusLost", function() leaveEditor(false) end)
+    editor:SetScript("OnMouseDown", function(self) self:SetFocus() end)
+    local function selectAll(self)
+        if type(self.HighlightText) == "function" then self:HighlightText() end
+    end
+    editor:SetScript("OnEditFocusGained", selectAll)
     slider:SetScript("OnValueChanged", function(self, number)
         local snapped = snap(number)
         format(snapped)
@@ -639,6 +789,7 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     end)
     function slider:Refresh() paint() end
     function row:Update()
+        if row.editing then return end
         row.updating = true
         local current = getter()
         slider:SetValue(current)
@@ -652,6 +803,7 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
             pending = nil
             slider.dragging = false
             dragging = false
+            if row.editing then leaveEditor(true) end
         end
         if type(slider.EnableMouse) == "function" then slider:EnableMouse(not row.disabled) end
         slider:SetAlpha(row.disabled and 0.55 or 1)
@@ -665,7 +817,10 @@ function Controls:Range(parent, title, y, low, high, step, getter, setter, optio
     return row
 end
 
--- Foldable section header: the marker and the selected state share one source.
+-- Foldable section header: the marker is the only thing that changes with the
+-- fold. `state.selected` is about being the *chosen* row, which a fold is not:
+-- writing it here is what lit a full accent frame under every collapsed
+-- "internal components" section at the bottom of every module page.
 function Controls:FoldHeader(parent, text, width, onToggle)
     local header = self:Button(parent, text, width or 400, function(self)
         self:SetFolded(not self.folded)
@@ -680,7 +835,6 @@ function Controls:FoldHeader(parent, text, width, onToggle)
     function header:SetFolded(folded)
         self.folded = folded == true
         self.mark:SetText(self.folded and "+" or "-")
-        self.state.selected = self.folded
         self:Refresh()
     end
     header:SetFolded(false)
@@ -699,15 +853,17 @@ function Controls:Scroll(parent, width, height)
     scroll:EnableMouseWheel(true)
     local bar = CreateFrame("Slider", nil, parent, "BackdropTemplate")
     bar:SetOrientation("VERTICAL")
-    bar:SetSize(6, height or 150)
-    bar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 8, 0)
+    -- A 3 px rail at low contrast: the old 6 px full-strength gold bar was the
+    -- widest thing on the navigation column and read as a second border.
+    bar:SetSize(3, height or 150)
+    bar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 6, 0)
     bar:EnableMouseWheel(true)
     app.Theme:PaintSurface(bar, "embedded")
     local thumb = bar:CreateTexture(nil, "OVERLAY")
-    thumb:SetWidth(6)
+    thumb:SetWidth(3)
     thumb:SetHeight(40)
     local color = accent()
-    thumb:SetColorTexture(color[1], color[2], color[3], 0.9)
+    thumb:SetColorTexture(color[1], color[2], color[3], 0.45)
     bar:SetThumbTexture(thumb)
     scroll.bar = bar
     scroll.thumb = thumb
@@ -771,4 +927,170 @@ function Controls:Scroll(parent, width, height)
         end
     end
     return scroll
+end
+
+----------------------------------------------------------------------
+-- 019: grouped containers
+----------------------------------------------------------------------
+-- A settings page used to be rows of controls printed directly on the window
+-- fill. These three primitives are what turn it into a page of grouped cards:
+-- `Card` is the group, `DualRow` puts two related controls on one line, and
+-- `Segmented` is the object/sub-page switch at the top of a page.
+
+-- A card: a rounded section surface with a title line, an optional subtitle and
+-- a body the caller fills. It reports its own body height so a page can lay out
+-- card after card without hardcoding how many rows each one holds.
+function Controls:Card(parent, title, subtitle, options)
+    options = options or {}
+    local card = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    card:EnableMouse(false)
+    -- `options.paddingX = 0` lets an existing row keep its exact width and its
+    -- x=0 anchor while still sitting on a card; the title keeps its own inset.
+    local padX = options.paddingX
+    if padX == nil then padX = 14 end
+    card.padding = { x = padX, titleInset = 14, top = 12, bottom = 12 }
+    app.Surface:Plate(card, "section")
+    card.title = app.Theme:Text(card, 13)
+    card.title:SetPoint("TOPLEFT", card.padding.titleInset, -card.padding.top)
+    card.title:SetText(title or "")
+    card.title:SetWordWrap(false)
+    local accent = app.Theme:Accent()
+    card.title:SetTextColor(accent[1], accent[2], accent[3])
+    card.subtitle = app.Type:Text(card, "micro")
+    card.subtitle:SetPoint("TOPLEFT", card.title, "BOTTOMLEFT", 0, -3)
+    card.subtitle:SetWidth(400)
+    card.subtitle:SetJustifyV("TOP")
+    card.subtitle:SetText(subtitle or "")
+    card.subtitle:SetShown((subtitle or "") ~= "")
+    -- The body is a real frame so children can be anchored to its top-left and
+    -- the card can measure what the caller added without reading every child.
+    local body = CreateFrame("Frame", nil, card)
+    card.body = body
+    card.headingHeight = 0
+    function card:SetTitle(text)
+        self.title:SetText(text or "")
+    end
+    function card:SetSubtitle(text)
+        text = text or ""
+        self.subtitle:SetText(text)
+        self.subtitle:SetShown(text ~= "")
+        self:Layout(0)
+    end
+    -- `bodyHeight` is the caller's own measure of the rows it placed. The card
+    -- grows to the title block plus that, and the body is anchored under the
+    -- last heading line.
+    function card:Layout(bodyHeight)
+        local top = self.padding.top
+        local heading = self.title:GetStringHeight()
+        if not heading or heading <= 0 then heading = 16 end
+        top = top + heading + 4
+        if self.subtitle:IsShown() then
+            local height = self.subtitle:GetStringHeight()
+            if not height or height <= 0 then height = 12 end
+            top = top + height + 4
+        end
+        self.headingHeight = top
+        body:ClearAllPoints()
+        body:SetPoint("TOPLEFT", self.padding.x, -top)
+        body:SetPoint("TOPRIGHT", -self.padding.x, -top)
+        body:SetHeight(math.max(1, bodyHeight or 0))
+        self:SetHeight(top + math.max(1, bodyHeight or 0) + self.padding.bottom)
+    end
+    card:Layout(0)
+    return card
+end
+
+-- Two controls on one line. The caller receives two equal-width parent frames
+-- and builds each control inside its own half, so a slider, a dropdown or a
+-- switch all measure from the same inner width without knowing about each
+-- other. `layout(innerWidth)` is called by the page once the card's width is
+-- known; it returns the row height so the card can reserve exactly that.
+function Controls:DualRow(card, options)
+    options = options or {}
+    local body = card and card.body or card
+    if not body then return nil end
+    local gap = options.gap or 18
+    local left = CreateFrame("Frame", nil, body)
+    local right = CreateFrame("Frame", nil, body)
+    left:SetPoint("TOPLEFT")
+    right:SetPoint("TOPLEFT", left, "TOPRIGHT", gap, 0)
+    function left:SetRowHeight(height)
+        self:SetHeight(math.max(1, height))
+        right:SetHeight(self:GetHeight())
+    end
+    local function layout(innerWidth)
+        local half = math.max(60, (innerWidth - gap) / 2)
+        left:SetSize(half, left:GetHeight())
+        right:SetSize(half, right:GetHeight())
+        return math.max(left:GetHeight(), right:GetHeight())
+    end
+    left.layout = layout
+    right.layout = layout
+    return left, right, layout
+end
+
+-- Segmented switch: a compact pill row where the selected item has a sliding
+-- highlight block. Items are { id =, label = } and `onSelect(id)` runs on a
+-- click; the caller owns the current id and re-calls SetSelected on refresh, so
+-- a profile change and a click resolve through the same path.
+function Controls:Segmented(parent, items, width, options)
+    options = options or {}
+    items = items or {}
+    local seg = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    seg:SetHeight(options.height or 26)
+    seg:SetWidth(width or 300)
+    app.Surface:Plate(seg, "field")
+    seg.items, seg.buttons, seg.current = items, {}, nil
+    local highlight = seg:CreateTexture(nil, "BACKGROUND", nil, -5)
+    local accent = app.Theme:Accent()
+    highlight:SetColorTexture(accent[1], accent[2], accent[3], 0.20)
+    highlight:Hide()
+    seg.highlight = highlight
+    local pad = 2
+    for index, item in ipairs(items) do
+        local button = self:Button(seg, item.label or item.id, 80, function()
+            if seg.current == item.id then return end
+            seg:SetSelected(item.id)
+            if options.onSelect then app:Call("controls/segmented", options.onSelect, item.id) end
+        end, { flat = true, height = (options.height or 26) - pad * 2 })
+        button.kind = "segment"
+        button.itemID = item.id
+        button.pulse = false
+        button.text:ClearAllPoints()
+        button.text:SetPoint("CENTER")
+        button:SetPoint("LEFT", seg, "LEFT", pad + (index - 1) * ((width or 300) - pad * 2) / math.max(1, #items), 0)
+        button:SetSize(((width or 300) - pad * 2) / math.max(1, #items), (options.height or 26) - pad * 2)
+        seg.buttons[index] = button
+    end
+    -- `skip` is the caller's refresh path: applying a selection without firing
+    -- onSelect is what lets a profile switch repaint the row without a loop.
+    function seg:SetSelected(id, skip)
+        self.current = id
+        local target
+        for index, button in ipairs(self.buttons) do
+            local active = button.itemID == id
+            button:SetSelected(active)
+            if active then target = button end
+        end
+        if not target then highlight:Hide(); return end
+        highlight:ClearAllPoints()
+        highlight:SetPoint("TOPLEFT", target, "TOPLEFT", 0, 0)
+        highlight:SetPoint("BOTTOMRIGHT", target, "BOTTOMRIGHT", 0, 0)
+        highlight:Show()
+        -- A short cross-fade instead of a hard jump; motion off settles at once
+        -- and never leaves the block transparent.
+        if not skip and app.Transitions and app.Transitions.MotionEnabled() then
+            highlight:SetAlpha(0)
+            app.Transitions:Fade(self, highlight, 1, 0.12, nil, "segment")
+        else
+            highlight:SetAlpha(1)
+            if app.Transitions then app.Transitions:Settle(self, "segment") end
+        end
+    end
+    function seg:SetEnabled(enabled)
+        for _, button in ipairs(self.buttons) do button:SetEnabled(enabled) end
+        self.disabled = enabled == false
+    end
+    if #items > 0 then seg:SetSelected(items[1].id, true) end
+    return seg
 end

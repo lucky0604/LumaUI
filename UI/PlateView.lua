@@ -23,6 +23,10 @@ app.PlateView = PlateView
 -- UnitHealthPercent into SetFormattedText. Nothing here compares, adds,
 -- formats or stores those values.
 
+-- The shipped geometry. 019 keeps these numbers as the fallback a profile that
+-- never opened the nameplate page reads, and `PlateView.Spec` becomes the live
+-- view of the stored values below, so the renderer, the sample card and the
+-- settings preview all draw from one table.
 local SPEC = {
     width = 112, height = 7,
     targetWidth = 120, targetHeight = 8,
@@ -32,12 +36,52 @@ local SPEC = {
     chip = 14,
     nameColumns = 22,
 }
-PlateView.Spec = SPEC
+PlateView.Defaults = SPEC
+
+-- The live spec. It is a real table that the settings page writes into through
+-- `PlateView:RefreshSpec()`, so a `Create` after a change already uses the new
+-- numbers and an existing view is re-laid by its owner.
+local LIVE = {}
+for key, value in pairs(SPEC) do LIVE[key] = value end
+PlateView.Spec = LIVE
+
+-- Re-reads the stored nameplate options into the live spec. Called on profile
+-- change and by the settings page after a write; never reads a unit.
+function PlateView:RefreshSpec()
+    local profile = app.Store and app.Store:Profile()
+    local source = profile and profile.ui and profile.ui.nameplates or {}
+    local function value(key, fallback, low, high)
+        local number = app.Capabilities.Plain(source[key], "number")
+        if not number then number = fallback end
+        return math.max(low, math.min(high, math.floor(number + 0.5)))
+    end
+    LIVE.width = value("width", SPEC.width, 60, 220)
+    LIVE.height = value("height", SPEC.height, 3, 20)
+    LIVE.targetWidth = value("targetWidth", SPEC.targetWidth, 60, 240)
+    LIVE.targetHeight = value("targetHeight", SPEC.targetHeight, 3, 24)
+    LIVE.nameColumns = value("nameColumns", SPEC.nameColumns, 8, 40)
+    LIVE.cast = value("castHeight", SPEC.cast, 4, 16)
+    -- The name row and the chip keep their proportions: they are parts of the
+    -- plate's own look, not separate settings.
+    LIVE.nameHeight = math.max(10, LIVE.height + 5)
+    LIVE.nameGap = SPEC.nameGap
+    LIVE.valueReserve = SPEC.valueReserve
+    LIVE.castGap = SPEC.castGap
+    LIVE.chip = SPEC.chip
+    LIVE.showPercent = source.showPercent ~= false
+    LIVE.targetIndicator = source.targetIndicator ~= false
+    LIVE.threatColor = source.threatColor == true
+    LIVE.nonTargetAlpha = (app.Capabilities.Plain(source.nonTargetAlpha, "number") or 75) / 100
+    return LIVE
+end
+-- The file may load before a profile exists (a reload builds the manifest in
+-- order); the shipped defaults are already in LIVE, so an early call is a no-op.
+if app.Store and app.Store.data then PlateView:RefreshSpec() end
 
 function PlateView:Metrics()
-    return { width = SPEC.width, height = SPEC.height,
-        targetWidth = SPEC.targetWidth, targetHeight = SPEC.targetHeight,
-        name = SPEC.nameHeight, cast = SPEC.cast, gap = SPEC.castGap }
+    return { width = LIVE.width, height = LIVE.height,
+        targetWidth = LIVE.targetWidth, targetHeight = LIVE.targetHeight,
+        name = LIVE.nameHeight, cast = LIVE.cast, gap = LIVE.castGap }
 end
 
 local function plainNumber(value)
@@ -95,19 +139,25 @@ local function applyColor(view, base)
 end
 
 -- Track size follows the target state. The frame is the track plus the name row
--- above it; the cast row hangs below and is not part of the frame's height.
+-- above it; the cast row hangs below and is not part of the frame's height. The
+-- layout is re-applied when the stored width or height changed as well, so a
+-- settings slider reaches a plate that was built earlier in the session.
 local function layout(view, isTarget)
-    local width = isTarget and SPEC.targetWidth or SPEC.width
-    local height = isTarget and SPEC.targetHeight or SPEC.height
-    if view.laidOutTarget == isTarget then return end
+    local width = isTarget and LIVE.targetWidth or LIVE.width
+    local height = isTarget and LIVE.targetHeight or LIVE.height
+    if view.laidOutTarget == isTarget and view.laidOutWidth == width and view.laidOutHeight == height then
+        return
+    end
     view.laidOutTarget = isTarget
+    view.laidOutWidth, view.laidOutHeight = width, height
     view.width, view.height = width, height
-    view.frame:SetSize(width, SPEC.nameHeight + SPEC.nameGap + height)
+    view.frame:SetSize(width, LIVE.nameHeight + LIVE.nameGap + height)
     view.health:SetSize(width, height)
-    view.name:SetWidth(width - SPEC.valueReserve)
-    view.cast:SetSize(width, SPEC.cast)
+    view.name:SetWidth(width - LIVE.valueReserve)
+    view.cast:SetSize(width, LIVE.cast)
     view.castText:SetWidth(width - 8)
 end
+PlateView.Layout = layout
 
 -- Builds one view under `parent`. `anchors.bar` is the client's health bar when
 -- the build exposes one: it is the anchor point and its size is not read.
@@ -115,7 +165,7 @@ function PlateView:Create(parent, anchors)
     if not parent or type(parent.CreateTexture) ~= "function" then return nil end
     local frame = CreateFrame("Frame", nil, parent)
     frame:EnableMouse(false)
-    frame:SetSize(SPEC.width, SPEC.nameHeight + SPEC.nameGap + SPEC.height)
+    frame:SetSize(LIVE.width, LIVE.nameHeight + LIVE.nameGap + LIVE.height)
     local anchorBar = anchors and anchors.bar
     if anchorBar then
         frame:SetPoint("BOTTOM", anchorBar, "BOTTOM", 0, 0)
@@ -131,7 +181,7 @@ function PlateView:Create(parent, anchors)
     end
 
     local health = CreateFrame("StatusBar", nil, frame)
-    health:SetSize(SPEC.width, SPEC.height)
+    health:SetSize(LIVE.width, LIVE.height)
     health:SetPoint("BOTTOM", frame, "BOTTOM", 0, 0)
     health:SetStatusBarTexture(app.Theme.media.combatFill)
     health:SetMinMaxValues(0, 1)
@@ -154,16 +204,16 @@ function PlateView:Create(parent, anchors)
     -- Name row. The name takes the left side and stops short of the value column,
     -- so a long Chinese name is cut before it can touch the percentage.
     local name = app.Theme:Text(frame, 10)
-    name:SetPoint("BOTTOMLEFT", health, "TOPLEFT", 0, SPEC.nameGap)
-    name:SetSize(SPEC.width - SPEC.valueReserve, SPEC.nameHeight)
+    name:SetPoint("BOTTOMLEFT", health, "TOPLEFT", 0, LIVE.nameGap)
+    name:SetSize(LIVE.width - LIVE.valueReserve, LIVE.nameHeight)
     name:SetJustifyH("LEFT")
     name:SetWordWrap(false)
     name:SetText("")
     if type(name.SetShadowOffset) == "function" then pcall(name.SetShadowOffset, name, 1, -1) end
 
     local value = app.Theme:Text(frame, 9)
-    value:SetPoint("BOTTOMRIGHT", health, "TOPRIGHT", 0, SPEC.nameGap)
-    value:SetSize(SPEC.valueReserve, SPEC.nameHeight)
+    value:SetPoint("BOTTOMRIGHT", health, "TOPRIGHT", 0, LIVE.nameGap)
+    value:SetSize(LIVE.valueReserve, LIVE.nameHeight)
     value:SetJustifyH("RIGHT")
     value:SetWordWrap(false)
     value:SetText("")
@@ -173,15 +223,15 @@ function PlateView:Create(parent, anchors)
     local chip = frame:CreateTexture(nil, "OVERLAY")
     local mark = app.Theme.colors.text
     chip:SetColorTexture(mark[1], mark[2], mark[3], 0.98)
-    chip:SetSize(SPEC.chip, 2)
+    chip:SetSize(LIVE.chip, 2)
     chip:SetPoint("BOTTOMLEFT", health, "TOPLEFT", 0, 0)
     chip:Hide()
 
     -- Cast row: its own bar, own text and own duration values; it never mixes
     -- with the health update and only appears while a readable cast exists.
     local cast = CreateFrame("Frame", nil, frame)
-    cast:SetSize(SPEC.width, SPEC.cast)
-    cast:SetPoint("TOP", health, "BOTTOM", 0, -SPEC.castGap)
+    cast:SetSize(LIVE.width, LIVE.cast)
+    cast:SetPoint("TOP", health, "BOTTOM", 0, -LIVE.castGap)
     cast:Hide()
     local castBar = CreateFrame("StatusBar", nil, cast)
     castBar:SetAllPoints()
@@ -193,7 +243,7 @@ function PlateView:Create(parent, anchors)
     castBack:SetColorTexture(rail[1], rail[2], rail[3], rail[4])
     local castText = app.Theme:Text(cast, 9)
     castText:SetPoint("CENTER", castBar, "CENTER", 0, 0)
-    castText:SetSize(SPEC.width - 8, SPEC.cast)
+    castText:SetSize(LIVE.width - 8, LIVE.cast)
     castText:SetJustifyH("CENTER")
     castText:SetWordWrap(false)
 
@@ -202,7 +252,7 @@ function PlateView:Create(parent, anchors)
         chip = chip, edge = edge,
         cast = cast, castBar = castBar, castText = castText,
         parent = parent, anchors = anchors or {}, unit = nil,
-        width = SPEC.width, height = SPEC.height, laidOutTarget = false,
+        width = LIVE.width, height = LIVE.height, laidOutTarget = false,
     }
     frame.view = view
     return view
@@ -276,7 +326,7 @@ function PlateView:SetName(view, text)
         view.name:SetText("")
         return false
     end
-    view.name:SetText(clip(text, SPEC.nameColumns))
+    view.name:SetText(clip(text, LIVE.nameColumns))
     return true
 end
 
@@ -284,7 +334,14 @@ function PlateView:SetTarget(view, isTarget)
     if not view then return end
     isTarget = isTarget == true
     layout(view, isTarget)
-    if isTarget then view.chip:Show() else view.chip:Hide() end
+    local indicator = LIVE.targetIndicator ~= false
+    if isTarget and indicator then view.chip:Show() else view.chip:Hide() end
+    -- The non-target plate is drawn quieter so the current target reads first.
+    -- The alpha is a stored percentage and touches only the own layer.
+    local dim = (LIVE.nonTargetAlpha or 0.75)
+    if type(view.frame.SetAlpha) == "function" then
+        view.frame:SetAlpha(isTarget and 1 or dim)
+    end
 end
 
 function PlateView:SetColor(view, base)
@@ -304,16 +361,26 @@ local CAST_COLORS = {
 function PlateView:SetCast(view, state)
     if not view then return false end
     if type(state) ~= "table" then self:ClearCast(view); return false end
-    local elapsed, duration = plainNumber(state.elapsed), plainNumber(state.duration)
-    if not elapsed or not duration or duration <= 0 then
-        self:ClearCast(view)
-        return false
-    end
     local key = state.channel and "channel" or (state.interruptible == false and "uninterruptible" or "interruptible")
     local color = CAST_COLORS[key]
     view.castBar:SetStatusBarColor(color[1], color[2], color[3], 1)
-    view.castBar:SetMinMaxValues(0, duration)
-    view.castBar:SetValue(elapsed)
+    -- A 12.1.5 duration object goes straight into the widget's own entry point:
+    -- the plate then re-channels a restricted cast without reading a second.
+    if state.durationObject and type(view.castBar.SetTimerDuration) == "function" then
+        view.castBar:SetMinMaxValues(0, 1)
+        local token = _G.Enum and _G.Enum.StatusBarInterpolation
+            and _G.Enum.StatusBarInterpolation.ExponentialEaseOut or nil
+        pcall(view.castBar.SetTimerDuration, view.castBar, state.durationObject, token, nil)
+        view.castBar:SetValue(1)
+    else
+        local elapsed, duration = plainNumber(state.elapsed), plainNumber(state.duration)
+        if not elapsed or not duration or duration <= 0 then
+            self:ClearCast(view)
+            return false
+        end
+        view.castBar:SetMinMaxValues(0, duration)
+        view.castBar:SetValue(elapsed)
+    end
     local label = plainText(state.name) or ""
     view.castText:SetText(clip(label, 18))
     view.cast:Show()

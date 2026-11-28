@@ -218,14 +218,16 @@ end
 
 -- Keep the window inside the screen at large UI scales or small windows: the
 -- frame is scaled down, never past 1, so the page width and the header stay
--- intact. Called from Open and on the two display events.
+-- intact. The reference sizes come from the window itself (880x600 in 019), so
+-- a future resize does not need a second number edited here. Called from Open
+-- and on the two display events.
 function SettingsUI:FitToScreen()
     local frame = self.frame
     if not frame then return end
     local width = Plain(UIParent:GetWidth(), "number")
     local height = Plain(UIParent:GetHeight(), "number")
     if not width or not height or width <= 0 or height <= 0 then return end
-    local fit = math.min(1, (width * 0.96) / 760, (height * 0.94) / 574)
+    local fit = math.min(1, (width * 0.96) / (self.WIDTH or 880), (height * 0.94) / (self.HEIGHT or 600))
     fit = math.max(0.5, fit)
     if frame:GetScale() ~= fit then frame:SetScale(fit) end
     self.fitScale = fit

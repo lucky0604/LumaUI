@@ -192,7 +192,7 @@ local function hostState(self, id)
     self.state = self.state or {}
     local state = self.state[id]
     if not state then
-        state = { alpha = 0, target = 0, lastOver = 0 }
+        state = { alpha = 0, target = 0, lastOver = 0, resting = 0 }
         self.state[id] = state
     end
     return state
@@ -735,14 +735,32 @@ end
 -- period because the pointer was seen on another bar: a neighbour starts to
 -- fade as soon as the pointer is on the new one, while leaving the whole stack
 -- keeps its 0.20 s.
-local function advance(state, over, pinned, now, instant, leftStack)
+-- The resting alpha of a bar nobody is pointing at. `idle` is the stored
+-- percentage (0..100, absent = the old behaviour of a fully hidden bar), so a
+-- player who wants to see a dim row can raise it without keeping every bar lit.
+local function idleAlpha(id)
+    local list = app.Store and app.Store:Profile().ui.actionBarIdleAlpha
+    local value = type(list) == "table" and list[id] or nil
+    value = app.Capabilities.Plain(value, "number")
+    if not value then return 0 end
+    return math.max(0, math.min(1, value / 100))
+end
+
+local function advance(state, over, pinned, now, instant, leftStack, resting)
+    resting = resting or 0
     if over or pinned then
         if over then state.lastOver = now end
         state.target = 1
-    elseif state.target == 1 then
-        if leftStack or now - (state.lastOver or 0) > HIDE_DELAY then state.target = 0 end
+    elseif state.target == 1 or state.resting ~= resting then
+        if state.resting ~= resting then
+            -- A changed resting alpha applies at once when the bar is already
+            -- quiet; a bar mid-fade simply carries on toward the new floor.
+            state.resting = resting
+            if state.alpha and state.alpha <= resting + 1e-6 then state.alpha = resting end
+        end
+        if leftStack or now - (state.lastOver or 0) > HIDE_DELAY then state.target = resting end
     end
-    local alpha = state.alpha or 0
+    local alpha = state.alpha or resting
     if alpha ~= state.target then
         if instant then
             state.alpha = state.target
@@ -750,9 +768,9 @@ local function advance(state, over, pinned, now, instant, leftStack)
         end
         -- Linear once per tick: the fade in finishes in FADE_IN and the fade out
         -- in FADE_OUT, instead of approaching the target forever.
-        local duration = state.target == 1 and FADE_IN or FADE_OUT
+        local duration = state.target > alpha and FADE_IN or FADE_OUT
         local step = FADE_STEP / duration
-        if state.target == 1 then
+        if state.target > alpha then
             alpha = math.min(state.target, alpha + step)
         else
             alpha = math.max(state.target, alpha - step)
@@ -787,7 +805,9 @@ local function step(self)
         state.mode = app.BarModel:HoverMode(def.id)
         local pinned = state.mode == "always"
         local leftStack = hovered ~= nil and hovered ~= def.id and not over[def.id]
-        if advance(state, over[def.id], pinned, now, instant, leftStack) then changed = true end
+        local resting = pinned and 1 or idleAlpha(def.id)
+        state.resting = resting
+        if advance(state, over[def.id], pinned, now, instant, leftStack, resting) then changed = true end
     end
     if changed then
         for _, def in ipairs(BARS) do

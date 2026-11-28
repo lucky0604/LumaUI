@@ -32,6 +32,10 @@ Surface.media = MEDIA
 local ALIASES = {
     card = "window", raised = "button", inset = "embedded",
     hud = "hud", chat = "chat", chatActive = "chatActive",
+    -- 019: the settings hierarchy. A page group is a "section", the well inside
+    -- it a "field", and the live sample plinth a "preview". They are their own
+    -- roles, not aliases of an existing one, because each carries a rim.
+    section = "section", field = "field", preview = "preview",
 }
 local ROLES = {}
 for name, alias in pairs(ALIASES) do
@@ -40,6 +44,7 @@ for name, alias in pairs(ALIASES) do
         color = spec.color,
         opacity = spec.opacity,
         shadow = name == "card",
+        rim = spec.rim == true,
     }
 end
 Surface.roles = ROLES
@@ -177,6 +182,13 @@ function Surface:Plate(frame, roleName)
     if not sliced and frame.lumaShadow then frame.lumaShadow:Hide() end
     align(plate)
     frame.lumaSurfaceRole = name
+    -- A card, a group and a preview plinth carry the same two hairline bands
+    -- whether they nine-slice or fall back to a flat fill: the rim is the
+    -- material, not the corner. Roles without one hide whatever an earlier
+    -- paint on the same frame left behind.
+    if app.Theme and type(app.Theme.Rim) == "function" then
+        app.Theme:Rim(frame, role.rim == true)
+    end
     return frame
 end
 

@@ -9,6 +9,13 @@ local Theme = {
         -- and a recessed well inside it. "embedded" is clearly darker than the
         -- panel, which is what "inset" means.
         embedded = { 0.020, 0.032, 0.052 },
+        -- 019: the fourth step a settings page needs. A card sits one value
+        -- above the window it floats on, a field is a well inside that card and
+        -- the preview stage is the darkest of the four so rendered samples read
+        -- as objects on a plinth instead of floating labels.
+        section = { 0.048, 0.065, 0.095 },
+        field = { 0.027, 0.035, 0.051 },
+        preview = { 0.031, 0.043, 0.063 },
         line = { 0.32, 0.30, 0.27 }, text = { 0.96, 0.94, 0.89 }, muted = { 0.62, 0.62, 0.58 },
         pearl = { 0.95, 0.82, 0.55 },
         ocean = { 0.37, 0.86, 0.83 }, ember = { 1, 0.68, 0.32 },
@@ -49,6 +56,12 @@ app.Theme = Theme
 -- not from a border around every row. "button" lost its edge too — an idle
 -- control is a flat patch, and the accent hairline is a state the control draws
 -- itself, which is what stops a settings page from reading as a grid of boxes.
+-- 019 adds the three roles the settings pages were missing: a grouped card
+-- inside the window, the field well inside that card, and the preview stage the
+-- live samples are drawn on. Each carries the same soft top rim so the four
+-- levels read as light falling on stacked materials rather than as four flat
+-- rectangles. A rim is decoration, not a border: it never draws a left or right
+-- edge, which is what keeps a settings page from becoming a grid of boxes.
 local SURFACES = {
     window = { fill = "panel", color = "surface", edge = true, opacity = "windowOpacity" },
     embedded = { fill = "inset", color = "embedded", edge = false, opacity = "windowOpacity" },
@@ -56,8 +69,20 @@ local SURFACES = {
     hud = { fill = "panel", color = "surface", edge = false, opacity = "hudOpacity" },
     chat = { fill = "panel", color = "surface", edge = false, opacity = "chatOpacity" },
     chatActive = { fill = "flat", color = "raised", edge = false, opacity = "chatActiveOpacity" },
+    -- Window > card > field, plus the preview plinth. `shadow` is still only on
+    -- the window role: a card is defined by its rim, not by its own drop shadow,
+    -- and a dozen floating shadows is what makes a page look noisy.
+    section = { fill = "panel", color = "section", edge = false,
+        opacity = "windowOpacity", rim = true },
+    field = { fill = "inset", color = "field", edge = false, opacity = "windowOpacity", rim = true },
+    preview = { fill = "inset", color = "preview", edge = false, opacity = "windowOpacity", rim = true },
 }
 Theme.surfaceRoles = SURFACES
+
+-- The two hairline bands of a material: a warm white 1-px top rim where the
+-- light lands and a darker 1-px bottom line where it leaves. Both are fractions
+-- of one physical pixel, so they stay hairlines at 200% UI scale too.
+Theme.rim = { topAlpha = 0.08, bottomAlpha = 0.38 }
 
 -- Text roles: size plus semantic colour. Callers keep owning alignment,
 -- wrapping and width, so a role never forces a layout.
@@ -246,7 +271,88 @@ function Theme:PaintSurface(frame, roleName)
     frame.lumaSurfaceRole = resolved
     -- The runtime wash belongs to the legacy Panel role only.
     if frame.lumaWash then frame.lumaWash:Hide() end
+    self:Rim(frame, role.rim == true)
     return frame
+end
+
+-- The soft top and bottom bands that give a stacked material its edge. Called
+-- by PaintSurface for the rim roles and by Surface:Plate, so a nine-sliced card
+-- and a flat fallback card carry the identical hairline. `wanted == false`
+-- hides whatever an earlier paint left behind instead of leaving a bright line
+-- on a role that must stay edgeless. Both bands are one physical pixel: the
+-- client reports 1 at 100% and 0.5 at 200%, so the hairline never becomes a
+-- two-pixel frame on a high-DPI screen.
+function Theme:Rim(frame, wanted)
+    if not frame or type(frame.CreateTexture) ~= "function" then return end
+    local top, bottom = frame.lumaRimTop, frame.lumaRimBottom
+    if not wanted then
+        if top then top:Hide() end
+        if bottom then bottom:Hide() end
+        return
+    end
+    if not top then
+        -- Tracked so a delete-on-release action can find them, exactly like the
+        -- plate. They sit above the plate and below every control.
+        top = frame:CreateTexture(nil, "BORDER", nil, 2)
+        frame.lumaRimTop = top
+        bottom = frame:CreateTexture(nil, "BORDER", nil, 2)
+        frame.lumaRimBottom = bottom
+    end
+    local thickness = app.Pixel:Pixels(1, frame)
+    top:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
+    top:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -1, -1)
+    top:SetHeight(thickness)
+    top:SetColorTexture(1, 0.97, 0.90, self.rim.topAlpha)
+    bottom:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 1, 1)
+    bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
+    bottom:SetHeight(thickness)
+    local dark = self.colors.surface
+    bottom:SetColorTexture(dark[1] * 0.2, dark[2] * 0.2, dark[3] * 0.2, self.rim.bottomAlpha)
+    top:Show()
+    bottom:Show()
+end
+
+-- Native status-bar interpolation (019). The client owns the tween, so a health
+-- or power bar crosses its new value without a Lua frame and without ever
+-- handing a restricted number to arithmetic. `Enum.StatusBarInterpolation` is
+-- asked for by name, never assumed: a build without it, motion turned off, or a
+-- bar that refuses the extra argument all fall back to the plain one-argument
+-- call, so the value still lands exactly where it belongs.
+local function interpolationToken(wantSmooth)
+    if wantSmooth == false then return nil end
+    local transitions = app.Transitions
+    if transitions and type(transitions.MotionEnabled) == "function" and not transitions.MotionEnabled() then
+        return nil
+    end
+    local values = _G.Enum and _G.Enum.StatusBarInterpolation
+    local token = type(values) == "table" and values.ExponentialEaseOut or nil
+    if type(token) ~= "number" then return nil end
+    return token
+end
+Theme.interpolationToken = interpolationToken
+
+-- One writer for every combat status bar. `immediate` forces the client's own
+-- zero-time mode, which is what a fresh frame, a reset or a reduced-motion
+-- session needs; everything else eases. The pcall is the reason a refused
+-- interpolation cannot leave a bar frozen: the plain call runs afterwards.
+function Theme:SetBarValue(bar, value, immediate)
+    if not bar or type(bar.SetValue) ~= "function" then return false end
+    local token = interpolationToken(not immediate)
+    if token then
+        local ok = pcall(bar.SetValue, bar, value, token)
+        if ok then return true end
+    end
+    return (pcall(bar.SetValue, bar, value))
+end
+
+function Theme:SetBarMinMax(bar, minimum, maximum, immediate)
+    if not bar or type(bar.SetMinMaxValues) ~= "function" then return false end
+    local token = interpolationToken(not immediate)
+    if token then
+        local ok = pcall(bar.SetMinMaxValues, bar, minimum, maximum, token)
+        if ok then return true end
+    end
+    return (pcall(bar.SetMinMaxValues, bar, minimum, maximum))
 end
 
 function Theme:TextRole(parent, roleName)

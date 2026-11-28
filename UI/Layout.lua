@@ -1323,6 +1323,28 @@ Layout.presetOverlays = {}
 -- the main columns without a preset-only 12x2 shape or a hardcoded width.
 local UNIT_MAIN_SIDES = { unit_player = -1, unit_target = 1 }
 
+-- 019: the main unit pair is geometry-owned. Its x comes from the measured
+-- cooldown block and its y from the applied first skill row, so a preset that
+-- hardcoded a fraction (-0.213) landed the frame a pixel or two off the icon row
+-- it is supposed to be level with, and then froze that error as a saved
+-- position. A component that owns a frame's geometry registers the exact centre
+-- here; the preset asks for it instead of writing its own number.
+Layout.geometryOwned = {}
+function Layout:OwnGeometry(id, resolver)
+    if type(resolver) == "function" then self.geometryOwned[id] = resolver
+    else self.geometryOwned[id] = nil end
+end
+
+function Layout:OwnedOffset(id, fallbackX, fallbackY)
+    local resolver = self.geometryOwned[id]
+    if type(resolver) ~= "function" then return nil end
+    local ok, x, y = pcall(resolver, id)
+    if not ok then return nil end
+    x, y = plainNumber(x), plainNumber(y)
+    if not x or not y then return nil end
+    return x, y
+end
+
 function Layout:Presets()
     local list = {}
     for id, preset in pairs(self.presets) do
@@ -1334,6 +1356,11 @@ end
 
 function Layout:PresetOffset(id, spec)
     local scale = self:Scale(id)
+    -- A geometry-owned frame (the main unit pair, the resource rail) answers
+    -- with the exact centre it is already using, so a preset can never save a
+    -- slightly different number for the same slot.
+    local ownedX, ownedY = self:OwnedOffset(id)
+    if ownedX then return ownedX, ownedY end
     local x = (spec[1] or 0) * UIParent:GetWidth() / scale
     local side = UNIT_MAIN_SIDES[id]
     if side then

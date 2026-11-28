@@ -334,7 +334,44 @@ end
 -- Reads a cast state as plain numbers only. The client reports times in
 -- milliseconds; if any of the tuple values is restricted this returns nil and
 -- the native cast bar stays visible for that cast.
+--
+-- 019: a 12.1.5 duration object is the preferred source when the build has one.
+-- The object is returned through `durationObject` and drawn by the plate's own
+-- widget entry point, so a restricted cast still shows a bar: nothing here reads
+-- or compares the seconds. A cast with no object falls back to the tuple path.
 local function readCast(unit)
+    if type(UnitCastingDuration) == "function" then
+        local ok, duration = pcall(UnitCastingDuration, unit)
+        if ok and duration ~= nil and not app.Capabilities.IsSecret(duration)
+            and type(duration.GetRemainingDuration) == "function" then
+            local name, texture
+            if type(UnitCastingInfo) == "function" then
+                local called, castName, text, icon = pcall(UnitCastingInfo, unit)
+                if called and castName then
+                    name = app.Capabilities.Plain(text, "string") or app.Capabilities.Plain(castName, "string")
+                    texture = app.Capabilities.Plain(icon, "string")
+                end
+            end
+            return { durationObject = duration, name = name, icon = texture,
+                channel = false, interruptible = true }
+        end
+        if type(UnitChannelDuration) == "function" then
+            local called, channel = pcall(UnitChannelDuration, unit)
+            if called and channel ~= nil and not app.Capabilities.IsSecret(channel)
+                and type(channel.GetRemainingDuration) == "function" then
+                local name, texture
+                if type(UnitChannelInfo) == "function" then
+                    local read, channelName, text, icon = pcall(UnitChannelInfo, unit)
+                    if read and channelName then
+                        name = app.Capabilities.Plain(text, "string") or app.Capabilities.Plain(channelName, "string")
+                        texture = app.Capabilities.Plain(icon, "string")
+                    end
+                end
+                return { durationObject = channel, name = name, icon = texture,
+                    channel = true, interruptible = true }
+            end
+        end
+    end
     local now = type(GetTime) == "function" and select(2, pcall(GetTime)) or nil
     now = plainNumber(now)
     if not now then return nil end
@@ -993,7 +1030,7 @@ component = app:RegisterComponent({ id = "nameplates", label = "nameplates", def
         self.plates = self.plates or {}
         local ui = app.Store:Profile().ui
         self.owned = ui.plateOwned == true
-        self.plateCast = ui.plateCast == true
+        self.plateCast = ui.plateCast ~= false
         self.direct = ui.plateDirect ~= false
         self.nativeMode = ui.plateNative == "keep" and "keep" or "hide"
         -- Safe draw updates run immediately: a colour/texture write on a plate we
@@ -1066,7 +1103,7 @@ component = app:RegisterComponent({ id = "nameplates", label = "nameplates", def
     Refresh = function(self)
         local ui = app.Store:Profile().ui
         self.owned = ui.plateOwned == true
-        self.plateCast = ui.plateCast == true
+        self.plateCast = ui.plateCast ~= false
         self.direct = ui.plateDirect ~= false
         self.nativeMode = ui.plateNative == "keep" and "keep" or "hide"
         scan(self)
@@ -1132,6 +1169,26 @@ local function cvar(name)
     if type(GetCVar) ~= "function" then return nil end
     local ok, value = pcall(GetCVar, name)
     return ok and app.Capabilities.Plain(value, "string") or nil
+end
+
+-- 019: one writer for the settings page. Every nameplate option goes through
+-- here so the page, `/luma plates` and a profile change share one path; the
+-- stored value is written first, then the live spec and the current views are
+-- refreshed. `plateCast` and `plateOwned` are the two switches that also start or
+-- stop the own layer.
+function component:SetOption(key, value)
+    if type(key) ~= "string" then return false end
+    if key == "plateCast" or key == "plateOwned" then
+        if not app.Store:Set("ui", key, value == true) then return false end
+        if self.running then self:Refresh() end
+        return true
+    end
+    local spec = app.Store.Clone(app.Store:Profile().ui.nameplates or {})
+    spec[key] = value
+    if not app.Store:Set("ui", "nameplates", spec) then return false end
+    if app.PlateView and app.PlateView.RefreshSpec then app.PlateView:RefreshSpec() end
+    if self.running then self:Refresh() end
+    return true
 end
 
 -- Explicit, player-requested change of the client's own nameplate setting. The
